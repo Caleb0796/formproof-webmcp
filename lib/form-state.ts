@@ -1,4 +1,8 @@
-import type { ApplyResult, PdfFieldValue } from './pdf-engine.ts';
+import type {
+  ApplyResult,
+  PdfFieldDescriptor,
+  PdfFieldValue,
+} from './pdf-engine.ts';
 
 export type FormFieldType =
   | 'text'
@@ -37,6 +41,37 @@ export interface FormFieldDefinition {
   readonly multiSelect?: boolean;
   readonly maxLength?: number;
   readonly sourceValue: FormFieldValue;
+}
+
+const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/gi;
+
+export function createFormFieldDefinitionFromPdf(
+  field: PdfFieldDescriptor,
+): FormFieldDefinition {
+  const tooltip = field.tooltip?.replace(HUMAN_ONLY_MARKER, '').trim();
+  const label = tooltip?.split(/\s+[–—-]\s+/u)[0]?.trim() || field.name;
+  const unsupported = field.type === 'unsupported';
+  return {
+    name: field.name,
+    label,
+    type:
+      field.type === 'option_list'
+        ? 'option-list'
+        : field.type === 'unsupported'
+          ? 'text'
+          : field.type,
+    required: field.required,
+    readOnly: field.readOnly || unsupported,
+    humanOnly: field.humanOnly || unsupported,
+    ...(field.type === 'dropdown' || field.type === 'option_list'
+      ? { multiSelect: field.multiSelect }
+      : {}),
+    ...(field.options.length > 0 ? { options: [...field.options] } : {}),
+    ...(field.maxLength === null ? {} : { maxLength: field.maxLength }),
+    sourceValue: Array.isArray(field.current)
+      ? [...field.current]
+      : field.current,
+  };
 }
 
 export interface FieldProvenance {

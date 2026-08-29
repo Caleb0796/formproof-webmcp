@@ -4,27 +4,41 @@ import test from 'node:test';
 
 import {
   approveDraftFromUi,
+  createFormFieldDefinitionFromPdf,
   createFormState,
   exportApprovedPdfFromUi,
   getReleaseGate,
   stageFieldUpdates,
   validateDraft,
-  type FormFieldDefinition,
-  type FormFieldType,
   type FormFieldValue,
   type FormState,
   // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
 } from '../lib/form-state.ts';
 import type {
   ApplyResult,
-  PdfFieldDescriptor,
   PdfFieldValue,
   PdfInspection,
 } from '../lib/pdf-engine';
+import type {
+  FormProofToolResponse,
+  FormProofWebMcpAdapter,
+} from '../lib/webmcp';
 
 const { inspectPdf } = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
 )) as typeof import('../lib/pdf-engine');
+const {
+  FORMPROOF_MAX_RESPONSE_BYTES,
+  FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+  createFieldChoiceCursor,
+  createFieldEvidenceToolData,
+  createFormContextToolData,
+  createFormProofToolDefinitions,
+  parseFieldChoiceCursor,
+  parseFormContextCursor,
+} = (await import(
+  new URL('../lib/webmcp.ts', import.meta.url).href
+)) as typeof import('../lib/webmcp');
 
 const FIELD = {
   legalName: 'frm.q7f1',
@@ -53,40 +67,17 @@ interface CompletedDemo extends StagedDemo {
   releasedState: FormState;
 }
 
-function stateFieldType(field: PdfFieldDescriptor): FormFieldType {
-  if (field.type === 'option_list') return 'option-list';
-  if (field.type === 'unsupported') {
-    throw new TypeError(`Unsupported fixture field: ${field.name}.`);
-  }
-  return field.type;
-}
-
-function stateFieldLabel(field: PdfFieldDescriptor): string {
-  const tooltip = field.tooltip
-    ?.replace(/\[\s*HUMAN[_ -]?ONLY\s*\]/i, '')
-    .trim();
-  return tooltip || field.name;
-}
-
-function cloneStateValue(value: PdfFieldValue): FormFieldValue {
-  return Array.isArray(value) ? [...value] : value;
-}
-
-function mapField(field: PdfFieldDescriptor): FormFieldDefinition {
-  return {
-    name: field.name,
-    label: stateFieldLabel(field),
-    type: stateFieldType(field),
-    required: field.required,
-    readOnly: field.readOnly,
-    humanOnly: field.humanOnly,
-    ...(field.options.length === 0 ? {} : { options: [...field.options] }),
-    ...(field.type === 'dropdown' || field.type === 'option_list'
-      ? { multiSelect: field.multiSelect }
-      : {}),
-    ...(field.maxLength === null ? {} : { maxLength: field.maxLength }),
-    sourceValue: cloneStateValue(field.current),
+interface AuthoredEvalCall {
+  functionName: string;
+  arguments: { cursor?: string; limit?: number; fieldNames?: string[] };
+  mockOutput: {
+    data: unknown;
   };
+}
+
+interface AuthoredEvalCase {
+  name: string;
+  expectedCall: AuthoredEvalCall[];
 }
 
 function draftValues(state: FormState): Record<string, PdfFieldValue> {
@@ -99,6 +90,28 @@ function draftValues(state: FormState): Record<string, PdfFieldValue> {
   return values;
 }
 
+function serializedBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+function fieldCombinations(
+  fieldNames: readonly string[],
+  maximumSize: number,
+): string[][] {
+  const combinations: string[][] = [];
+  const visit = (start: number, selected: string[]) => {
+    if (selected.length > 0) combinations.push([...selected]);
+    if (selected.length === maximumSize) return;
+    for (let index = start; index < fieldNames.length; index += 1) {
+      selected.push(fieldNames[index]);
+      visit(index + 1, selected);
+      selected.pop();
+    }
+  };
+  visit(0, []);
+  return combinations;
+}
+
 async function loadStagedDemo(): Promise<StagedDemo> {
   const source = new Uint8Array(
     await readFile(new URL('../public/demo-form.pdf', import.meta.url)),
@@ -106,13 +119,13 @@ async function loadStagedDemo(): Promise<StagedDemo> {
   const inspection = await inspectPdf(source);
   const initialState = await createFormState(
     {
-      fileName: 'demo-form.pdf',
+      fileName: 'residential-support-intake.pdf',
       sourceHash: inspection.sourceHash,
       byteLength: source.byteLength,
       pageCount: inspection.pageCount,
       loadedAt: '2026-08-29T19:00:00.000Z',
     },
-    inspection.fields.map(mapField),
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
   );
 
   const staged = await stageFieldUpdates(initialState, {
@@ -176,6 +189,584 @@ async function loadStagedDemo(): Promise<StagedDemo> {
     stagedState: staged.state,
   };
 }
+
+void test('keeps real WebMCP discovery and evidence atomic under the target budget', async () => {
+  const { inspection, initialState } = await loadStagedDemo();
+  const adapter: FormProofWebMcpAdapter = {
+    getFormContext(input) {
+      const parsed =
+        input.cursor === undefined
+          ? ({ ok: true, offset: 0 } as const)
+          : parseFormContextCursor(
+              input.cursor,
+              initialState.source.sourceHash,
+            );
+      assert.equal(parsed.ok, true);
+      if (!parsed.ok) throw new Error('Generated context cursor was invalid.');
+      return {
+        ok: true,
+        stateVersion: initialState.stateVersion,
+        sourceHash: initialState.source.sourceHash,
+        data: createFormContextToolData(
+          initialState,
+          inspection,
+          parsed.offset,
+          input.limit,
+        ),
+      };
+    },
+    getFieldEvidence(input) {
+      return {
+        ok: true,
+        stateVersion: initialState.stateVersion,
+        sourceHash: initialState.source.sourceHash,
+        data: createFieldEvidenceToolData(
+          initialState,
+          inspection,
+          input.fieldNames,
+        ),
+      };
+    },
+    stageFormValues: async () => {
+      throw new Error('not used');
+    },
+    validateFillPlan: async () => {
+      throw new Error('not used');
+    },
+    startFillReview: async () => {
+      throw new Error('not used');
+    },
+  };
+  const tools = createFormProofToolDefinitions(
+    adapter,
+    () => undefined,
+    new AbortController().signal,
+  );
+  const context = tools.find(({ name }) => name === 'get_form_context');
+  const evidence = tools.find(({ name }) => name === 'get_field_evidence');
+  assert.ok(context);
+  assert.ok(evidence);
+
+  const discoveredNames: string[] = [];
+  let cursor: string | null = null;
+  do {
+    const response: FormProofToolResponse = await context.execute(
+      cursor === null ? {} : { cursor },
+    );
+    assert.equal(response.ok, true);
+    if (!response.ok) throw new Error('Real context projection failed.');
+    assert.equal(response.outputTruncated, false);
+    assert.ok(
+      serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+      `context response used ${serializedBytes(response)} bytes`,
+    );
+    const data = response.data as {
+      fields: Array<Record<string, unknown>>;
+      pagination: { returned: number; nextCursor: string | null };
+    };
+    assert.equal(data.pagination.returned, data.fields.length);
+    for (const field of data.fields) {
+      assert.equal(typeof field.name, 'string');
+      assert.equal(typeof field.label, 'string');
+      assert.equal(typeof field.type, 'string');
+      assert.equal(typeof field.required, 'boolean');
+      assert.equal(typeof field.readOnly, 'boolean');
+      assert.equal(typeof field.humanOnly, 'boolean');
+      discoveredNames.push(field.name as string);
+    }
+    cursor = data.pagination.nextCursor;
+  } while (cursor !== null);
+
+  assert.deepEqual(
+    discoveredNames,
+    inspection.fields.map(({ name }) => name),
+  );
+  assert.equal(new Set(discoveredNames).size, discoveredNames.length);
+
+  const evidenceResponse = await evidence.execute({
+    expectedStateVersion: initialState.stateVersion,
+    expectedSourceHash: initialState.source.sourceHash,
+    fieldNames: [FIELD.legalName, FIELD.email, FIELD.consent],
+  });
+  assert.equal(evidenceResponse.ok, true);
+  if (!evidenceResponse.ok) throw new Error('Real evidence projection failed.');
+  assert.equal(evidenceResponse.outputTruncated, false);
+  assert.ok(
+    serializedBytes(evidenceResponse) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+    `evidence response used ${serializedBytes(evidenceResponse)} bytes`,
+  );
+  const evidenceData = evidenceResponse.data as {
+    untrustedPdfContent: boolean;
+    fields: Array<{
+      name: string;
+      rect: unknown;
+      constraints: {
+        choices: Array<{ value: string; label: string }>;
+      };
+    }>;
+  };
+  assert.equal(evidenceData.untrustedPdfContent, true);
+  assert.equal(
+    evidenceData.fields.every(({ rect }) => rect !== null),
+    true,
+  );
+  const housingResponse = await evidence.execute({
+    expectedStateVersion: initialState.stateVersion,
+    expectedSourceHash: initialState.source.sourceHash,
+    fieldNames: [FIELD.housing],
+  });
+  assert.equal(housingResponse.ok, true);
+  if (!housingResponse.ok) throw new Error('Housing evidence failed.');
+  assert.equal(housingResponse.outputTruncated, false);
+  assert.ok(
+    serializedBytes(housingResponse) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+  );
+  const housingField = (
+    housingResponse.data as {
+      fields: Array<{
+        constraints: { choices: Array<{ value: string; label: string }> };
+      }>;
+    }
+  ).fields[0];
+  assert.deepEqual(housingField.constraints.choices, [
+    { value: 'rent', label: 'rent' },
+    { value: 'own', label: 'own' },
+    { value: 'other', label: 'other' },
+  ]);
+
+  for (const fieldNames of fieldCombinations(discoveredNames, 3)) {
+    const response = await evidence.execute({
+      expectedStateVersion: initialState.stateVersion,
+      expectedSourceHash: initialState.source.sourceHash,
+      fieldNames,
+    });
+    assert.equal(
+      response.ok,
+      true,
+      `evidence failed for ${fieldNames.join(',')}`,
+    );
+    if (!response.ok) throw new Error('Evidence combination failed.');
+    assert.equal(response.outputTruncated, false);
+    assert.ok(
+      serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+      `${fieldNames.join(',')} used ${serializedBytes(response)} bytes`,
+    );
+  }
+
+  const longText = '表单😀\\"'.repeat(300);
+  const longState: FormState = {
+    ...initialState,
+    source: { ...initialState.source, fileName: longText },
+    fields: {
+      ...initialState.fields,
+      [FIELD.legalName]: {
+        ...initialState.fields[FIELD.legalName],
+        label: longText,
+        sourceValue: longText,
+      },
+    },
+  };
+  const longInspection: PdfInspection = {
+    ...inspection,
+    fields: inspection.fields.map((field) =>
+      field.name === FIELD.legalName ? { ...field, current: longText } : field,
+    ),
+  };
+  const longData = createFormContextToolData(longState, longInspection, 0, 6);
+  const longResponse = {
+    ok: true,
+    stateVersion: longState.stateVersion,
+    sourceHash: longState.source.sourceHash,
+    nextAction: 'get_field_evidence',
+    data: longData,
+    outputTruncated: false,
+  };
+  assert.ok(
+    serializedBytes(longResponse) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+    `adversarial context used ${serializedBytes(longResponse)} bytes`,
+  );
+  const projectedLongField = longData.fields.find(
+    (field) => 'name' in field && field.name === FIELD.legalName,
+  );
+  assert.equal(projectedLongField?.labelTruncated, true);
+  assert.equal(
+    projectedLongField && 'currentValueAvailable' in projectedLongField
+      ? projectedLongField.currentValueAvailable
+      : false,
+    true,
+  );
+  assert.equal(
+    projectedLongField && 'currentValue' in projectedLongField,
+    false,
+  );
+});
+
+void test('keeps journey read mocks aligned with the real demo projector', async () => {
+  const { inspection, initialState } = await loadStagedDemo();
+  const evaluations = JSON.parse(
+    await readFile(
+      new URL('../evals/formproof-evals.json', import.meta.url),
+      'utf8',
+    ),
+  ) as AuthoredEvalCase[];
+
+  for (const evaluation of evaluations.filter(({ name }) =>
+    name.startsWith('[journey]'),
+  )) {
+    const contextCalls = evaluation.expectedCall.filter(
+      ({ functionName }) => functionName === 'get_form_context',
+    );
+    assert.ok(contextCalls.length > 0);
+    for (const call of contextCalls) {
+      const cursor = call.arguments.cursor;
+      const parsed =
+        cursor === undefined
+          ? ({ ok: true, offset: 0 } as const)
+          : parseFormContextCursor(cursor, initialState.source.sourceHash);
+      assert.equal(parsed.ok, true, `${evaluation.name} has an invalid cursor`);
+      if (!parsed.ok) throw new Error('Authored context cursor was invalid.');
+      const actual = createFormContextToolData(
+        initialState,
+        inspection,
+        parsed.offset,
+        call.arguments.limit ?? 6,
+      );
+      assert.deepEqual(
+        call.mockOutput.data,
+        actual,
+        `${evaluation.name} does not match the real context projector`,
+      );
+    }
+    for (const call of evaluation.expectedCall.filter(
+      ({ functionName }) => functionName === 'get_field_evidence',
+    )) {
+      assert.ok(call.arguments.fieldNames);
+      assert.deepEqual(
+        call.mockOutput.data,
+        createFieldEvidenceToolData(
+          initialState,
+          inspection,
+          call.arguments.fieldNames,
+        ),
+        `${evaluation.name} does not match the real evidence projector`,
+      );
+    }
+  }
+});
+
+void test('paginates long choice evidence without losing exact values', async () => {
+  const { inspection, initialState } = await loadStagedDemo();
+  const choices = Array.from({ length: 20 }, (_, index) => ({
+    value: `option-${index}-${'值'.repeat(24)}`,
+    label: `Choice ${index} ${'说明'.repeat(12)}`,
+  }));
+  const choiceValues = choices.map(({ value }) => value);
+  const state: FormState = {
+    ...initialState,
+    fields: {
+      ...initialState.fields,
+      [FIELD.housing]: {
+        ...initialState.fields[FIELD.housing],
+        options: choiceValues,
+      },
+    },
+  };
+  const choiceInspection: PdfInspection = {
+    ...inspection,
+    fields: inspection.fields.map((field) =>
+      field.name === FIELD.housing
+        ? { ...field, choices, options: choiceValues }
+        : field,
+    ),
+  };
+  const adapter: FormProofWebMcpAdapter = {
+    getFormContext: async () => {
+      throw new Error('not used');
+    },
+    getFieldEvidence(input) {
+      const parsed =
+        input.choiceCursor === undefined
+          ? ({ ok: true, offset: 0 } as const)
+          : parseFieldChoiceCursor(
+              input.choiceCursor,
+              state.source.sourceHash,
+              input.fieldNames[0],
+            );
+      assert.equal(parsed.ok, true);
+      if (!parsed.ok) throw new Error('Generated choice cursor was invalid.');
+      return {
+        ok: true,
+        stateVersion: state.stateVersion,
+        sourceHash: state.source.sourceHash,
+        data: createFieldEvidenceToolData(
+          state,
+          choiceInspection,
+          input.fieldNames,
+          parsed.offset,
+        ),
+      };
+    },
+    stageFormValues: async () => {
+      throw new Error('not used');
+    },
+    validateFillPlan: async () => {
+      throw new Error('not used');
+    },
+    startFillReview: async () => {
+      throw new Error('not used');
+    },
+  };
+  const evidence = createFormProofToolDefinitions(
+    adapter,
+    () => undefined,
+    new AbortController().signal,
+  ).find(({ name }) => name === 'get_field_evidence');
+  assert.ok(evidence);
+
+  const collected: Array<{ value: string; label: string }> = [];
+  let choiceCursor: string | null = null;
+  do {
+    const response: FormProofToolResponse = await evidence.execute({
+      expectedStateVersion: state.stateVersion,
+      expectedSourceHash: state.source.sourceHash,
+      fieldNames: [FIELD.housing],
+      ...(choiceCursor === null ? {} : { choiceCursor }),
+    });
+    assert.equal(response.ok, true);
+    if (!response.ok) throw new Error('Choice evidence page failed.');
+    assert.equal(response.outputTruncated, false);
+    assert.ok(
+      serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+      `choice evidence used ${serializedBytes(response)} bytes`,
+    );
+    const field: {
+      constraints: {
+        choices: Array<{ value: string; label: string }>;
+        choicePage?: { nextCursor: string | null };
+      };
+    } = (
+      response.data as {
+        fields: Array<{
+          constraints: {
+            choices: Array<{ value: string; label: string }>;
+            choicePage?: { nextCursor: string | null };
+          };
+        }>;
+      }
+    ).fields[0];
+    collected.push(...field.constraints.choices);
+    choiceCursor = field.constraints.choicePage?.nextCursor ?? null;
+    assert.equal(
+      response.nextAction,
+      choiceCursor === null ? 'stage_form_values' : 'get_field_evidence',
+    );
+  } while (choiceCursor !== null);
+
+  assert.deepEqual(collected, choices);
+});
+
+void test('reports an overlong field name without silently skipping it', async () => {
+  const { inspection, initialState } = await loadStagedDemo();
+  const original = inspection.fields[0];
+  const longName = 'field-'.padEnd(1_000, 'x');
+  const state = await createFormState(initialState.source, [
+    {
+      ...initialState.fields[original.name],
+      name: longName,
+      label: 'Long canonical field name',
+      required: false,
+    },
+  ]);
+  const longInspection: PdfInspection = {
+    ...inspection,
+    fieldCount: 1,
+    widgetCount: 1,
+    fields: [
+      {
+        ...original,
+        name: longName,
+        required: false,
+        current: '',
+      },
+    ],
+  };
+  const adapter: FormProofWebMcpAdapter = {
+    getFormContext(input) {
+      return {
+        ok: true,
+        stateVersion: state.stateVersion,
+        sourceHash: state.source.sourceHash,
+        data: createFormContextToolData(state, longInspection, 0, input.limit),
+      };
+    },
+    getFieldEvidence: async () => {
+      throw new Error('not used');
+    },
+    stageFormValues: async () => {
+      throw new Error('not used');
+    },
+    validateFillPlan: async () => {
+      throw new Error('not used');
+    },
+    startFillReview: async () => {
+      throw new Error('not used');
+    },
+  };
+  const context = createFormProofToolDefinitions(
+    adapter,
+    () => undefined,
+    new AbortController().signal,
+  ).find(({ name }) => name === 'get_form_context');
+  assert.ok(context);
+
+  const response = await context.execute({ limit: 1 });
+  assert.equal(response.ok, true);
+  if (!response.ok) throw new Error('Long-name context failed.');
+  assert.equal(response.outputTruncated, false);
+  assert.ok(serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES);
+  const data = response.data as {
+    fields: Array<{
+      agentAddressable: false;
+      nameLength: number;
+      name?: string;
+    }>;
+    pagination: { returned: number; nextCursor: string | null };
+  };
+  assert.equal(data.fields[0].agentAddressable, false);
+  assert.equal(data.fields[0].nameLength, longName.length);
+  assert.equal('name' in data.fields[0], false);
+  assert.deepEqual(data.pagination, { returned: 1, nextCursor: null });
+});
+
+void test('never repeats an unreturnable choice cursor', async () => {
+  const { inspection, initialState } = await loadStagedDemo();
+  const original = inspection.fields[0];
+  const longName = 'choice-field-'.padEnd(256, 'n');
+  const oversizedValue = 'v'.repeat(1_201);
+  const choices = [
+    { value: oversizedValue, label: 'L'.repeat(180) },
+    { value: 'safe', label: 'Safe choice' },
+  ];
+  const initial = await createFormState(initialState.source, [
+    {
+      name: longName,
+      label: 'F'.repeat(180),
+      type: 'dropdown',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      options: choices.map(({ value }) => value),
+      multiSelect: false,
+      sourceValue: null,
+    },
+  ]);
+  const state: FormState = {
+    ...initial,
+    draft: {
+      [longName]: {
+        fieldName: longName,
+        value: 'draft',
+        actor: 'agent',
+        provenance: {
+          kind: 'agent_inference',
+          confidence: 0.7,
+          evidence: ['E'.repeat(120), 'S'.repeat(120)],
+          rationale: 'R'.repeat(180),
+        },
+      },
+    },
+  };
+  const choiceInspection: PdfInspection = {
+    ...inspection,
+    fieldCount: 1,
+    widgetCount: 1,
+    fields: [
+      {
+        ...original,
+        name: longName,
+        type: 'dropdown',
+        required: false,
+        current: '',
+        options: choices.map(({ value }) => value),
+        choices,
+        multiSelect: false,
+        maxLength: null,
+        tooltip: 'T'.repeat(180),
+      },
+    ],
+  };
+  const adapter: FormProofWebMcpAdapter = {
+    getFormContext: async () => {
+      throw new Error('not used');
+    },
+    getFieldEvidence(input) {
+      const parsed =
+        input.choiceCursor === undefined
+          ? ({ ok: true, offset: 0 } as const)
+          : parseFieldChoiceCursor(
+              input.choiceCursor,
+              state.source.sourceHash,
+              longName,
+            );
+      assert.equal(parsed.ok, true);
+      if (!parsed.ok) throw new Error('Choice cursor was invalid.');
+      return {
+        ok: true,
+        stateVersion: state.stateVersion,
+        sourceHash: state.source.sourceHash,
+        data: createFieldEvidenceToolData(
+          state,
+          choiceInspection,
+          input.fieldNames,
+          parsed.offset,
+        ),
+      };
+    },
+    stageFormValues: async () => {
+      throw new Error('not used');
+    },
+    validateFillPlan: async () => {
+      throw new Error('not used');
+    },
+    startFillReview: async () => {
+      throw new Error('not used');
+    },
+  };
+  const evidence = createFormProofToolDefinitions(
+    adapter,
+    () => undefined,
+    new AbortController().signal,
+  ).find(({ name }) => name === 'get_field_evidence');
+  assert.ok(evidence);
+
+  const response = await evidence.execute({
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    fieldNames: [longName],
+  });
+  assert.equal(response.ok, true);
+  if (!response.ok) throw new Error('Oversized choice evidence failed.');
+  assert.equal(response.outputTruncated, false);
+  assert.ok(serializedBytes(response) <= FORMPROOF_MAX_RESPONSE_BYTES);
+  const page = (
+    response.data as {
+      fields: Array<{
+        constraints: {
+          choicePage: {
+            returned: number;
+            unavailableChoiceCount: number;
+            nextCursor: string | null;
+          };
+        };
+      }>;
+    }
+  ).fields[0].constraints.choicePage;
+  assert.ok(page.returned + page.unavailableChoiceCount > 0);
+  assert.notEqual(
+    page.nextCursor,
+    createFieldChoiceCursor(0, state.source.sourceHash, longName),
+  );
+});
 
 async function completeDemo(): Promise<CompletedDemo> {
   const stagedDemo = await loadStagedDemo();
@@ -396,7 +987,7 @@ void test('agent staging rejects human-only and signature fields atomically', as
       byteLength: source.byteLength,
       pageCount: inspection.pageCount,
     },
-    inspection.fields.map(mapField),
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
   );
 
   const rejected = await stageFieldUpdates(state, {

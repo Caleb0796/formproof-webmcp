@@ -8,12 +8,23 @@ import type {
   WebMcpToolDefinition,
 } from '../lib/webmcp';
 
-const { FORMPROOF_WEBMCP_TOOL_NAMES, registerFormProofWebMcpTools } =
-  (await import(
-    new URL('../lib/webmcp.ts', import.meta.url).href
-  )) as typeof import('../lib/webmcp');
+const {
+  FORMPROOF_MAX_RESPONSE_BYTES,
+  FORMPROOF_WEBMCP_TOOL_NAMES,
+  createFieldChoiceCursor,
+  createFormContextCursor,
+  parseFieldChoiceCursor,
+  parseFormContextCursor,
+  registerFormProofWebMcpTools,
+} = (await import(
+  new URL('../lib/webmcp.ts', import.meta.url).href
+)) as typeof import('../lib/webmcp');
 
 const SOURCE_HASH = 'a'.repeat(64);
+
+function serializedBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
 
 function success(data: unknown = {}, stateVersion = 4): FormProofAdapterResult {
   return {
@@ -130,6 +141,80 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   assert.deepEqual(
     tools.map((tool) => tool.annotations.readOnlyHint),
     [true, true, false, true, false],
+  );
+});
+
+void test('keeps context and evidence requests within semantic page limits', async () => {
+  let receivedContext: unknown;
+  const adapter = createAdapter({
+    getFormContext: async (input) => {
+      receivedContext = input;
+      return success({ fields: [] });
+    },
+  });
+  const { tools } = await captureTools(adapter);
+  const context = byName(tools, 'get_form_context');
+  const evidence = byName(tools, 'get_field_evidence');
+
+  const defaultPage = await context.execute({});
+  assert.equal(defaultPage.ok, true);
+  assert.deepEqual(receivedContext, { limit: 6 });
+
+  const oversizedPage = await context.execute({ limit: 7 });
+  assert.equal(oversizedPage.ok, false);
+  assert.equal(oversizedPage.error.code, 'INVALID_INPUT');
+
+  const tooManyFields = await evidence.execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    fieldNames: ['one', 'two', 'three', 'four'],
+  });
+  assert.equal(tooManyFields.ok, false);
+  assert.equal(tooManyFields.error.code, 'INVALID_INPUT');
+
+  const ambiguousChoicePage = await evidence.execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    fieldNames: ['one', 'two'],
+    choiceCursor: createFieldChoiceCursor(2, SOURCE_HASH, 'one'),
+  });
+  assert.equal(ambiguousChoicePage.ok, false);
+  assert.equal(ambiguousChoicePage.error.code, 'INVALID_INPUT');
+});
+
+void test('binds pagination cursors to the source PDF', () => {
+  const cursor = createFormContextCursor(6, SOURCE_HASH);
+  const sameShortPrefixHash = `${SOURCE_HASH.slice(0, 16)}${'b'.repeat(48)}`;
+
+  assert.deepEqual(parseFormContextCursor(cursor, SOURCE_HASH), {
+    ok: true,
+    offset: 6,
+  });
+  assert.deepEqual(parseFormContextCursor(cursor, 'b'.repeat(64)), {
+    ok: false,
+    code: 'source_mismatch',
+  });
+  assert.deepEqual(parseFormContextCursor(cursor, sameShortPrefixHash), {
+    ok: false,
+    code: 'source_mismatch',
+  });
+  assert.deepEqual(parseFormContextCursor('field:6', SOURCE_HASH), {
+    ok: false,
+    code: 'invalid_input',
+  });
+
+  const choiceCursor = createFieldChoiceCursor(3, SOURCE_HASH, 'housing');
+  assert.deepEqual(
+    parseFieldChoiceCursor(choiceCursor, SOURCE_HASH, 'housing'),
+    { ok: true, offset: 3 },
+  );
+  assert.deepEqual(
+    parseFieldChoiceCursor(choiceCursor, 'b'.repeat(64), 'housing'),
+    { ok: false, code: 'source_mismatch' },
+  );
+  assert.deepEqual(
+    parseFieldChoiceCursor(choiceCursor, SOURCE_HASH, 'support'),
+    { ok: false, code: 'invalid_input' },
   );
 });
 
@@ -516,41 +601,125 @@ void test('bounds PDF-derived tool output', async () => {
   });
   const { tools } = await captureTools(adapter);
   const response = await byName(tools, 'get_form_context').execute({
-    limit: 50,
+    limit: 6,
   });
 
   assert.equal(response.ok, true);
   assert.equal(response.outputTruncated, true);
-  assert.ok(JSON.stringify(response).length < 30_000);
+  assert.equal(response.nextAction, 'retry_with_narrower_scope');
+  assert.ok(serializedBytes(response) <= FORMPROOF_MAX_RESPONSE_BYTES);
+  assert.notEqual(response.data, '[truncated]');
+  assert.deepEqual((response.data as { fields: unknown[] }).fields, []);
 });
 
-void test('budgets the final serialized JSON including escapes and emoji', async () => {
-  const hazardous = '\0"\\😀'.repeat(600);
-  const payload = Object.fromEntries(
-    Array.from({ length: 40 }, (_, index) => [`field-${index}`, hazardous]),
-  );
+void test('budgets UTF-8 output including escapes and multibyte text', async () => {
+  const payloads = [
+    'ascii'.repeat(1_000),
+    '表单'.repeat(1_000),
+    '😀'.repeat(1_000),
+    '\0"\\😀'.repeat(600),
+  ];
+
+  for (const payload of payloads) {
+    const adapter = createAdapter({
+      getFormContext: async () =>
+        success(
+          Object.fromEntries(
+            Array.from({ length: 30 }, (_, index) => [
+              `field-${index}`,
+              payload,
+            ]),
+          ),
+        ),
+    });
+    const { tools } = await captureTools(adapter);
+    const context = byName(tools, 'get_form_context');
+    const first = await context.execute({ limit: 6 });
+    const second = await context.execute({ limit: 6 });
+    const serialized = JSON.stringify(first);
+
+    assert.equal(first.ok, true);
+    assert.equal(first.outputTruncated, true);
+    assert.equal(first.nextAction, 'retry_with_narrower_scope');
+    assert.ok(
+      serializedBytes(first) <= FORMPROOF_MAX_RESPONSE_BYTES,
+      `serialized output used ${serializedBytes(first)} bytes`,
+    );
+    assert.doesNotThrow(() => JSON.parse(serialized));
+    assert.deepEqual(second, first);
+  }
+});
+
+void test('keeps oversized failures bounded and repairable', async () => {
+  const issues = Array.from({ length: 30 }, (_, index) => ({
+    code: 'unknown_field',
+    fieldName: `${index}-${'表😀\\"'.repeat(40)}`,
+  }));
   const adapter = createAdapter({
-    getFormContext: async () => success(payload),
+    stageFormValues: async () => ({
+      ok: false,
+      stateVersion: 4,
+      sourceHash: SOURCE_HASH,
+      error: { code: 'unknown_field', details: issues },
+    }),
   });
   const { tools } = await captureTools(adapter);
-  const context = byName(tools, 'get_form_context');
+  const response = await byName(tools, 'stage_form_values').execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
 
-  const first = await context.execute({ limit: 50 });
-  const second = await context.execute({ limit: 50 });
-  const serialized = JSON.stringify(first);
-
-  assert.equal(first.ok, true);
-  assert.equal(first.outputTruncated, true);
-  assert.ok(
-    serialized.length < 30_000,
-    `serialized length was ${serialized.length}`,
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'FIELD_NOT_FOUND');
+  assert.equal(response.outputTruncated, true);
+  assert.ok((response.error.issues?.length ?? 0) > 0);
+  assert.ok((response.error.omittedIssueCount ?? 0) > 0);
+  assert.equal(
+    (response.error.issues?.length ?? 0) +
+      (response.error.omittedIssueCount ?? 0),
+    issues.length,
   );
-  assert.doesNotThrow(() => JSON.parse(serialized));
-  assert.match(serialized, /\\u0000/);
-  assert.match(serialized, /\\"/);
-  assert.match(serialized, /\\\\/);
-  assert.match(serialized, /😀/u);
-  assert.deepEqual(second, first);
+  assert.ok(serializedBytes(response) <= FORMPROOF_MAX_RESPONSE_BYTES);
+});
+
+void test('reports adapter issues omitted before byte bounding', async () => {
+  const issues = Array.from({ length: 30 }, (_, index) => ({
+    code: 'unknown_field',
+    fieldName: `missing-${index}`,
+  }));
+  const adapter = createAdapter({
+    stageFormValues: async () => ({
+      ok: false,
+      stateVersion: 4,
+      sourceHash: SOURCE_HASH,
+      error: { code: 'unknown_field', details: issues },
+    }),
+  });
+  const { tools } = await captureTools(adapter);
+  const response = await byName(tools, 'stage_form_values').execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.outputTruncated, true);
+  assert.equal(response.error.issues?.length, 25);
+  assert.equal(response.error.omittedIssueCount, 5);
+  assert.ok(serializedBytes(response) <= FORMPROOF_MAX_RESPONSE_BYTES);
 });
 
 void test('cleanup aborts every registered tool and prevents later execution', async () => {

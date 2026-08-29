@@ -36,24 +36,23 @@ import {
 } from '@/components/ui/dialog';
 import {
   approveDraftFromUi,
+  createFormFieldDefinitionFromPdf,
   createFormState,
   exportApprovedPdfFromUi,
-  getEffectiveFieldValue,
   getReleaseGate,
   stageFieldUpdates,
   validateDraft,
   type FieldUpdate,
-  type FormFieldDefinition,
   type FormFieldValue,
   type FormState,
   type StateError,
 } from '@/lib/form-state';
-import type {
-  ApplyResult,
-  PdfFieldDescriptor,
-  PdfInspection,
-} from '@/lib/pdf-engine';
+import type { ApplyResult, PdfInspection } from '@/lib/pdf-engine';
 import {
+  createFieldEvidenceToolData,
+  createFormContextToolData,
+  parseFieldChoiceCursor,
+  parseFormContextCursor,
   registerFormProofWebMcpTools,
   type FormProofAdapterFailure,
   type FormProofWebMcpAdapter,
@@ -63,7 +62,6 @@ import {
 
 const DEMO_URL = '/demo-form.pdf';
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
-const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/gi;
 
 type ToolState =
   | { status: 'registering'; count: 0; message: string }
@@ -92,37 +90,6 @@ function copyArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 function shortHash(hash: string | null | undefined): string {
   if (!hash) return '—';
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`;
-}
-
-function cleanLabel(field: PdfFieldDescriptor): string {
-  const tooltip = field.tooltip?.replace(HUMAN_ONLY_MARKER, '').trim();
-  if (!tooltip) return field.name;
-  return tooltip.split(/\s+[–—-]\s+/u)[0]?.trim() || field.name;
-}
-
-function toStateType(field: PdfFieldDescriptor): FormFieldDefinition['type'] {
-  if (field.type === 'option_list') return 'option-list';
-  if (field.type === 'unsupported') return 'text';
-  return field.type;
-}
-
-function toFieldDefinition(field: PdfFieldDescriptor): FormFieldDefinition {
-  return {
-    name: field.name,
-    label: cleanLabel(field),
-    type: toStateType(field),
-    required: field.required,
-    readOnly: field.readOnly || field.type === 'unsupported',
-    humanOnly: field.humanOnly || field.type === 'unsupported',
-    ...(field.type === 'dropdown' || field.type === 'option_list'
-      ? { multiSelect: field.multiSelect }
-      : {}),
-    ...(field.options.length > 0 ? { options: [...field.options] } : {}),
-    ...(field.maxLength === null ? {} : { maxLength: field.maxLength }),
-    sourceValue: Array.isArray(field.current)
-      ? [...field.current]
-      : field.current,
-  };
 }
 
 function formatValue(
@@ -345,7 +312,7 @@ export function FormProofWorkbench() {
             pageCount: inspection.pageCount,
             loadedAt: new Date().toISOString(),
           },
-          inspection.fields.map(toFieldDefinition),
+          inspection.fields.map(createFormFieldDefinitionFromPdf),
         );
 
         if (!mountedRef.current || generation !== loadGenerationRef.current)
@@ -450,19 +417,21 @@ export function FormProofWorkbench() {
 
         let offset = 0;
         if (input.cursor !== undefined) {
-          const match = /^field:(\d+)$/u.exec(input.cursor);
-          if (!match) {
+          const cursor = parseFormContextCursor(
+            input.cursor,
+            current.source.sourceHash,
+          );
+          if (!cursor.ok) {
             return adapterFailure(
               current,
-              'invalid_input',
-              'The field cursor is invalid.',
+              cursor.code,
+              cursor.code === 'source_mismatch'
+                ? 'The field cursor belongs to a different PDF.'
+                : 'The field cursor is invalid.',
             );
           }
-          offset = Number(match[1]);
-          if (
-            !Number.isSafeInteger(offset) ||
-            offset > inspection.fields.length
-          ) {
+          offset = cursor.offset;
+          if (offset > inspection.fields.length) {
             return adapterFailure(
               current,
               'invalid_input',
@@ -471,58 +440,16 @@ export function FormProofWorkbench() {
           }
         }
 
-        const fields = inspection.fields
-          .slice(offset, offset + input.limit)
-          .map((field) => {
-            const definition = current.fields[field.name];
-            const staged = current.draft[field.name] ?? null;
-            return {
-              name: field.name,
-              label: definition?.label ?? field.name,
-              type: field.type,
-              required: field.required,
-              readOnly: field.readOnly,
-              humanOnly: field.humanOnly,
-              currentValue: field.current,
-              stagedValue: staged?.value ?? null,
-              options: field.options,
-              choices: field.choices,
-              multiSelect: field.multiSelect,
-              maxLength: field.maxLength,
-              page: field.page,
-              rect: field.rect,
-            };
-          });
-        const nextOffset = offset + fields.length;
-
         return {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
-          data: {
-            document: {
-              fileName: current.source.fileName,
-              pageCount: current.source.pageCount,
-              fieldCount: inspection.fieldCount,
-              widgetCount: inspection.widgetCount,
-            },
-            binding: {
-              stateVersion: current.stateVersion,
-              sourceHash: current.source.sourceHash,
-              planHash: current.planHash,
-            },
-            fields,
-            validation: current.validation,
-            approvalBoundary:
-              'Only the visible human UI can approve or export.',
-            pagination: {
-              returned: fields.length,
-              nextCursor:
-                nextOffset < inspection.fields.length
-                  ? `field:${nextOffset}`
-                  : null,
-            },
-          },
+          data: createFormContextToolData(
+            current,
+            inspection,
+            offset,
+            input.limit,
+          ),
         };
       },
 
@@ -539,9 +466,6 @@ export function FormProofWorkbench() {
         const mismatch = bindingFailure(current, input);
         if (mismatch) return mismatch;
 
-        const descriptors = new Map(
-          inspection.fields.map((field) => [field.name, field]),
-        );
         const unknown = input.fieldNames.filter(
           (name) => !Object.hasOwn(current.fields, name),
         );
@@ -554,37 +478,45 @@ export function FormProofWorkbench() {
           );
         }
 
+        let choiceOffset = 0;
+        if (input.choiceCursor !== undefined) {
+          const cursor = parseFieldChoiceCursor(
+            input.choiceCursor,
+            current.source.sourceHash,
+            input.fieldNames[0],
+          );
+          if (!cursor.ok) {
+            return adapterFailure(
+              current,
+              cursor.code,
+              cursor.code === 'source_mismatch'
+                ? 'The choice cursor belongs to a different PDF.'
+                : 'The choice cursor does not match the requested field.',
+            );
+          }
+          const descriptor = inspection.fields.find(
+            ({ name }) => name === input.fieldNames[0],
+          );
+          if (cursor.offset > (descriptor?.choices.length ?? 0)) {
+            return adapterFailure(
+              current,
+              'invalid_input',
+              'The choice cursor is outside this field.',
+            );
+          }
+          choiceOffset = cursor.offset;
+        }
+
         return {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
-          data: {
-            fields: input.fieldNames.map((name) => {
-              const definition = current.fields[name];
-              const staged = current.draft[name] ?? null;
-              const descriptor = descriptors.get(name);
-              return {
-                name,
-                label: definition.label,
-                sourceValue: definition.sourceValue,
-                effectiveValue: getEffectiveFieldValue(current, name) ?? null,
-                staged,
-                page: descriptor?.page ?? null,
-                rect: descriptor?.rect ?? null,
-                tooltip: descriptor?.tooltip ?? null,
-                constraints: {
-                  type: descriptor?.type ?? definition.type,
-                  required: definition.required,
-                  readOnly: definition.readOnly,
-                  humanOnly: definition.humanOnly,
-                  maxLength: definition.maxLength ?? null,
-                  options: definition.options ?? [],
-                  multiSelect: definition.multiSelect ?? false,
-                },
-                untrustedPdfContent: true,
-              };
-            }),
-          },
+          data: createFieldEvidenceToolData(
+            current,
+            inspection,
+            input.fieldNames,
+            choiceOffset,
+          ),
         };
       },
 

@@ -5,6 +5,7 @@ import { PDFDocument, StandardFonts } from 'pdf-lib';
 
 import {
   approveDraftFromUi,
+  createFormFieldDefinitionFromPdf,
   createFormState,
   discardDraft,
   exportApprovedPdfFromUi,
@@ -23,6 +24,7 @@ import {
   type SourceMetadata,
   // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
 } from '../lib/form-state.ts';
+import type { PdfFieldDescriptor } from '../lib/pdf-engine';
 
 const { applyApprovedValues, inspectPdf } = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
@@ -107,6 +109,67 @@ const USER_PROVENANCE: FieldProvenance = {
 async function initialState(): Promise<FormState> {
   return createFormState({ ...SOURCE }, fields());
 }
+
+void test('maps inspected PDF fields through the shared UI and eval contract', () => {
+  const optionList: PdfFieldDescriptor = {
+    name: 'benefits',
+    type: 'option_list',
+    current: ['Housing'],
+    options: ['Housing', 'Utilities'],
+    choices: [
+      { value: 'Housing', label: 'Housing support' },
+      { value: 'Utilities', label: 'Utility support' },
+    ],
+    multiSelect: true,
+    required: true,
+    readOnly: false,
+    humanOnly: true,
+    page: 1,
+    rect: { x: 10, y: 20, width: 30, height: 40 },
+    maxLength: null,
+    tooltip: '[HUMAN_ONLY] Benefits — choose all that apply',
+    widgetCount: 1,
+    widgets: [],
+  };
+  const mapped = createFormFieldDefinitionFromPdf(optionList);
+  assert.deepEqual(mapped, {
+    name: 'benefits',
+    label: 'Benefits',
+    type: 'option-list',
+    required: true,
+    readOnly: false,
+    humanOnly: true,
+    multiSelect: true,
+    options: ['Housing', 'Utilities'],
+    sourceValue: ['Housing'],
+  });
+  assert.notEqual(mapped.options, optionList.options);
+  assert.notEqual(mapped.sourceValue, optionList.current);
+
+  assert.deepEqual(
+    createFormFieldDefinitionFromPdf({
+      ...optionList,
+      name: 'legacy',
+      type: 'unsupported',
+      current: null,
+      options: [],
+      choices: [],
+      multiSelect: false,
+      required: false,
+      humanOnly: false,
+      tooltip: null,
+    }),
+    {
+      name: 'legacy',
+      label: 'legacy',
+      type: 'text',
+      required: false,
+      readOnly: true,
+      humanOnly: true,
+      sourceValue: null,
+    },
+  );
+});
 
 async function createTextFormPdf(fieldName: string): Promise<Uint8Array> {
   const document = await PDFDocument.create();

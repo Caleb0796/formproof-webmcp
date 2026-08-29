@@ -11,6 +11,7 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "eval:catalog": "node --experimental-strip-types scripts/export-webmcp-eval-catalog.ts",
+    "eval:fixtures": "node --experimental-strip-types scripts/sync-formproof-eval-contexts.ts",
     "eval:verify": "node --test --experimental-strip-types tests/evals.test.ts",
     "typecheck": "tsc --noEmit --incremental false",
     "lint:project": "oxlint app/page.tsx components/formproof-workbench.tsx lib/*.ts scripts/*.ts tests/*.test.ts vite.config.ts",
