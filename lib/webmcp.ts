@@ -164,9 +164,15 @@ export interface FormProofToolFailure {
   error: {
     code: FormProofWebMcpErrorCode;
     message: string;
-    details?: JsonValue;
+    issues?: readonly FormProofToolIssue[];
   };
   outputTruncated: boolean;
+}
+
+export interface FormProofToolIssue {
+  readonly code: FormProofWebMcpErrorCode;
+  readonly fieldName?: string;
+  readonly path?: string;
 }
 
 export type FormProofToolResponse = FormProofToolSuccess | FormProofToolFailure;
@@ -347,9 +353,12 @@ const READ_ONLY_TOOLS = new Set<FormProofWebMcpToolName>([
 ]);
 
 class InputValidationError extends Error {
-  constructor(message: string) {
+  readonly path: string;
+
+  constructor(message: string, path: string) {
     super(message);
     this.name = 'InputValidationError';
+    this.path = path;
   }
 }
 
@@ -458,6 +467,7 @@ function createToolExecutor(
           null,
           'fix_tool_input',
           error.message,
+          [{ code: 'INVALID_INPUT', path: error.path }],
         );
       }
       return failureResponse('INTERNAL_ERROR', null, null, 'none');
@@ -621,6 +631,7 @@ function parseStageFormValuesInput(input: unknown): StageFormValuesInput {
     if (fieldNames.has(update.fieldName)) {
       throw new InputValidationError(
         'input.updates must not contain duplicate field names.',
+        'input.updates',
       );
     }
     fieldNames.add(update.fieldName);
@@ -676,6 +687,7 @@ function parseFieldValue(value: unknown, path: string): FormProofFieldValue {
   }
   throw new InputValidationError(
     `${path} must be a string, boolean, string array, or null.`,
+    path,
   );
 }
 
@@ -745,7 +757,14 @@ function normalizeAdapterResult(
   }
 
   const code = normalizeErrorCode(result.error.code);
-  return failureResponse(code, stateVersion, sourceHash, errorNextAction(code));
+  return failureResponse(
+    code,
+    stateVersion,
+    sourceHash,
+    errorNextAction(code),
+    safeErrorMessage(code),
+    normalizeAdapterIssues(result.error.details, code),
+  );
 }
 
 function successNextAction(
@@ -774,7 +793,7 @@ function failureResponse(
   sourceHash: string | null,
   nextAction: FormProofNextAction,
   message = safeErrorMessage(code),
-  details?: JsonValue,
+  issues?: readonly FormProofToolIssue[],
   outputTruncated = false,
 ): FormProofToolFailure {
   const response: FormProofToolFailure = {
@@ -785,7 +804,7 @@ function failureResponse(
     error: {
       code,
       message,
-      ...(details === undefined ? {} : { details }),
+      ...(issues === undefined ? {} : { issues }),
     },
     outputTruncated,
   };
@@ -797,6 +816,42 @@ function failureResponse(
     error: { code, message: safeErrorMessage(code) },
     outputTruncated: true,
   };
+}
+
+function normalizeAdapterIssues(
+  details: unknown,
+  fallbackCode: FormProofWebMcpErrorCode,
+): readonly FormProofToolIssue[] | undefined {
+  const candidates: unknown[] = Array.isArray(details)
+    ? details
+    : isPlainObject(details) && Array.isArray(details.fieldNames)
+      ? details.fieldNames.map((fieldName) => ({ fieldName }))
+      : [];
+  const issues: FormProofToolIssue[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates.slice(0, 25)) {
+    if (!isPlainObject(candidate)) continue;
+    const code =
+      typeof candidate.code === 'string'
+        ? normalizeErrorCode(candidate.code)
+        : fallbackCode;
+    const fieldName =
+      typeof candidate.fieldName === 'string' &&
+      candidate.fieldName.length > 0 &&
+      candidate.fieldName.length <= 256
+        ? candidate.fieldName
+        : undefined;
+    const key = `${code}\u0000${fieldName ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    issues.push({
+      code,
+      ...(fieldName === undefined ? {} : { fieldName }),
+    });
+  }
+
+  return issues.length === 0 ? undefined : issues;
 }
 
 function successResponse(
@@ -1135,11 +1190,14 @@ function expectClosedObject(
   path: string,
 ): InputRecord {
   if (!isPlainObject(value)) {
-    throw new InputValidationError(`${path} must be an object.`);
+    throw new InputValidationError(`${path} must be an object.`, path);
   }
   for (const key of Object.keys(value)) {
     if (!allowedKeys.includes(key)) {
-      throw new InputValidationError(`${path} contains an unknown property.`);
+      throw new InputValidationError(
+        `${path} contains an unknown property.`,
+        `${path}.${key}`,
+      );
     }
   }
   return value;
@@ -1166,6 +1224,7 @@ function expectArray(
   ) {
     throw new InputValidationError(
       `${path} must contain between ${minimum} and ${maximum} items.`,
+      path,
     );
   }
   return value;
@@ -1183,7 +1242,10 @@ function expectUniqueStrings(
       expectString(entry, `${path}[${index}]`, 1, maximumLength),
   );
   if (new Set(values).size !== values.length) {
-    throw new InputValidationError(`${path} must contain unique strings.`);
+    throw new InputValidationError(
+      `${path} must contain unique strings.`,
+      path,
+    );
   }
   return values;
 }
@@ -1201,6 +1263,7 @@ function expectString(
   ) {
     throw new InputValidationError(
       `${path} must be a string between ${minimumLength} and ${maximumLength} characters.`,
+      path,
     );
   }
   return value;
@@ -1237,6 +1300,7 @@ function expectInteger(
   ) {
     throw new InputValidationError(
       `${path} must be an integer between ${minimum} and ${maximum}.`,
+      path,
     );
   }
   return value;
@@ -1256,6 +1320,7 @@ function expectFiniteNumber(
   ) {
     throw new InputValidationError(
       `${path} must be a number between ${minimum} and ${maximum}.`,
+      path,
     );
   }
   return value;
@@ -1269,6 +1334,7 @@ function expectEnum<const Values extends readonly string[]>(
   if (typeof value !== 'string' || !values.includes(value)) {
     throw new InputValidationError(
       `${path} must be one of the documented values.`,
+      path,
     );
   }
   return value;
@@ -1276,7 +1342,10 @@ function expectEnum<const Values extends readonly string[]>(
 
 function expectSourceHash(value: unknown, path: string): string {
   if (typeof value !== 'string' || !/^[a-fA-F0-9]{64}$/.test(value)) {
-    throw new InputValidationError(`${path} must be a SHA-256 hex digest.`);
+    throw new InputValidationError(
+      `${path} must be a SHA-256 hex digest.`,
+      path,
+    );
   }
   return value.toLowerCase();
 }

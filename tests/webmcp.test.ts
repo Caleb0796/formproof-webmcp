@@ -159,6 +159,9 @@ void test('runtime parsing rejects extra properties and human authority claims',
   assert.equal(actorClaim.ok, false);
   assert.equal(actorClaim.error.code, 'INVALID_INPUT');
   assert.equal(actorClaim.nextAction, 'fix_tool_input');
+  assert.deepEqual(actorClaim.error.issues, [
+    { code: 'INVALID_INPUT', path: 'input.actor' },
+  ]);
 
   const humanProvenance = await stage.execute({
     expectedStateVersion: 4,
@@ -191,6 +194,12 @@ void test('runtime parsing rejects extra properties and human authority claims',
   });
   assert.equal(nestedAuthorityClaim.ok, false);
   assert.equal(nestedAuthorityClaim.error.code, 'INVALID_INPUT');
+  assert.deepEqual(nestedAuthorityClaim.error.issues, [
+    {
+      code: 'INVALID_INPUT',
+      path: 'input.updates[0].provenance.approved',
+    },
+  ]);
 
   const approvalClaim = await review.execute({
     expectedStateVersion: 4,
@@ -375,6 +384,77 @@ void test('maps state and PDF errors without exposing adapter details', async ()
     );
     assert.equal('details' in response.error, false, internalCode);
   }
+});
+
+void test('returns bounded public issues without leaking adapter details', async () => {
+  const adapter = createAdapter({
+    stageFormValues: async () => ({
+      ok: false,
+      stateVersion: 4,
+      sourceHash: SOURCE_HASH,
+      error: {
+        code: 'unknown_field',
+        message: 'private adapter implementation detail',
+        details: [
+          {
+            code: 'unknown_field',
+            fieldName: 'missing_name',
+            secret: 'private adapter implementation detail',
+          },
+          { code: 'read_only', fieldName: 'locked_id' },
+          { code: 'field_value_type_invalid', fieldName: 'age' },
+          { code: 'read_only', fieldName: 'locked_id' },
+        ],
+      },
+    }),
+  });
+  const { tools } = await captureTools(adapter);
+  const response = await byName(tools, 'stage_form_values').execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'agent_inference', confidence: 0.4 },
+      },
+    ],
+  });
+
+  assert.equal(response.ok, false);
+  assert.deepEqual(response.error.issues, [
+    { code: 'FIELD_NOT_FOUND', fieldName: 'missing_name' },
+    { code: 'FIELD_READ_ONLY', fieldName: 'locked_id' },
+    { code: 'INVALID_FIELD_TYPE', fieldName: 'age' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(response), /private adapter|secret/);
+  assert.equal('details' in response.error, false);
+});
+
+void test('normalizes unknown field lists into repairable issues', async () => {
+  const adapter = createAdapter({
+    getFieldEvidence: async () => ({
+      ok: false,
+      stateVersion: 4,
+      sourceHash: SOURCE_HASH,
+      error: {
+        code: 'unknown_field',
+        details: { fieldNames: ['missing_one', 'missing_two'] },
+      },
+    }),
+  });
+  const { tools } = await captureTools(adapter);
+  const response = await byName(tools, 'get_field_evidence').execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    fieldNames: ['missing_one', 'missing_two'],
+  });
+
+  assert.equal(response.ok, false);
+  assert.deepEqual(response.error.issues, [
+    { code: 'FIELD_NOT_FOUND', fieldName: 'missing_one' },
+    { code: 'FIELD_NOT_FOUND', fieldName: 'missing_two' },
+  ]);
 });
 
 void test('validate only advances a clean plan to human review', async () => {

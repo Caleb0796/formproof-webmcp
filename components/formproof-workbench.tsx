@@ -489,6 +489,7 @@ export function FormProofWorkbench() {
               options: field.options,
               choices: field.choices,
               multiSelect: field.multiSelect,
+              maxLength: field.maxLength,
               page: field.page,
               rect: field.rect,
             };
@@ -572,6 +573,15 @@ export function FormProofWorkbench() {
                 page: descriptor?.page ?? null,
                 rect: descriptor?.rect ?? null,
                 tooltip: descriptor?.tooltip ?? null,
+                constraints: {
+                  type: definition.type,
+                  required: definition.required,
+                  readOnly: definition.readOnly,
+                  humanOnly: definition.humanOnly,
+                  maxLength: definition.maxLength ?? null,
+                  options: definition.options ?? [],
+                  multiSelect: definition.multiSelect ?? false,
+                },
                 untrustedPdfContent: true,
               };
             }),
