@@ -10,9 +10,11 @@
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "eval:catalog": "node --experimental-strip-types scripts/export-webmcp-eval-catalog.ts",
+    "eval:verify": "node --test --experimental-strip-types tests/evals.test.ts",
     "typecheck": "tsc --noEmit --incremental false",
-    "lint:project": "oxlint app/page.tsx components/formproof-workbench.tsx lib/*.ts tests/*.test.ts vite.config.ts",
-    "format:check": "oxfmt --check app/page.tsx components/formproof-workbench.tsx app/globals.css lib/*.ts tests/*.test.ts vite.config.ts",
+    "lint:project": "oxlint app/page.tsx components/formproof-workbench.tsx lib/*.ts scripts/*.ts tests/*.test.ts vite.config.ts",
+    "format:check": "oxfmt --check app/page.tsx components/formproof-workbench.tsx app/globals.css evals/formproof-evals.json lib/*.ts scripts/*.ts tests/*.test.ts package.json vite.config.ts",
     "lint": "oxlint",
     "format": "oxfmt"
   },
