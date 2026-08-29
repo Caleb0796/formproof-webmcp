@@ -1,9 +1,4 @@
-import {
-  applyApprovedValues,
-  type ApplyResult,
-  type PdfFieldValue,
-  // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
-} from './pdf-engine.ts';
+import type { ApplyResult, PdfFieldValue } from './pdf-engine.ts';
 
 export type FormFieldType =
   | 'text'
@@ -1259,6 +1254,10 @@ export async function exportApprovedPdfFromUi(
   }
 
   const values = approvedDraftValues(state);
+  const { applyApprovedValues } = await import(
+    // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
+    './pdf-engine.ts'
+  );
   const applyResult = await applyApprovedValues(source, values);
   const errors: StateError[] = [];
 

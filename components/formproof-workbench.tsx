@@ -48,12 +48,10 @@ import {
   type FormState,
   type StateError,
 } from '@/lib/form-state';
-import {
-  inspectPdf,
-  PdfEngineError,
-  type ApplyResult,
-  type PdfFieldDescriptor,
-  type PdfInspection,
+import type {
+  ApplyResult,
+  PdfFieldDescriptor,
+  PdfInspection,
 } from '@/lib/pdf-engine';
 import {
   registerFormProofWebMcpTools,
@@ -337,6 +335,7 @@ export function FormProofWorkbench() {
           );
         }
 
+        const { inspectPdf } = await import('@/lib/pdf-engine');
         const inspection = await inspectPdf(bytes);
         const nextState = await createFormState(
           {
@@ -372,7 +371,7 @@ export function FormProofWorkbench() {
         if (!mountedRef.current || generation !== loadGenerationRef.current)
           return;
         const message =
-          caught instanceof PdfEngineError || caught instanceof Error
+          caught instanceof Error
             ? caught.message
             : 'The PDF could not be inspected.';
         setError(message);
@@ -1021,7 +1020,7 @@ export function FormProofWorkbench() {
     } catch (caught) {
       if (!mountedRef.current) return;
       setError(
-        caught instanceof PdfEngineError || caught instanceof Error
+        caught instanceof Error
           ? caught.message
           : 'The approved PDF could not be exported.',
       );
