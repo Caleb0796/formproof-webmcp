@@ -573,7 +573,7 @@ export function FormProofWorkbench() {
                 rect: descriptor?.rect ?? null,
                 tooltip: descriptor?.tooltip ?? null,
                 constraints: {
-                  type: definition.type,
+                  type: descriptor?.type ?? definition.type,
                   required: definition.required,
                   readOnly: definition.readOnly,
                   humanOnly: definition.humanOnly,
