@@ -936,6 +936,26 @@ a {
     text-transform: uppercase;
   }
 
+  .evidence-list {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .compact-evidence {
+    margin-top: 8px;
+  }
+
+  .evidence-list > li {
+    border-left: 2px solid #bfd0c5;
+    padding-left: 7px;
+    color: #627168;
+    font-size: 8px;
+    line-height: 1.45;
+  }
+
   .mini-diff {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -1173,6 +1193,22 @@ a {
   .review-check-copy em {
     border-left: 2px solid #b5cbbd;
     padding-left: 8px;
+  }
+
+  .evidence-block {
+    display: grid;
+    gap: 5px;
+    border-radius: 9px;
+    padding: 8px;
+    background: #f4f7f4;
+  }
+
+  .evidence-block > small {
+    color: #7b8981;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
   }
 
   .human-only-note {

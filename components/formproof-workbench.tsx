@@ -856,6 +856,19 @@ export function FormProofWorkbench() {
         'frm.t3w8':
           'Temporary rent support requested while a new work schedule begins.',
       };
+      const evidenceByField: Record<string, readonly string[]> = {
+        'frm.q7f1': ['Synthetic request · applicant name: Avery Chen'],
+        'frm.p0x4': ['Synthetic request · email: avery@example.test'],
+        'frm.m2k9': ['Synthetic request · preferred contact: Email'],
+        'frm.c8v3': ['Synthetic request · consent explicitly granted'],
+        'frm.r4d6': ['Synthetic request · current housing: rent'],
+        'frm.l9n5': [
+          'Synthetic request · programs: Rent assistance and Utilities',
+        ],
+        'frm.t3w8': [
+          'Synthetic request · temporary rent support while a new work schedule begins',
+        ],
+      };
       const updates: FieldUpdate[] = Object.entries(candidates)
         .filter(([fieldName]) => {
           const field = current.fields[fieldName];
@@ -874,10 +887,15 @@ export function FormProofWorkbench() {
               ? {
                   kind: 'agent_inference',
                   confidence: 0.74,
+                  evidence: evidenceByField[fieldName],
                   rationale:
                     'Drafted from the synthetic demo request for explicit human review.',
                 }
-              : { kind: 'user_instruction', confidence: 0.99 },
+              : {
+                  kind: 'user_instruction',
+                  confidence: 0.99,
+                  evidence: evidenceByField[fieldName],
+                },
         }));
       const result = await stageFieldUpdates(current, {
         expectedStateVersion: current.stateVersion,
@@ -1305,6 +1323,13 @@ export function FormProofWorkbench() {
                       <b>{formatValue(entry.value, descriptor?.choices)}</b>
                     </div>
                     <small>{entry.provenance.kind.replaceAll('_', ' ')}</small>
+                    {entry.provenance.evidence && (
+                      <ul className="evidence-list compact-evidence">
+                        {entry.provenance.evidence.slice(0, 2).map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 );
               })}
@@ -1442,7 +1467,7 @@ export function FormProofWorkbench() {
                     }}
                     disabled={exporting}
                   />
-                  <span className="review-check-copy">
+                  <div className="review-check-copy">
                     <span className="review-check-heading">
                       <strong>{field?.label ?? fieldName}</strong>
                       <Badge variant="outline">
@@ -1482,7 +1507,17 @@ export function FormProofWorkbench() {
                     {staged?.provenance.rationale && (
                       <em>{staged.provenance.rationale}</em>
                     )}
-                  </span>
+                    {staged?.provenance.evidence && (
+                      <div className="evidence-block">
+                        <small>Evidence</small>
+                        <ul className="evidence-list">
+                          {staged.provenance.evidence.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 </label>
               );
             })}
