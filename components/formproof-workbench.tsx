@@ -1439,10 +1439,11 @@ export function FormProofWorkbench() {
           </div>
 
           <div className="review-checklist">
-            {reviewNames.map((fieldName) => {
+            {reviewNames.map((fieldName, index) => {
               const field = formState?.fields[fieldName];
               const staged = formState?.draft[fieldName];
               const descriptor = descriptorByName.get(fieldName);
+              const checkboxId = `review-field-${index}`;
               const isHumanCompletion = !staged;
               const sourceIsBlank = isBlankValue(field?.sourceValue ?? null);
               const requiresHumanCompletion =
@@ -1452,8 +1453,9 @@ export function FormProofWorkbench() {
                     issue.code === 'human_completion_required',
                 ) ?? false;
               return (
-                <label className="review-check" key={fieldName}>
+                <div className="review-check" key={fieldName}>
                   <input
+                    id={checkboxId}
                     type="checkbox"
                     checked={confirmedFields.has(fieldName)}
                     onChange={(event) => {
@@ -1468,7 +1470,9 @@ export function FormProofWorkbench() {
                   />
                   <div className="review-check-copy">
                     <span className="review-check-heading">
-                      <strong>{field?.label ?? fieldName}</strong>
+                      <label htmlFor={checkboxId}>
+                        <strong>{field?.label ?? fieldName}</strong>
+                      </label>
                       <Badge variant="outline">
                         {isHumanCompletion
                           ? requiresHumanCompletion
@@ -1517,7 +1521,7 @@ export function FormProofWorkbench() {
                       </div>
                     )}
                   </div>
-                </label>
+                </div>
               );
             })}
           </div>
