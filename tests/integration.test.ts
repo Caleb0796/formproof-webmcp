@@ -1136,7 +1136,7 @@ void test('carries the real demo PDF through exact human approval and the releas
   );
   assert.ok(
     completed.applyResult.verifiedFields.every(
-      ({ appearanceVerified }) => appearanceVerified,
+      ({ normalAppearancePresent }) => normalAppearancePresent,
     ),
   );
   assert.equal(

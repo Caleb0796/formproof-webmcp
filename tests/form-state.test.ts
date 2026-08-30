@@ -1150,7 +1150,7 @@ void test('exports a deterministic source-bound fill package for protected hybri
   const serializedManifest = JSON.stringify(parsed);
   assert.doesNotMatch(
     serializedManifest,
-    /"(?:appearanceVerified|appearancesPresent|fieldValuesMatch|signatureIntegrityPreserved|verifiedFields)"/u,
+    /"(?:appearanceVerified|normalAppearancePresent|appearancesPresent|fieldValuesMatch|signatureIntegrityPreserved|verifiedFields)"/u,
   );
   assert.equal(state.output, null);
   assert.equal(state.verification, null);

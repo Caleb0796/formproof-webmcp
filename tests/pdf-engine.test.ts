@@ -1042,7 +1042,9 @@ void test('preserves export values for paired choices and writes multiselect arr
     outputFields.get(CHOICE_FIELD.singleDropdown)?.choices,
     initialFields.get(CHOICE_FIELD.singleDropdown)?.choices,
   );
-  assert.ok(result.verifiedFields.every((field) => field.appearanceVerified));
+  assert.ok(
+    result.verifiedFields.every((field) => field.normalAppearancePresent),
+  );
 
   const reopened = await PDFDocument.load(result.bytes, {
     updateMetadata: false,
@@ -1285,7 +1287,21 @@ void test('applies only approved values to a fresh interactive copy and reopens 
   assert.equal(result.fieldCount, 11);
   assert.equal(result.widgetCount, 13);
   assert.equal(result.verifiedFields.length, Object.keys(values).length);
-  assert.ok(result.verifiedFields.every((field) => field.appearanceVerified));
+  assert.equal(
+    result.verifiedFields.every((field) =>
+      Object.hasOwn(field, 'normalAppearancePresent'),
+    ),
+    true,
+  );
+  assert.equal(
+    result.verifiedFields.some((field) =>
+      Object.hasOwn(field, 'appearanceVerified'),
+    ),
+    false,
+  );
+  assert.ok(
+    result.verifiedFields.every((field) => field.normalAppearancePresent),
+  );
   assert.equal(outputFields.get(FIELD.legalName)?.current, 'Ada Lovelace');
   assert.equal(outputFields.get(FIELD.email)?.current, 'ada@example.test');
   assert.equal(outputFields.get(FIELD.contact)?.current, 'Phone');
@@ -1514,7 +1530,7 @@ void test('requires human confirmation before creating a plain usage-rights deri
       type: 'text',
       value: 'Ada Lovelace',
       widgetCount: 1,
-      appearanceVerified: true,
+      normalAppearancePresent: true,
     },
   ]);
 
@@ -1698,7 +1714,7 @@ void test('recovers multi-state checkbox widgets as exact radio semantics', asyn
       type: 'radio',
       value: 'Book',
       widgetCount: 3,
-      appearanceVerified: true,
+      normalAppearancePresent: true,
     },
   ]);
   const selectedDocument = await PDFDocument.load(selected.bytes, {
@@ -1957,7 +1973,7 @@ void test('does not classify untriggered metadata as an action', async () => {
       type: 'text',
       value: 'Synthetic Applicant',
       widgetCount: 1,
-      appearanceVerified: true,
+      normalAppearancePresent: true,
     },
   ]);
 });

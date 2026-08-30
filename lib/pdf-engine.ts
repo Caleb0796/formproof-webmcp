@@ -225,7 +225,7 @@ export interface VerifiedPdfField {
   type: PdfFieldType;
   value: PdfFieldValue;
   widgetCount: number;
-  appearanceVerified: boolean;
+  normalAppearancePresent: boolean;
 }
 
 export interface ApplyResult {
@@ -2432,7 +2432,7 @@ async function applyValues(
       type: descriptor.type,
       value: descriptor.current,
       widgetCount: descriptor.widgetCount,
-      appearanceVerified: true,
+      normalAppearancePresent: true,
     });
   }
 

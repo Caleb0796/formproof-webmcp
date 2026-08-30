@@ -1743,11 +1743,11 @@ async function exportApprovedPdfWithStrategy(
         fieldName,
         message: `${fieldName} does not contain its approved value after export.`,
       });
-    } else if (!verified.appearanceVerified) {
+    } else if (!verified.normalAppearancePresent) {
       errors.push({
         code: 'verification_failed',
         fieldName,
-        message: `${fieldName} has no verified appearance after export.`,
+        message: `${fieldName} has no normal appearance stream after export.`,
       });
     }
   }

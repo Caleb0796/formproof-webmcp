@@ -449,9 +449,11 @@ async function measureWriteRoundTrip(
     'Round-trip verified field names changed',
   );
   assertEqual(
-    result.verifiedFields.every(({ appearanceVerified }) => appearanceVerified),
+    result.verifiedFields.every(
+      ({ normalAppearancePresent }) => normalAppearancePresent,
+    ),
     true,
-    'Round-trip appearance verification failed',
+    'Round-trip normal appearance stream presence check failed',
   );
   for (const [fieldName, value] of Object.entries(experiment.values)) {
     const field = reopened.fields.find(({ name }) => name === fieldName);
@@ -481,7 +483,7 @@ async function measureWriteRoundTrip(
     passed: true,
     stagedFieldCount: expectedFieldNames.length,
     verifiedFieldNames: expectedFieldNames,
-    appearanceVerifiedFieldCount: result.verifiedFields.length,
+    normalAppearanceStreamPresentFieldCount: result.verifiedFields.length,
     activeContentPreserved: true,
     structurePreserved: true,
     outputByteLength: result.bytes.byteLength,
@@ -647,6 +649,7 @@ async function measureFillPackage(
       exported.result.manifest,
       new Set([
         'appearanceVerified',
+        'normalAppearancePresent',
         'appearancesPresent',
         'signatureIntegrityPreserved',
         'signatureVerified',
