@@ -180,6 +180,26 @@ function outputFileName(sourceName: string): string {
   return `${stem}-formproof.pdf`;
 }
 
+function describeActiveContent(
+  activeContent: PdfInspection['activeContent'],
+): string {
+  const markers = [
+    [activeContent.javascriptActionCount, 'JavaScript action'],
+    [
+      activeContent.additionalActionDictionaryCount,
+      'additional-action dictionary',
+    ],
+    [activeContent.openActionCount, 'OpenAction'],
+    [activeContent.externalActionCount, 'external action'],
+    [activeContent.highRiskActionCount, 'blocked high-risk action'],
+    [activeContent.otherActionCount, 'other native action'],
+  ] as const;
+  return markers
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${count} ${label}${count === 1 ? '' : 's'}`)
+    .join(', ');
+}
+
 export function FormProofWorkbench() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stateRef = useRef<FormState | null>(null);
@@ -206,6 +226,8 @@ export function FormProofWorkbench() {
   const [confirmedFields, setConfirmedFields] = useState<Set<string>>(
     () => new Set(),
   );
+  const [activeContentAcknowledged, setActiveContentAcknowledged] =
+    useState(false);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -229,6 +251,7 @@ export function FormProofWorkbench() {
       reviewBindingRef.current = null;
       setReviewOpen(false);
       setConfirmedFields(new Set());
+      setActiveContentAcknowledged(false);
     }
     stateRef.current = next;
     setFormState(next);
@@ -240,6 +263,7 @@ export function FormProofWorkbench() {
     reviewBindingRef.current = null;
     setReviewOpen(false);
     setConfirmedFields(new Set());
+    setActiveContentAcknowledged(false);
   }, []);
 
   const openReview = useCallback(() => {
@@ -256,6 +280,14 @@ export function FormProofWorkbench() {
       setError('Stage at least one field before starting review.');
       return false;
     }
+    const highRiskActionCount =
+      inspectionRef.current?.activeContent.highRiskActionCount ?? 0;
+    if (highRiskActionCount > 0) {
+      setError(
+        `This PDF contains ${highRiskActionCount} blocked high-risk action${highRiskActionCount === 1 ? '' : 's'}. FormProof will not export it.`,
+      );
+      return false;
+    }
     const validation = validateDraft(current);
     if (!validation.canApprove) {
       setError('Resolve the required-field blockers before review.');
@@ -268,6 +300,7 @@ export function FormProofWorkbench() {
       stateVersion: current.stateVersion,
     };
     setConfirmedFields(new Set());
+    setActiveContentAcknowledged(false);
     setError(null);
     setReviewOpen(true);
     return true;
@@ -289,6 +322,7 @@ export function FormProofWorkbench() {
     setLoading(true);
     setReviewOpen(false);
     setConfirmedFields(new Set());
+    setActiveContentAcknowledged(false);
     setError(null);
     setNotice(null);
     return generation;
@@ -337,6 +371,7 @@ export function FormProofWorkbench() {
         reviewBindingRef.current = null;
         setReviewOpen(false);
         setConfirmedFields(new Set());
+        setActiveContentAcknowledged(false);
         setNotice(
           `${inspection.fieldCount} fields and ${inspection.widgetCount} widgets inspected locally.`,
         );
@@ -427,6 +462,7 @@ export function FormProofWorkbench() {
           const cursor = parseFormContextCursor(
             input.cursor,
             current.source.sourceHash,
+            input,
           );
           if (!cursor.ok) {
             return adapterFailure(
@@ -438,25 +474,28 @@ export function FormProofWorkbench() {
             );
           }
           offset = cursor.offset;
-          if (offset > inspection.fields.length) {
-            return adapterFailure(
-              current,
-              'invalid_input',
-              'The field cursor is out of range.',
-            );
-          }
+        }
+
+        const data = createFormContextToolData(
+          current,
+          inspection,
+          offset,
+          input.limit,
+          input,
+        );
+        if (offset > data.pagination.total) {
+          return adapterFailure(
+            current,
+            'invalid_input',
+            'The field cursor is out of range.',
+          );
         }
 
         return {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
-          data: createFormContextToolData(
-            current,
-            inspection,
-            offset,
-            input.limit,
-          ),
+          data,
         };
       },
 
@@ -626,13 +665,20 @@ export function FormProofWorkbench() {
         const mismatch = bindingFailure(current, input);
         if (mismatch) return mismatch;
         const validation = validateDraft(current);
+        const exportBlockedByPdfActions =
+          inspectionRef.current?.activeContent.highRiskActionCount ?? 0;
         return {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
           data: {
-            valid:
-              validation.canApprove && Object.keys(current.draft).length > 0,
+            readyForReview:
+              validation.canApprove &&
+              Object.keys(current.draft).length > 0 &&
+              exportBlockedByPdfActions === 0,
+            ...(exportBlockedByPdfActions === 0
+              ? {}
+              : { exportBlockedByPdfActions }),
             stagedFieldCount: Object.keys(current.draft).length,
             ...validation,
           },
@@ -650,6 +696,15 @@ export function FormProofWorkbench() {
         }
         const mismatch = bindingFailure(current, input);
         if (mismatch) return mismatch;
+        const exportBlockedByPdfActions =
+          inspectionRef.current?.activeContent.highRiskActionCount ?? 0;
+        if (exportBlockedByPdfActions > 0) {
+          return adapterFailure(
+            current,
+            'pdf_action_unsupported',
+            'This PDF contains blocked actions. Load a different PDF before starting review.',
+          );
+        }
         if (
           Object.keys(current.draft).length === 0 ||
           !validateDraft(current).canApprove
@@ -893,9 +948,19 @@ export function FormProofWorkbench() {
     ].sort();
   }, [formState]);
 
+  const activeContent = documentState?.inspection.activeContent;
+  const activeContentDescription = activeContent
+    ? describeActiveContent(activeContent)
+    : '';
+  const requiresActiveContentAcknowledgment =
+    activeContentDescription.length > 0;
+  const hasBlockedHighRiskActions =
+    (activeContent?.highRiskActionCount ?? 0) > 0;
+
   const allReviewFieldsConfirmed =
     reviewNames.length > 0 &&
-    reviewNames.every((name) => confirmedFields.has(name));
+    reviewNames.every((name) => confirmedFields.has(name)) &&
+    (!requiresActiveContentAcknowledgment || activeContentAcknowledged);
 
   const approveAndExport = useCallback(async () => {
     if (exportingRef.current) return;
@@ -918,6 +983,7 @@ export function FormProofWorkbench() {
       reviewBindingRef.current = null;
       setReviewOpen(false);
       setConfirmedFields(new Set());
+      setActiveContentAcknowledged(false);
       return;
     }
 
@@ -969,6 +1035,7 @@ export function FormProofWorkbench() {
       );
       setReviewOpen(false);
       setConfirmedFields(new Set());
+      setActiveContentAcknowledged(false);
     } catch (caught) {
       if (!mountedRef.current) return;
       setError(
@@ -1078,7 +1145,7 @@ export function FormProofWorkbench() {
       <section className="intro" aria-labelledby="page-title">
         <div>
           <p className="eyebrow">
-            <Sparkles aria-hidden="true" /> AcroForm safe mode
+            <Sparkles aria-hidden="true" /> AcroForm review mode
           </p>
           <h1 id="page-title">The agent drafts. You decide.</h1>
           <p>
@@ -1135,7 +1202,7 @@ export function FormProofWorkbench() {
           <div className="panel-heading">
             <div>
               <p className="section-kicker">Workflow</p>
-              <h2 id="flow-title">One safe path</h2>
+              <h2 id="flow-title">One bounded path</h2>
             </div>
             <span className="revision">v{formState?.stateVersion ?? 0}</span>
           </div>
@@ -1164,6 +1231,15 @@ export function FormProofWorkbench() {
                 Agent tools can inspect, stage, validate, and open review.
                 Approval and export stay in this interface.
               </p>
+              {formState && (
+                <p>
+                  Whole-form completeness is not assessed; structural checks use
+                  PDF required flags only.
+                  {requiresActiveContentAcknowledgment
+                    ? ` Detected markers: ${activeContentDescription}. Categories can overlap.`
+                    : ''}
+                </p>
+              )}
             </div>
           </div>
         </aside>
@@ -1338,15 +1414,17 @@ export function FormProofWorkbench() {
               className="w-full"
               size="lg"
               onClick={openReview}
-              disabled={!validation?.canApprove}
+              disabled={!validation?.canApprove || hasBlockedHighRiskActions}
             >
               Review exact plan <ArrowRight aria-hidden="true" />
             </Button>
           )}
           <p className="button-note">
-            {validation && validation.blockerCount > 0
-              ? `${validation.blockerCount} validation blocker(s) remain.`
-              : 'Approval and export are not WebMCP tools.'}
+            {hasBlockedHighRiskActions
+              ? 'Export is blocked because the PDF contains a high-risk native action.'
+              : validation && validation.blockerCount > 0
+                ? `${validation.blockerCount} validation blocker(s) remain.`
+                : 'Approval and export are not WebMCP tools.'}
           </p>
 
           {releaseOpen && formState?.approval && outputResult && (
@@ -1383,11 +1461,15 @@ export function FormProofWorkbench() {
                   </dd>
                 </div>
                 <div>
-                  <dt>Whole form</dt>
+                  <dt>Form structure</dt>
                   <dd>
                     {outputResult.fieldCount} total fields ·{' '}
                     {outputResult.widgetCount} total widgets
                   </dd>
+                </div>
+                <div>
+                  <dt>Completeness</dt>
+                  <dd>Not assessed beyond PDF required flags</dd>
                 </div>
                 <div>
                   <dt>Still required</dt>
@@ -1525,6 +1607,33 @@ export function FormProofWorkbench() {
                 </div>
               );
             })}
+            {requiresActiveContentAcknowledgment && (
+              <div className="review-check">
+                <input
+                  id="review-active-content"
+                  type="checkbox"
+                  checked={activeContentAcknowledged}
+                  onChange={(event) =>
+                    setActiveContentAcknowledged(event.target.checked)
+                  }
+                  disabled={exporting}
+                />
+                <div className="review-check-copy">
+                  <span className="review-check-heading">
+                    <label htmlFor="review-active-content">
+                      <strong>Unvalidated PDF behaviors</strong>
+                    </label>
+                    <Badge variant="outline">Source risk</Badge>
+                  </span>
+                  <span className="human-only-note">
+                    Detected markers: {activeContentDescription}. Categories can
+                    overlap. FormProof preserves these behaviors but does not
+                    execute or validate them; the exported copy may run them in
+                    another PDF reader. Continue only if you trust the source.
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="dialog-safety-note">

@@ -3,12 +3,17 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+  PDFArray,
+  PDFCheckBox,
   PDFDict,
   PDFDocument,
   PDFDropdown,
   PDFHexString,
   PDFName,
+  PDFNumber,
   PDFOptionList,
+  PDFStream,
+  PDFString,
   StandardFonts,
   rgb,
 } from 'pdf-lib';
@@ -79,6 +84,34 @@ function setCanonicalChoiceValues(
       .sort((left, right) => left - right);
     dictionary.set(PDFName.of('I'), dictionary.context.obj(indices));
   }
+}
+
+function normalAppearanceFingerprint(
+  document: PDFDocument,
+  fieldName: string,
+): unknown {
+  return document
+    .getForm()
+    .getField(fieldName)
+    .acroField.getWidgets()
+    .map((widget) => {
+      const normal = widget.getAppearances()?.normal;
+      if (normal instanceof PDFStream) {
+        return Buffer.from(normal.getContents()).toString('base64');
+      }
+      if (!(normal instanceof PDFDict)) return null;
+      return normal
+        .keys()
+        .map((key) => {
+          const stream = document.context.lookup(normal.get(key));
+          assert.ok(stream instanceof PDFStream);
+          return [
+            key.decodeText(),
+            Buffer.from(stream.getContents()).toString('base64'),
+          ];
+        })
+        .sort(([left], [right]) => left.localeCompare(right));
+    });
 }
 
 async function choiceCompatibilityBytes(): Promise<Uint8Array> {
@@ -165,6 +198,278 @@ async function choiceCompatibilityBytes(): Promise<Uint8Array> {
   setCanonicalChoiceValues(singleDropdown, dropdownChoices, ['north']);
   setCanonicalChoiceValues(optionList, listChoices, ['red', 'blue']);
   setCanonicalChoiceValues(singleOptionList, listChoices, ['green']);
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function choiceNormalizationBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const form = document.getForm();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  const choices = [
+    { value: ' ', label: 'Blank sentinel' },
+    { value: 'CA', label: '   ' },
+    { value: 'CA', label: 'Duplicate California' },
+    { value: 'NY', label: 'New York' },
+    { value: ' CA ', label: 'Padded but nonblank' },
+  ] as const;
+
+  const dropdown = form.createDropdown('normalization.dropdown');
+  setPairedChoices(dropdown, choices);
+  dropdown.select('Blank sentinel');
+  dropdown.addToPage(page, {
+    x: 40,
+    y: 700,
+    width: 220,
+    height: 24,
+    font,
+  });
+
+  const optionList = form.createOptionList('normalization.option-list');
+  setPairedChoices(optionList, choices);
+  optionList.enableMultiselect();
+  optionList.select(['Blank sentinel', 'New York']);
+  optionList.addToPage(page, {
+    x: 40,
+    y: 570,
+    width: 220,
+    height: 90,
+    font,
+  });
+
+  form.updateFieldAppearances(font);
+  setCanonicalChoiceValues(dropdown, choices, [' ']);
+  setCanonicalChoiceValues(optionList, choices, [' ', 'NY', 'NY']);
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function signatureTextFieldsBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const form = document.getForm();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  const signatures = [
+    'Signature of Employee',
+    'Signature of Preparer or Translator 0',
+    'Signature of Preparer or Translator 1',
+    'Signature of Preparer or Translator 2',
+    'Signature of Preparer or Translator 3',
+    'Signature of Emp Rep 0',
+    'Signature of Emp Rep 1',
+    'Signature of Emp Rep 2',
+    'Signature of Employer or AR',
+  ];
+  const signatureDates = [
+    "Today's Date mmddyyyy",
+    'Sig Date mmddyyyy 0',
+    'Signature Date mmddyyyy',
+    'Applicant Signature Date',
+  ];
+
+  for (const [index, name] of [
+    ...signatures,
+    'Applicant Signature',
+    ...signatureDates,
+  ].entries()) {
+    const field = form.createTextField(name);
+    const tooltip = signatures.includes(name)
+      ? `Enter Signature of ${name.replace(/^Signature of /, '')}.`
+      : name === 'Applicant Signature'
+        ? 'Applicant ink entry'
+        : name === "Today's Date mmddyyyy"
+          ? 'Enter Signature of Employer for this date.'
+          : 'Enter Date of Signature as month, day, and year.';
+    field.acroField.dict.set(PDFName.of('TU'), PDFHexString.fromText(tooltip));
+    field.addToPage(page, {
+      x: 40,
+      y: 740 - index * 44,
+      width: 260,
+      height: 20,
+      font,
+    });
+  }
+
+  form.updateFieldAppearances(font);
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+function renameCheckBoxWidgetOnState(
+  field: PDFCheckBox,
+  widgetIndex: number,
+  option: string,
+): void {
+  const widget = field.acroField.getWidgets()[widgetIndex];
+  const normal = widget?.getAppearances()?.normal;
+  assert.ok(widget);
+  assert.ok(normal instanceof PDFDict);
+  const appearance = normal.get(PDFName.of('Yes'));
+  assert.ok(appearance);
+  normal.delete(PDFName.of('Yes'));
+  normal.set(PDFName.of(option), appearance);
+}
+
+async function recoveredRadioCheckBoxBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const form = document.getForm();
+  const field = form.createCheckBox('malformed.selection');
+  const options = ['Book', 'Card', 'Both'];
+
+  for (const [index] of options.entries()) {
+    field.addToPage(page, {
+      x: 40 + index * 60,
+      y: 700,
+      width: 18,
+      height: 18,
+    });
+  }
+  for (const [index, option] of options.entries()) {
+    renameCheckBoxWidgetOnState(field, index, option);
+  }
+
+  field.acroField.dict.set(PDFName.of('V'), PDFName.of('Card'));
+  for (const [index, widget] of field.acroField.getWidgets().entries()) {
+    widget.setAppearanceState(PDFName.of(index === 1 ? 'Card' : 'Off'));
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function sharedStateCheckBoxBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const form = document.getForm();
+  const field = form.createCheckBox('ordinary.shared-checkbox');
+  field.addToPage(page, { x: 40, y: 700, width: 18, height: 18 });
+  field.addToPage(page, { x: 80, y: 700, width: 18, height: 18 });
+  field.check();
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function activeContentBytes(
+  options: {
+    highRisk?: boolean;
+    orphan?: boolean;
+  } = {},
+): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const form = document.getForm();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  const field = form.createTextField('active.name');
+  field.addToPage(page, {
+    x: 40,
+    y: 700,
+    width: 220,
+    height: 24,
+    font,
+  });
+  form.updateFieldAppearances(font);
+
+  const actionType = options.highRisk ? 'Launch' : 'JavaScript';
+  const action = document.context.obj({
+    S: actionType,
+    JS: PDFString.of('validateWithoutExecuting();'),
+    F: PDFString.of('untrusted-program'),
+  }) as PDFDict;
+  const actionRef = document.context.register(action);
+  const additionalActions = document.context.obj({ K: actionRef }) as PDFDict;
+  const additionalActionsRef = document.context.register(additionalActions);
+
+  if (!options.orphan) {
+    field.acroField.dict.set(PDFName.of('AA'), additionalActionsRef);
+    document.catalog.set(PDFName.of('OpenAction'), actionRef);
+    if (!options.highRisk) {
+      const uri = document.context.obj({
+        S: 'URI',
+        URI: PDFString.of('https://example.test/'),
+      }) as PDFDict;
+      field.acroField.dict.set(PDFName.of('A'), document.context.register(uri));
+    }
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function resetFormActionBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(
+    await activeContentBytes({ orphan: true }),
+    {
+      updateMetadata: false,
+    },
+  );
+  const field = document.getForm().getTextField('active.name');
+  const action = document.context.obj({ S: 'ResetForm' }) as PDFDict;
+  field.acroField.dict.set(PDFName.of('A'), document.context.register(action));
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function unknownActionBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(
+    await activeContentBytes({ orphan: true }),
+    { updateMetadata: false },
+  );
+  const field = document.getForm().getTextField('active.name');
+  const action = document.context.obj({
+    Type: 'Action',
+    S: 'VendorDanger',
+    Payload: PDFString.of('opaque'),
+  }) as PDFDict;
+  field.acroField.dict.set(PDFName.of('A'), document.context.register(action));
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function actionLikeMetadataBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(
+    await activeContentBytes({ orphan: true }),
+    { updateMetadata: false },
+  );
+  const metadata = document.context.obj({
+    Type: 'Metadata',
+    S: 'Launch',
+    Payload: PDFString.of('not an action'),
+  }) as PDFDict;
+  document.catalog.set(
+    PDFName.of('VendorMetadata'),
+    document.context.register(metadata),
+  );
 
   return document.save({
     addDefaultPage: false,
@@ -447,6 +752,84 @@ void test('normalizes empty and single choice values from field multiplicity', a
   );
 });
 
+void test('normalizes blank and duplicate choice sentinels at the PDF boundary', async () => {
+  const source = await choiceNormalizationBytes();
+  const inspection = await inspectPdf(source);
+  const fields = new Map(inspection.fields.map((field) => [field.name, field]));
+  const expectedChoices = [
+    { value: 'CA', label: 'CA' },
+    { value: 'NY', label: 'New York' },
+    { value: ' CA ', label: 'Padded but nonblank' },
+  ];
+
+  assert.equal(fields.get('normalization.dropdown')?.current, null);
+  assert.deepEqual(
+    fields.get('normalization.dropdown')?.choices,
+    expectedChoices,
+  );
+  assert.deepEqual(fields.get('normalization.dropdown')?.options, [
+    'CA',
+    'NY',
+    ' CA ',
+  ]);
+  assert.deepEqual(fields.get('normalization.option-list')?.current, ['NY']);
+  assert.deepEqual(
+    fields.get('normalization.option-list')?.choices,
+    expectedChoices,
+  );
+
+  const initialDocument = await PDFDocument.load(source, {
+    updateMetadata: false,
+  });
+  assert.equal(
+    initialDocument
+      .getForm()
+      .getDropdown('normalization.dropdown')
+      .isEditable(),
+    false,
+  );
+
+  const applied = await applyApprovedValues(source, {
+    'normalization.dropdown': 'CA',
+    'normalization.option-list': ['NY', ' CA '],
+  });
+  const appliedInspection = await inspectPdf(applied.bytes);
+  const appliedFields = new Map(
+    appliedInspection.fields.map((field) => [field.name, field]),
+  );
+  assert.equal(appliedFields.get('normalization.dropdown')?.current, 'CA');
+  assert.deepEqual(appliedFields.get('normalization.option-list')?.current, [
+    'NY',
+    ' CA ',
+  ]);
+
+  const appliedDocument = await PDFDocument.load(applied.bytes, {
+    updateMetadata: false,
+  });
+  assert.equal(
+    appliedDocument
+      .getForm()
+      .getDropdown('normalization.dropdown')
+      .isEditable(),
+    false,
+  );
+  const optionList = appliedDocument
+    .getForm()
+    .getOptionList('normalization.option-list');
+  const rawIndices = appliedDocument.context.lookup(
+    optionList.acroField.dict.get(PDFName.of('I')),
+  );
+  assert.ok(rawIndices instanceof PDFArray);
+  assert.deepEqual(
+    Array.from({ length: rawIndices.size() }, (_, index) => {
+      const item = appliedDocument.context.lookup(rawIndices.get(index));
+      assert.ok(item instanceof PDFNumber);
+      return item.asNumber();
+    }),
+    [3, 4],
+  );
+});
+
 void test('enforces choice input shape and export values from multiplicity', async () => {
   const source = await choiceCompatibilityBytes();
 
@@ -566,6 +949,26 @@ void test('applies only approved values to a fresh interactive copy and reopens 
   );
 });
 
+void test('does not regenerate appearances for unstaged fields', async () => {
+  const source = await demoBytes();
+  const beforeDocument = await PDFDocument.load(source, {
+    updateMetadata: false,
+  });
+  const before = normalAppearanceFingerprint(beforeDocument, FIELD.consent);
+
+  const result = await applyApprovedValues(source, {
+    [FIELD.legalName]: 'Ada Lovelace',
+  });
+  const afterDocument = await PDFDocument.load(result.bytes, {
+    updateMetadata: false,
+  });
+
+  assert.deepEqual(
+    normalAppearanceFingerprint(afterDocument, FIELD.consent),
+    before,
+  );
+});
+
 void test('returns the exact source copy when no fields are approved', async () => {
   const source = await demoBytes();
   const result = await applyApprovedValues(source, {});
@@ -680,6 +1083,387 @@ void test('inspects a blank signature as a human-only field', async () => {
   assert.equal(signature?.type, 'signature');
   assert.equal(signature?.current, null);
   assert.equal(signature?.humanOnly, true);
+});
+
+void test('reserves explicit text signatures without blocking signature dates', async () => {
+  const source = await signatureTextFieldsBytes();
+  const inspection = await inspectPdf(source);
+  const signatureFields = inspection.fields.filter((field) =>
+    field.name.startsWith('Signature of '),
+  );
+  const applicantSignature = inspection.fields.find(
+    (field) => field.name === 'Applicant Signature',
+  );
+  const dateFields = inspection.fields.filter((field) =>
+    /date/i.test(field.name),
+  );
+
+  assert.equal(signatureFields.length, 9);
+  assert.ok(signatureFields.every((field) => field.humanOnly));
+  assert.equal(applicantSignature?.humanOnly, true);
+  assert.ok(dateFields.every((field) => !field.humanOnly));
+  assert.equal(
+    inspection.warnings.filter(
+      (warning) => warning.code === 'SIGNATURE_TEXT_FIELD_HUMAN_ONLY',
+    ).length,
+    10,
+  );
+
+  await expectEngineError(
+    applyApprovedValues(source, {
+      'Applicant Signature': 'Synthetic Applicant',
+    }),
+    'FIELD_HUMAN_ONLY',
+    'Applicant Signature',
+  );
+
+  await expectEngineError(
+    applyApprovedValues(source, {
+      'Signature of Employee': 'Synthetic Applicant',
+    }),
+    'FIELD_HUMAN_ONLY',
+    'Signature of Employee',
+  );
+
+  const dated = await applyApprovedValues(source, {
+    'Signature Date mmddyyyy': '08/29/2026',
+  });
+  assert.equal(
+    (await inspectPdf(dated.bytes)).fields.find(
+      (field) => field.name === 'Signature Date mmddyyyy',
+    )?.current,
+    '08/29/2026',
+  );
+});
+
+void test('recovers multi-state checkbox widgets as exact radio semantics', async () => {
+  const source = await recoveredRadioCheckBoxBytes();
+  const initial = await inspectPdf(source);
+  const descriptor = initial.fields.find(
+    (field) => field.name === 'malformed.selection',
+  );
+
+  assert.deepEqual(
+    {
+      type: descriptor?.type,
+      current: descriptor?.current,
+      options: descriptor?.options,
+      choices: descriptor?.choices,
+      multiSelect: descriptor?.multiSelect,
+    },
+    {
+      type: 'radio',
+      current: 'Card',
+      options: ['Book', 'Card', 'Both'],
+      choices: [
+        { value: 'Book', label: 'Book' },
+        { value: 'Card', label: 'Card' },
+        { value: 'Both', label: 'Both' },
+      ],
+      multiSelect: false,
+    },
+  );
+
+  await expectEngineError(
+    applyApprovedValues(source, { 'malformed.selection': true }),
+    'FIELD_VALUE_TYPE_INVALID',
+    'malformed.selection',
+  );
+
+  const selected = await applyApprovedValues(source, {
+    'malformed.selection': 'Book',
+  });
+  assert.deepEqual(selected.verifiedFields, [
+    {
+      name: 'malformed.selection',
+      type: 'radio',
+      value: 'Book',
+      widgetCount: 3,
+      appearanceVerified: true,
+    },
+  ]);
+  const selectedDocument = await PDFDocument.load(selected.bytes, {
+    updateMetadata: false,
+  });
+  const selectedField = selectedDocument
+    .getForm()
+    .getCheckBox('malformed.selection');
+  assert.equal(selectedField.acroField.getValue().decodeText(), 'Book');
+  assert.deepEqual(
+    selectedField.acroField
+      .getWidgets()
+      .map((widget) => widget.getAppearanceState()?.decodeText()),
+    ['Book', 'Off', 'Off'],
+  );
+  assert.deepEqual(
+    selectedField.acroField.getWidgets().map((widget) => {
+      const normal = widget.getAppearances()?.normal;
+      assert.ok(normal instanceof PDFDict);
+      return normal.keys().map((key) => key.decodeText());
+    }),
+    [
+      ['Off', 'Book'],
+      ['Off', 'Card'],
+      ['Off', 'Both'],
+    ],
+  );
+
+  const cleared = await applyApprovedValues(source, {
+    'malformed.selection': null,
+  });
+  const clearedDocument = await PDFDocument.load(cleared.bytes, {
+    updateMetadata: false,
+  });
+  const clearedField = clearedDocument
+    .getForm()
+    .getCheckBox('malformed.selection');
+  assert.equal(clearedField.acroField.getValue().decodeText(), 'Off');
+  assert.ok(
+    clearedField.acroField
+      .getWidgets()
+      .every((widget) => widget.getAppearanceState()?.decodeText() === 'Off'),
+  );
+});
+
+void test('keeps shared-state multi-widget checkboxes boolean', async () => {
+  const source = await sharedStateCheckBoxBytes();
+  const initial = (await inspectPdf(source)).fields[0];
+  assert.equal(initial?.type, 'checkbox');
+  assert.equal(initial?.current, true);
+  assert.deepEqual(initial?.options, []);
+
+  const cleared = await applyApprovedValues(source, {
+    'ordinary.shared-checkbox': false,
+  });
+  const output = (await inspectPdf(cleared.bytes)).fields[0];
+  assert.equal(output?.type, 'checkbox');
+  assert.equal(output?.current, false);
+});
+
+void test('reports reachable active content without exposing or executing scripts', async () => {
+  const source = await activeContentBytes();
+  const inspection = await inspectPdf(source);
+
+  assert.deepEqual(inspection.activeContent, {
+    javascriptActionCount: 1,
+    additionalActionDictionaryCount: 1,
+    openActionCount: 1,
+    externalActionCount: 1,
+    highRiskActionCount: 0,
+    otherActionCount: 0,
+  });
+  assert.ok(
+    inspection.warnings.some(
+      (warning) =>
+        warning.code === 'ACTIVE_CONTENT_PRESERVED' &&
+        /preserved/i.test(warning.message) &&
+        /does not execute or validate/i.test(warning.message),
+    ),
+  );
+  assert.ok(
+    inspection.warnings.some(
+      (warning) =>
+        warning.code === 'JAVASCRIPT_UNVALIDATED' &&
+        /preserved/i.test(warning.message) &&
+        /does not execute or semantically validate/i.test(warning.message),
+    ),
+  );
+  assert.doesNotMatch(JSON.stringify(inspection), /validateWithoutExecuting/);
+
+  const result = await applyApprovedValues(source, {
+    'active.name': 'Synthetic Applicant',
+  });
+  assert.deepEqual(result.activeContent, inspection.activeContent);
+  assert.deepEqual(
+    (await inspectPdf(result.bytes)).activeContent,
+    inspection.activeContent,
+  );
+});
+
+void test('reports but refuses to export native high-risk PDF actions', async () => {
+  const source = await activeContentBytes({ highRisk: true });
+  const inspection = await inspectPdf(source);
+
+  assert.deepEqual(inspection.activeContent, {
+    javascriptActionCount: 0,
+    additionalActionDictionaryCount: 1,
+    openActionCount: 1,
+    externalActionCount: 1,
+    highRiskActionCount: 1,
+    otherActionCount: 0,
+  });
+  await expectEngineError(
+    applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+    'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+  );
+  await expectEngineError(
+    applyApprovedValues(source, {}),
+    'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+  );
+});
+
+void test('ignores unreachable signature and action objects', async () => {
+  const source = await activeContentBytes({ highRisk: true, orphan: true });
+  const document = await PDFDocument.load(source, { updateMetadata: false });
+  document.context.register(
+    document.context.obj({
+      Type: 'Sig',
+      ByteRange: [
+        PDFNumber.of(0),
+        PDFNumber.of(0),
+        PDFNumber.of(0),
+        PDFNumber.of(0),
+      ],
+    }) as PDFDict,
+  );
+  const withOrphans = await document.save({
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+  const inspection = await inspectPdf(withOrphans);
+
+  assert.deepEqual(inspection.activeContent, {
+    javascriptActionCount: 0,
+    additionalActionDictionaryCount: 0,
+    openActionCount: 0,
+    externalActionCount: 0,
+    highRiskActionCount: 0,
+    otherActionCount: 0,
+  });
+  assert.ok(
+    !inspection.warnings.some(
+      (warning) => warning.code === 'ACTIVE_CONTENT_PRESERVED',
+    ),
+  );
+});
+
+void test('reports and preserves standard native PDF actions', async () => {
+  const source = await resetFormActionBytes();
+  const inspection = await inspectPdf(source);
+
+  assert.deepEqual(inspection.activeContent, {
+    javascriptActionCount: 0,
+    additionalActionDictionaryCount: 0,
+    openActionCount: 0,
+    externalActionCount: 0,
+    highRiskActionCount: 0,
+    otherActionCount: 1,
+  });
+  assert.ok(
+    inspection.warnings.some(
+      (warning) => warning.code === 'ACTIVE_CONTENT_PRESERVED',
+    ),
+  );
+
+  const result = await applyApprovedValues(source, {
+    'active.name': 'Synthetic Applicant',
+  });
+  assert.deepEqual(result.activeContent, inspection.activeContent);
+  assert.deepEqual(
+    (await inspectPdf(result.bytes)).activeContent,
+    inspection.activeContent,
+  );
+});
+
+void test('blocks unrecognized actions referenced by form fields', async () => {
+  const source = await unknownActionBytes();
+  const inspection = await inspectPdf(source);
+
+  assert.deepEqual(inspection.activeContent, {
+    javascriptActionCount: 0,
+    additionalActionDictionaryCount: 0,
+    openActionCount: 0,
+    externalActionCount: 0,
+    highRiskActionCount: 1,
+    otherActionCount: 0,
+  });
+  assert.ok(
+    inspection.warnings.some(
+      (warning) => warning.code === 'ACTIVE_CONTENT_PRESERVED',
+    ),
+  );
+  await expectEngineError(
+    applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+    'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+  );
+});
+
+void test('does not classify untriggered metadata as an action', async () => {
+  const source = await actionLikeMetadataBytes();
+  const inspection = await inspectPdf(source);
+
+  assert.deepEqual(inspection.activeContent, {
+    javascriptActionCount: 0,
+    additionalActionDictionaryCount: 0,
+    openActionCount: 0,
+    externalActionCount: 0,
+    highRiskActionCount: 0,
+    otherActionCount: 0,
+  });
+  const result = await applyApprovedValues(source, {
+    'active.name': 'Synthetic Applicant',
+  });
+  assert.deepEqual(result.verifiedFields, [
+    {
+      name: 'active.name',
+      type: 'text',
+      value: 'Synthetic Applicant',
+      widgetCount: 1,
+      appearanceVerified: true,
+    },
+  ]);
+});
+
+void test('rejects reachable certification structures before XFA handling', async () => {
+  const restrictedStructures: Array<{
+    name: string;
+    create: (document: PDFDocument) => PDFDict;
+  }> = [
+    {
+      name: 'catalog Perms',
+      create: (document) => document.context.obj({}) as PDFDict,
+    },
+    {
+      name: 'signature dictionary',
+      create: (document) => document.context.obj({ Type: 'Sig' }) as PDFDict,
+    },
+    {
+      name: 'ByteRange',
+      create: (document) =>
+        document.context.obj({ ByteRange: [0, 0, 0, 0] }) as PDFDict,
+    },
+    {
+      name: 'DocMDP',
+      create: (document) =>
+        document.context.obj({ TransformMethod: 'DocMDP' }) as PDFDict,
+    },
+    {
+      name: 'UR3',
+      create: (document) =>
+        document.context.obj({ TransformMethod: 'UR3' }) as PDFDict,
+    },
+  ];
+
+  for (const restricted of restrictedStructures) {
+    const document = await PDFDocument.load(await demoBytes(), {
+      updateMetadata: false,
+    });
+    document
+      .getForm()
+      .acroForm.dict.set(PDFName.of('XFA'), PDFHexString.fromText('xfa'));
+    const structure = restricted.create(document);
+    if (restricted.name === 'catalog Perms') {
+      document.catalog.set(PDFName.of('Perms'), structure);
+    } else {
+      document.catalog.set(
+        PDFName.of('FormProofRestrictedStructure'),
+        document.context.register(structure),
+      );
+    }
+    const bytes = await document.save({ updateFieldAppearances: false });
+
+    await expectEngineError(inspectPdf(bytes), 'PDF_SIGNED_UNSUPPORTED');
+  }
 });
 
 void test('rejects a signed document during inspection and apply', async () => {

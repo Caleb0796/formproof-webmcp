@@ -1,5 +1,6 @@
 import {
   EncryptedPDFError,
+  PDFArray,
   PDFCheckBox,
   PDFDict,
   PDFDocument,
@@ -9,6 +10,7 @@ import {
   PDFName,
   PDFNull,
   PDFOptionList,
+  PDFObject,
   PDFRadioGroup,
   PDFRef,
   PDFSignature,
@@ -47,6 +49,7 @@ export type PdfEngineErrorCode =
   | 'PDF_LOAD_FAILED'
   | 'PDF_XFA_UNSUPPORTED'
   | 'PDF_SIGNED_UNSUPPORTED'
+  | 'PDF_HIGH_RISK_ACTION_UNSUPPORTED'
   | 'FIELD_NOT_FOUND'
   | 'FIELD_READ_ONLY'
   | 'FIELD_HUMAN_ONLY'
@@ -67,9 +70,21 @@ export type PdfEngineErrorCode =
 export type PdfEngineWarningCode =
   | 'NO_ACROFORM_FIELDS'
   | 'SIGNATURE_FIELD_HUMAN_ONLY'
+  | 'SIGNATURE_TEXT_FIELD_HUMAN_ONLY'
   | 'UNSUPPORTED_FIELD_TYPE'
   | 'WIDGET_PAGE_UNKNOWN'
-  | 'APPEARANCE_UNAVAILABLE';
+  | 'APPEARANCE_UNAVAILABLE'
+  | 'JAVASCRIPT_UNVALIDATED'
+  | 'ACTIVE_CONTENT_PRESERVED';
+
+export interface PdfActiveContentSummary {
+  javascriptActionCount: number;
+  additionalActionDictionaryCount: number;
+  openActionCount: number;
+  externalActionCount: number;
+  highRiskActionCount: number;
+  otherActionCount: number;
+}
 
 export interface PdfRect {
   x: number;
@@ -118,6 +133,7 @@ export interface PdfInspection {
   pageCount: number;
   fieldCount: number;
   widgetCount: number;
+  activeContent: PdfActiveContentSummary;
   fields: PdfFieldDescriptor[];
   warnings: PdfEngineWarning[];
 }
@@ -136,6 +152,7 @@ export interface ApplyResult {
   outputHash: string;
   fieldCount: number;
   widgetCount: number;
+  activeContent: PdfActiveContentSummary;
   verifiedFields: VerifiedPdfField[];
   warnings: PdfEngineWarning[];
 }
@@ -172,9 +189,28 @@ export class PdfEngineError extends Error {
 interface LoadedPdf {
   document: PDFDocument;
   form: ReturnType<PDFDocument['getForm']>;
+  activeContent: PdfActiveContentSummary;
 }
 
 const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/i;
+const EXPLICIT_SIGNATURE_FIELD =
+  /(?:^|[\s.,;:])signature\s+of(?:\s|$)|\benter\s+(?:the\s+)?signature(?!\s+date\b)(?:\s|[:.]|$)|\bcannot\s+be\s+signed\s+electronically\b|\bprint\s+and\s+sign\s+in\s+ink\b/i;
+const DIRECT_SIGNATURE_FIELD_NAME = /(?:^|[\s.])signature(?:\s+\d+)?\s*$/i;
+const SIGNATURE_DATE_FIELD = /\bdate\b.*\bsignature\b|\bsignature\b.*\bdate\b/i;
+const REPORT_ONLY_ACTION_TYPES = new Set([
+  'GoTo',
+  'Thread',
+  'Sound',
+  'Movie',
+  'Hide',
+  'Named',
+  'ResetForm',
+  'SetOCGState',
+  'Rendition',
+  'Trans',
+  'GoTo3DView',
+  'RichMediaExecute',
+]);
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return Uint8Array.from(bytes);
@@ -195,6 +231,229 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, '0'),
   ).join('');
+}
+
+function collectPdfDictionaries(document: PDFDocument): PDFDict[] {
+  const dictionaries: PDFDict[] = [];
+  const seen = new Set<PDFObject>();
+  const pending: PDFObject[] = [document.catalog];
+
+  while (pending.length > 0) {
+    const object = pending.pop();
+    if (object === undefined || seen.has(object)) continue;
+    seen.add(object);
+
+    if (object instanceof PDFRef) {
+      const resolved = document.context.lookup(object);
+      if (resolved !== undefined) pending.push(resolved);
+    } else if (object instanceof PDFStream) {
+      pending.push(object.dict);
+    } else if (object instanceof PDFDict) {
+      dictionaries.push(object);
+      pending.push(...object.values());
+    } else if (object instanceof PDFArray) {
+      for (let index = 0; index < object.size(); index += 1) {
+        pending.push(object.get(index));
+      }
+    }
+  }
+
+  return dictionaries;
+}
+
+function dictionaryName(dictionary: PDFDict, key: string): string | null {
+  const value = dictionary.context.lookup(dictionary.get(PDFName.of(key)));
+  return value instanceof PDFName ? value.decodeText() : null;
+}
+
+function explicitlyReferencedActions(
+  document: PDFDocument,
+  dictionaries: readonly PDFDict[],
+): ReadonlySet<PDFDict> {
+  const actions = new Set<PDFDict>();
+  const pending: PDFDict[] = [];
+
+  const addAction = (object: PDFObject | undefined) => {
+    if (object === undefined) return;
+    const resolved = document.context.lookup(object);
+    if (resolved instanceof PDFArray) {
+      for (let index = 0; index < resolved.size(); index += 1) {
+        addAction(resolved.get(index));
+      }
+    } else if (
+      resolved instanceof PDFDict &&
+      dictionaryName(resolved, 'S') !== null &&
+      !actions.has(resolved)
+    ) {
+      actions.add(resolved);
+      pending.push(resolved);
+    }
+  };
+
+  for (const dictionary of dictionaries) {
+    addAction(dictionary.get(PDFName.of('A')));
+    addAction(dictionary.get(PDFName.of('NA')));
+    const additionalActions = document.context.lookup(
+      dictionary.get(PDFName.of('AA')),
+    );
+    if (additionalActions instanceof PDFDict) {
+      for (const action of additionalActions.values()) addAction(action);
+    }
+  }
+  addAction(document.catalog.get(PDFName.of('OpenAction')));
+
+  const names = document.context.lookup(
+    document.catalog.get(PDFName.of('Names')),
+  );
+  const javaScriptNameTree =
+    names instanceof PDFDict
+      ? document.context.lookup(names.get(PDFName.of('JavaScript')))
+      : undefined;
+  const seenNameTrees = new Set<PDFDict>();
+  const pendingNameTrees =
+    javaScriptNameTree instanceof PDFDict ? [javaScriptNameTree] : [];
+  while (pendingNameTrees.length > 0) {
+    const tree = pendingNameTrees.pop();
+    if (tree === undefined || seenNameTrees.has(tree)) continue;
+    seenNameTrees.add(tree);
+
+    const entries = document.context.lookup(tree.get(PDFName.of('Names')));
+    if (entries instanceof PDFArray) {
+      for (let index = 1; index < entries.size(); index += 2) {
+        addAction(entries.get(index));
+      }
+    }
+    const kids = document.context.lookup(tree.get(PDFName.of('Kids')));
+    if (kids instanceof PDFArray) {
+      for (let index = 0; index < kids.size(); index += 1) {
+        const child = document.context.lookup(kids.get(index));
+        if (child instanceof PDFDict) pendingNameTrees.push(child);
+      }
+    }
+  }
+
+  while (pending.length > 0) {
+    addAction(pending.pop()?.get(PDFName.of('Next')));
+  }
+  return actions;
+}
+
+function ensureNoRestrictedSignatureStructures(
+  document: PDFDocument,
+  dictionaries: readonly PDFDict[],
+): void {
+  let structure: string | null = document.catalog.has(PDFName.of('Perms'))
+    ? 'catalog /Perms'
+    : null;
+  let fieldName: string | undefined;
+  const signatureFieldValues = new Map<PDFObject, string>();
+
+  for (const dictionary of dictionaries) {
+    if (dictionaryName(dictionary, 'FT') !== 'Sig') continue;
+    const value = dictionary.context.lookup(dictionary.get(PDFName.of('V')));
+    const partialName = dictionary.context.lookup(
+      dictionary.get(PDFName.of('T')),
+    );
+    if (
+      value !== undefined &&
+      (partialName instanceof PDFString || partialName instanceof PDFHexString)
+    ) {
+      signatureFieldValues.set(value, partialName.decodeText());
+    }
+  }
+
+  for (const dictionary of dictionaries) {
+    if (structure !== null) break;
+
+    const type = dictionaryName(dictionary, 'Type');
+    const transformMethod = dictionaryName(dictionary, 'TransformMethod');
+    if (type === 'Sig') structure = 'signature dictionary';
+    else if (dictionary.has(PDFName.of('ByteRange'))) {
+      structure = '/ByteRange';
+    } else if (
+      dictionary.has(PDFName.of('DocMDP')) ||
+      transformMethod === 'DocMDP'
+    ) {
+      structure = '/DocMDP';
+    } else if (dictionary.has(PDFName.of('UR3')) || transformMethod === 'UR3') {
+      structure = '/UR3';
+    }
+
+    if (structure !== null) fieldName = signatureFieldValues.get(dictionary);
+  }
+
+  if (structure !== null) {
+    throw new PdfEngineError(
+      'PDF_SIGNED_UNSUPPORTED',
+      'Signed or usage-rights-certified PDFs cannot be modified because saving could invalidate their protections.',
+      { fieldName, details: { structure } },
+    );
+  }
+}
+
+function summarizeActiveContent(
+  document: PDFDocument,
+  dictionaries: readonly PDFDict[],
+): PdfActiveContentSummary {
+  const referencedActions = explicitlyReferencedActions(document, dictionaries);
+  const additionalActions = new Set<PDFDict>();
+  let javascriptActionCount = 0;
+  let externalActionCount = 0;
+  let highRiskActionCount = 0;
+  let otherActionCount = 0;
+
+  for (const dictionary of dictionaries) {
+    const additionalAction = document.context.lookup(
+      dictionary.get(PDFName.of('AA')),
+    );
+    if (additionalAction instanceof PDFDict) {
+      additionalActions.add(additionalAction);
+    }
+
+    const actionType = referencedActions.has(dictionary)
+      ? dictionaryName(dictionary, 'S')
+      : null;
+    if (actionType === 'JavaScript') javascriptActionCount += 1;
+    else if (actionType === 'URI') {
+      externalActionCount += 1;
+    } else if (
+      actionType === 'Launch' ||
+      actionType === 'GoToR' ||
+      actionType === 'GoToE' ||
+      actionType === 'SubmitForm' ||
+      actionType === 'ImportData'
+    ) {
+      externalActionCount += 1;
+      highRiskActionCount += 1;
+    } else if (
+      actionType !== null &&
+      REPORT_ONLY_ACTION_TYPES.has(actionType)
+    ) {
+      otherActionCount += 1;
+    } else if (actionType !== null && referencedActions.has(dictionary)) {
+      highRiskActionCount += 1;
+    }
+  }
+
+  return {
+    javascriptActionCount,
+    additionalActionDictionaryCount: additionalActions.size,
+    openActionCount: document.catalog.has(PDFName.of('OpenAction')) ? 1 : 0,
+    externalActionCount,
+    highRiskActionCount,
+    otherActionCount,
+  };
+}
+
+function hasActiveContent(summary: PdfActiveContentSummary): boolean {
+  return (
+    summary.javascriptActionCount > 0 ||
+    summary.additionalActionDictionaryCount > 0 ||
+    summary.openActionCount > 0 ||
+    summary.externalActionCount > 0 ||
+    summary.highRiskActionCount > 0 ||
+    summary.otherActionCount > 0
+  );
 }
 
 async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
@@ -223,6 +482,10 @@ async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
     );
   }
 
+  const dictionaries = collectPdfDictionaries(document);
+  ensureNoRestrictedSignatureStructures(document, dictionaries);
+  const activeContent = summarizeActiveContent(document, dictionaries);
+
   const acroFormDictionary = document.catalog.AcroForm();
   if (acroFormDictionary?.has(PDFName.of('XFA'))) {
     throw new PdfEngineError(
@@ -234,12 +497,36 @@ async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
   const form = document.getForm();
   ensureNoExistingSignatures(form);
 
-  return { document, form };
+  return { document, form, activeContent };
+}
+
+function recoveredCheckBoxRadioOptions(field: PDFField): string[] | null {
+  if (!(field instanceof PDFCheckBox)) return null;
+
+  const options: string[] = [];
+  const seen = new Set<string>();
+  for (const widget of field.acroField.getWidgets()) {
+    const option = widget.getOnValue()?.decodeText();
+    if (
+      option === undefined ||
+      option === 'Off' ||
+      option.trim().length === 0 ||
+      seen.has(option)
+    ) {
+      continue;
+    }
+    seen.add(option);
+    options.push(option);
+  }
+
+  return options.length > 1 ? options : null;
 }
 
 function fieldType(field: PDFField): PdfFieldType {
   if (field instanceof PDFTextField) return 'text';
-  if (field instanceof PDFCheckBox) return 'checkbox';
+  if (field instanceof PDFCheckBox) {
+    return recoveredCheckBoxRadioOptions(field) ? 'radio' : 'checkbox';
+  }
   if (field instanceof PDFRadioGroup) return 'radio';
   if (field instanceof PDFDropdown) return 'dropdown';
   if (field instanceof PDFOptionList) return 'option_list';
@@ -260,6 +547,25 @@ function fieldTooltip(field: PDFField): string | null {
   );
 }
 
+function isSignatureSemanticTextField(
+  field: PDFField,
+  tooltip: string | null,
+): boolean {
+  if (!(field instanceof PDFTextField)) return false;
+  return hasExplicitSignatureSemantics(field.getName(), tooltip);
+}
+
+function hasExplicitSignatureSemantics(
+  fieldName: string,
+  tooltip: string | null,
+): boolean {
+  if (SIGNATURE_DATE_FIELD.test(fieldName)) return false;
+  if (DIRECT_SIGNATURE_FIELD_NAME.test(fieldName)) return true;
+  if (EXPLICIT_SIGNATURE_FIELD.test(fieldName)) return true;
+  if (/\bdate\b/i.test(fieldName)) return false;
+  return tooltip !== null && EXPLICIT_SIGNATURE_FIELD.test(tooltip);
+}
+
 function isHumanOnly(
   field: PDFField,
   type: PdfFieldType,
@@ -267,6 +573,7 @@ function isHumanOnly(
 ): boolean {
   return (
     type === 'signature' ||
+    isSignatureSemanticTextField(field, tooltip) ||
     HUMAN_ONLY_MARKER.test(field.getName()) ||
     (tooltip !== null && HUMAN_ONLY_MARKER.test(tooltip))
   );
@@ -274,10 +581,25 @@ function isHumanOnly(
 
 function fieldChoices(field: PDFField): PdfChoiceDescriptor[] {
   if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
-    return field.acroField.getOptions().map(({ value, display }) => ({
-      value: value.decodeText(),
-      label: display.decodeText(),
-    }));
+    const choices: PdfChoiceDescriptor[] = [];
+    const seen = new Set<string>();
+    for (const { value, display } of field.acroField.getOptions()) {
+      const decodedValue = value.decodeText();
+      if (decodedValue.trim().length === 0 || seen.has(decodedValue)) continue;
+
+      const decodedDisplay = display.decodeText();
+      seen.add(decodedValue);
+      choices.push({
+        value: decodedValue,
+        label:
+          decodedDisplay.trim().length === 0 ? decodedValue : decodedDisplay,
+      });
+    }
+    return choices;
+  }
+  const recoveredOptions = recoveredCheckBoxRadioOptions(field);
+  if (recoveredOptions) {
+    return recoveredOptions.map((value) => ({ value, label: value }));
   }
   if (field instanceof PDFRadioGroup) {
     return field.getOptions().map((value) => ({ value, label: value }));
@@ -294,10 +616,22 @@ function fieldAllowsMultiple(field: PDFField): boolean {
 
 function fieldValue(field: PDFField): PdfFieldValue {
   if (field instanceof PDFTextField) return field.getText() ?? '';
-  if (field instanceof PDFCheckBox) return field.isChecked();
+  if (field instanceof PDFCheckBox) {
+    const recoveredOptions = recoveredCheckBoxRadioOptions(field);
+    if (recoveredOptions) {
+      const current = field.acroField.getValue().decodeText();
+      return recoveredOptions.includes(current) ? current : null;
+    }
+    return field.isChecked();
+  }
   if (field instanceof PDFRadioGroup) return field.getSelected() ?? null;
   if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
-    const selected = field.getSelected();
+    const selected = field
+      .getSelected()
+      .filter(
+        (value, index, values) =>
+          value.trim().length > 0 && values.indexOf(value) === index,
+      );
     if (field.isMultiselect()) return selected;
     return selected[0] ?? null;
   }
@@ -387,13 +721,30 @@ function describeField(
   };
 }
 
-function inspectionWarnings(fields: PdfFieldDescriptor[]): PdfEngineWarning[] {
+function inspectionWarnings(
+  fields: PdfFieldDescriptor[],
+  activeContent: PdfActiveContentSummary,
+): PdfEngineWarning[] {
   const warnings: PdfEngineWarning[] = [];
 
   if (fields.length === 0) {
     warnings.push({
       code: 'NO_ACROFORM_FIELDS',
       message: 'The PDF does not contain any AcroForm fields.',
+    });
+  }
+  if (hasActiveContent(activeContent)) {
+    warnings.push({
+      code: 'ACTIVE_CONTENT_PRESERVED',
+      message:
+        'The PDF contains scripts or actions. They are preserved, but FormProof does not execute or validate them.',
+    });
+  }
+  if (activeContent.javascriptActionCount > 0) {
+    warnings.push({
+      code: 'JAVASCRIPT_UNVALIDATED',
+      message:
+        'The PDF contains JavaScript that is preserved, but FormProof does not execute or semantically validate it.',
     });
   }
 
@@ -404,6 +755,16 @@ function inspectionWarnings(fields: PdfFieldDescriptor[]): PdfEngineWarning[] {
         fieldName: field.name,
         message:
           'Signature fields are shown for review but can only be completed by a person.',
+      });
+    } else if (
+      field.type === 'text' &&
+      hasExplicitSignatureSemantics(field.name, field.tooltip)
+    ) {
+      warnings.push({
+        code: 'SIGNATURE_TEXT_FIELD_HUMAN_ONLY',
+        fieldName: field.name,
+        message:
+          'This text field explicitly requests a signature and is reserved for human completion.',
       });
     } else if (field.type === 'unsupported') {
       warnings.push({
@@ -438,6 +799,7 @@ function inspectLoadedPdf(
   document: PDFDocument,
   form: ReturnType<PDFDocument['getForm']>,
   sourceHash: string,
+  activeContent: PdfActiveContentSummary,
 ): PdfInspection {
   const fields = form
     .getFields()
@@ -447,15 +809,16 @@ function inspectLoadedPdf(
     pageCount: document.getPageCount(),
     fieldCount: fields.length,
     widgetCount: fields.reduce((total, field) => total + field.widgetCount, 0),
+    activeContent,
     fields,
-    warnings: inspectionWarnings(fields),
+    warnings: inspectionWarnings(fields, activeContent),
   };
 }
 
 export async function inspectPdf(source: Uint8Array): Promise<PdfInspection> {
   const sourceHash = await sha256Hex(source);
-  const { document, form } = await loadPdf(source);
-  return inspectLoadedPdf(document, form, sourceHash);
+  const { document, form, activeContent } = await loadPdf(source);
+  return inspectLoadedPdf(document, form, sourceHash, activeContent);
 }
 
 function invalidValueType(fieldName: string, expected: string): PdfEngineError {
@@ -539,6 +902,9 @@ function validateValue(
   }
 
   if (field instanceof PDFCheckBox) {
+    if (descriptor.type === 'radio') {
+      return validateChoice(descriptor, value);
+    }
     if (typeof value !== 'boolean') {
       throw invalidValueType(descriptor.name, 'a boolean');
     }
@@ -654,6 +1020,21 @@ function applyValue(
     return;
   }
 
+  if (field instanceof PDFCheckBox && descriptor.type === 'radio') {
+    const option = typeof value === 'string' ? value : null;
+    field.acroField.dict.set(PDFName.of('V'), PDFName.of(option ?? 'Off'));
+
+    let selected = false;
+    for (const widget of field.acroField.getWidgets()) {
+      const onValue = widget.getOnValue();
+      const matches =
+        !selected && option !== null && onValue?.decodeText() === option;
+      widget.setAppearanceState(matches ? onValue : PDFName.of('Off'));
+      if (matches) selected = true;
+    }
+    return;
+  }
+
   if (field instanceof PDFCheckBox && typeof value === 'boolean') {
     if (value) field.check();
     else field.uncheck();
@@ -667,11 +1048,14 @@ function applyValue(
   }
 
   if (field instanceof PDFDropdown) {
+    const wasEditable = field.isEditable();
     const labels = selectedChoiceValues(value).map((selection) =>
       choiceLabel(descriptor, selection),
     );
     if (labels.length === 0) field.clear();
     else field.select(labels.length === 1 ? labels[0] : labels);
+    if (wasEditable) field.enableEditing();
+    else field.disableEditing();
     return;
   }
 
@@ -686,7 +1070,6 @@ function applyValue(
 
 function restoreChoiceExportValues(
   field: PDFField,
-  descriptor: PdfFieldDescriptor,
   value: ValidatedValue,
 ): void {
   if (!(field instanceof PDFDropdown || field instanceof PDFOptionList)) return;
@@ -709,9 +1092,10 @@ function restoreChoiceExportValues(
   }
 
   dictionary.set(PDFName.of('V'), dictionary.context.obj(encoded));
+  const rawOptions = field.acroField.getOptions();
   const indices = selections
     .map((selection) =>
-      descriptor.choices.findIndex((choice) => choice.value === selection),
+      rawOptions.findIndex(({ value }) => value.decodeText() === selection),
     )
     .sort((left, right) => left - right);
   dictionary.set(PDFName.of('I'), dictionary.context.obj(indices));
@@ -738,10 +1122,21 @@ function verifyButtonWidgetValues(
     .map((widget) => widget.getAppearanceState()?.decodeText() ?? null);
 
   if (field instanceof PDFCheckBox) {
-    const matches = expected
-      ? states.every((state) => state !== null && state !== 'Off')
-      : states.every((state) => state === 'Off');
-    if (matches) return;
+    if (descriptor.type === 'radio') {
+      const selectedStates = states.filter((state) => state !== 'Off');
+      const matches =
+        expected === null
+          ? states.every((state) => state === 'Off')
+          : typeof expected === 'string' &&
+            selectedStates.length === 1 &&
+            selectedStates[0] === expected;
+      if (matches) return;
+    } else {
+      const matches = expected
+        ? states.every((state) => state !== null && state !== 'Off')
+        : states.every((state) => state === 'Off');
+      if (matches) return;
+    }
   } else {
     const exportValues = field.acroField.getExportValues();
     const optionIndex =
@@ -800,18 +1195,36 @@ export async function applyApprovedValues(
   values: Record<string, PdfFieldValue>,
 ): Promise<ApplyResult> {
   const sourceHash = await sha256Hex(source);
-  const { document, form } = await loadPdf(source);
+  const { document, form, activeContent } = await loadPdf(source);
+
+  if (activeContent.highRiskActionCount > 0) {
+    throw new PdfEngineError(
+      'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+      'PDFs with external launch, remote navigation, submit, import, or unrecognized actions cannot be exported safely.',
+      {
+        details: {
+          highRiskActionCount: activeContent.highRiskActionCount,
+        },
+      },
+    );
+  }
 
   const entries = Object.entries(values);
   if (entries.length === 0) {
     const unchanged = copyBytes(source);
-    const inspection = inspectLoadedPdf(document, form, sourceHash);
+    const inspection = inspectLoadedPdf(
+      document,
+      form,
+      sourceHash,
+      activeContent,
+    );
     return {
       bytes: unchanged,
       sourceHash,
       outputHash: sourceHash,
       fieldCount: inspection.fieldCount,
       widgetCount: inspection.widgetCount,
+      activeContent: inspection.activeContent,
       verifiedFields: [],
       warnings: inspection.warnings,
     };
@@ -896,9 +1309,19 @@ export async function applyApprovedValues(
       applyValue(field, descriptor, value);
       preserveFieldTypography(field, defaultAppearance, fontSize);
     }
-    form.updateFieldAppearances(font);
     for (const { field, descriptor, value } of validated.values()) {
-      restoreChoiceExportValues(field, descriptor, value);
+      if (
+        field instanceof PDFTextField ||
+        field instanceof PDFDropdown ||
+        field instanceof PDFOptionList
+      ) {
+        field.defaultUpdateAppearances(font);
+      } else if (field instanceof PDFCheckBox && descriptor.type !== 'radio') {
+        field.defaultUpdateAppearances();
+      } else if (field instanceof PDFRadioGroup) {
+        field.defaultUpdateAppearances();
+      }
+      restoreChoiceExportValues(field, value);
     }
   } catch (cause) {
     if (cause instanceof PdfEngineError) throw cause;
@@ -914,7 +1337,7 @@ export async function applyApprovedValues(
     bytes = await document.save({
       addDefaultPage: false,
       updateFieldAppearances: false,
-      useObjectStreams: false,
+      useObjectStreams: true,
     });
   } catch (cause) {
     throw new PdfEngineError(
@@ -985,6 +1408,7 @@ export async function applyApprovedValues(
     reopened.document,
     reopened.form,
     outputHash,
+    reopened.activeContent,
   );
 
   return {
@@ -993,6 +1417,7 @@ export async function applyApprovedValues(
     outputHash,
     fieldCount: inspection.fieldCount,
     widgetCount: inspection.widgetCount,
+    activeContent: inspection.activeContent,
     verifiedFields,
     warnings: inspection.warnings,
   };

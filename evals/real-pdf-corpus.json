@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "corpusRoot": "tmp/pdfs/real-world",
+  "measurement": {
+    "encoding": "UTF-8",
+    "tokenProxy": "utf8_bytes_divided_by_4",
+    "tokenProxyIsTokenizer": false
+  },
+  "documents": [
+    {
+      "id": "irs-1040-2025",
+      "fileName": "irs-1040-2025.pdf",
+      "title": "Form 1040, U.S. Individual Income Tax Return",
+      "agency": "Internal Revenue Service",
+      "officialUrl": "https://www.irs.gov/pub/irs-pdf/f1040.pdf",
+      "sha256": "3d31c226df0d189ced80e039d01cf0f8820c1019681a0f0ca6264de277b7e982",
+      "byteLength": 220237,
+      "pageCount": 2,
+      "expectedEngineOutcome": {
+        "status": "blocked",
+        "code": "PDF_SIGNED_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "irs-w4-2026",
+      "fileName": "irs-w4-2026.pdf",
+      "title": "Form W-4, Employee's Withholding Certificate",
+      "agency": "Internal Revenue Service",
+      "officialUrl": "https://www.irs.gov/pub/irs-pdf/fw4.pdf",
+      "sha256": "92444d8856ce55d9e25dca8b6d1420634fc68b11e1ab1f760916ea29ddd312b2",
+      "byteLength": 208845,
+      "pageCount": 5,
+      "expectedEngineOutcome": {
+        "status": "blocked",
+        "code": "PDF_SIGNED_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "uscis-i9-2025",
+      "fileName": "uscis-i9-2025.pdf",
+      "title": "Form I-9, Employment Eligibility Verification",
+      "agency": "U.S. Citizenship and Immigration Services",
+      "officialUrl": "https://www.uscis.gov/sites/default/files/document/forms/i-9.pdf",
+      "sha256": "780f348c34df694bb0b4dbbfaf9f22b99b9757b80d16a37ba89aadf069597281",
+      "byteLength": 524095,
+      "pageCount": 4,
+      "expectedEngineOutcome": {
+        "status": "writable",
+        "fieldCount": 128,
+        "widgetCount": 130,
+        "humanOnlyFieldCount": 9,
+        "activeContent": {
+          "javascriptActionCount": 24,
+          "additionalActionDictionaryCount": 32,
+          "openActionCount": 0,
+          "externalActionCount": 8,
+          "highRiskActionCount": 0,
+          "otherActionCount": 0
+        }
+      },
+      "queryExperiment": {
+        "queries": ["citizen", "signature", "state"],
+        "expectedFirstPageFieldNames": [
+          "CB_1",
+          "Signature of Employee",
+          "State"
+        ]
+      },
+      "writeExperiment": {
+        "values": {
+          "First Name Given Name": "Synthetic",
+          "CB_1": true,
+          "State": "CA"
+        }
+      }
+    },
+    {
+      "id": "state-ds11-2025",
+      "fileName": "state-ds11-2025.pdf",
+      "title": "Form DS-11, Application for a U.S. Passport",
+      "agency": "U.S. Department of State",
+      "officialUrl": "https://eforms.state.gov/Forms/ds11_pdf.PDF",
+      "sha256": "6b30860f0b54cba9df1a54d4eb007dc93a6c785b5253516604530b1c1898e2f6",
+      "byteLength": 2568395,
+      "pageCount": 6,
+      "expectedEngineOutcome": {
+        "status": "writable",
+        "fieldCount": 84,
+        "widgetCount": 99,
+        "recoveredRadioGroupCount": 12,
+        "activeContent": {
+          "javascriptActionCount": 2,
+          "additionalActionDictionaryCount": 2,
+          "openActionCount": 1,
+          "externalActionCount": 0,
+          "highRiskActionCount": 0,
+          "otherActionCount": 2
+        }
+      },
+      "queryExperiment": {
+        "queries": ["name", "gender", "social security"],
+        "expectedFirstPageFieldNames": [
+          "List all other name you have used",
+          "Gender"
+        ]
+      },
+      "writeExperiment": {
+        "values": {
+          "Applicant First Name": "Synthetic",
+          "Gender": "M",
+          "Applicant Address State": "CA"
+        }
+      }
+    },
+    {
+      "id": "va-10-10ez-2025",
+      "fileName": "va-10-10ez-2025.pdf",
+      "title": "VA Form 10-10EZ, Application for Health Benefits",
+      "agency": "U.S. Department of Veterans Affairs",
+      "officialUrl": "https://www.va.gov/vaforms/medical/pdf/VA%20Form%2010-10EZ.pdf",
+      "sha256": "67e6953032aec94166fa9e5aec560821a7f76163de3d76e3432375d4dd0f1501",
+      "byteLength": 1267392,
+      "pageCount": 6,
+      "expectedEngineOutcome": {
+        "status": "blocked",
+        "code": "PDF_SIGNED_UNSUPPORTED"
+      }
+    }
+  ]
+}

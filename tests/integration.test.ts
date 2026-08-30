@@ -69,7 +69,13 @@ interface CompletedDemo extends StagedDemo {
 
 interface AuthoredEvalCall {
   functionName: string;
-  arguments: { cursor?: string; limit?: number; fieldNames?: string[] };
+  arguments: {
+    cursor?: string;
+    limit?: number;
+    queries?: string[];
+    agentWritableOnly?: boolean;
+    fieldNames?: string[];
+  };
   mockOutput: {
     data: unknown;
   };
@@ -240,8 +246,74 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.match(workbench, /documentState\?\.kind === 'demo'/);
   assert.match(workbench, /Load built-in demo/);
   assert.match(workbench, /Staged fields/);
-  assert.match(workbench, /Whole form/);
+  assert.match(workbench, /Completeness/);
+  assert.match(workbench, /Not assessed beyond PDF required flags/);
   assert.match(workbench, /human_completion_required/);
+});
+
+void test('wires scoped context and PDF-action blocks through the workbench adapter', async () => {
+  const workbench = await readFile(
+    new URL('../components/formproof-workbench.tsx', import.meta.url),
+    'utf8',
+  );
+
+  const contextStart = workbench.indexOf('getFormContext(input) {');
+  const contextEnd = workbench.indexOf('getFieldEvidence(input) {');
+  assert.ok(contextStart >= 0 && contextEnd > contextStart);
+  const contextAdapter = workbench.slice(contextStart, contextEnd);
+  assert.match(
+    contextAdapter,
+    /parseFormContextCursor\(\s*input\.cursor,\s*current\.source\.sourceHash,\s*input,\s*\)/u,
+  );
+  assert.match(
+    contextAdapter,
+    /createFormContextToolData\(\s*current,\s*inspection,\s*offset,\s*input\.limit,\s*input,\s*\)/u,
+  );
+  assert.match(contextAdapter, /offset > data\.pagination\.total/u);
+
+  const openReviewStart = workbench.indexOf(
+    'const openReview = useCallback(() => {',
+  );
+  const openReviewEnd = workbench.indexOf(
+    'const resetOutput = useCallback(() => {',
+  );
+  assert.ok(openReviewStart >= 0 && openReviewEnd > openReviewStart);
+  const openReview = workbench.slice(openReviewStart, openReviewEnd);
+  assert.match(
+    openReview,
+    /activeContent\.highRiskActionCount[\s\S]*?if \(highRiskActionCount > 0\) \{[\s\S]*?FormProof will not export it[\s\S]*?return false;[\s\S]*?\}/u,
+  );
+
+  const validationStart = workbench.indexOf('validateFillPlan(input) {');
+  const reviewStart = workbench.indexOf('startFillReview(input) {');
+  const adapterEnd = workbench.indexOf(
+    '\n    };\n\n    void register',
+    reviewStart,
+  );
+  assert.ok(
+    validationStart >= 0 &&
+      reviewStart > validationStart &&
+      adapterEnd > reviewStart,
+  );
+  const validationAdapter = workbench.slice(validationStart, reviewStart);
+  assert.match(validationAdapter, /readyForReview:/u);
+  assert.match(validationAdapter, /exportBlockedByPdfActions === 0/u);
+  assert.match(validationAdapter, /\{ exportBlockedByPdfActions \}/u);
+
+  const reviewAdapter = workbench.slice(reviewStart, adapterEnd);
+  assert.match(
+    reviewAdapter,
+    /if \(exportBlockedByPdfActions > 0\) \{[\s\S]*?'pdf_action_unsupported'[\s\S]*?Load a different PDF before starting review[\s\S]*?\}/u,
+  );
+
+  assert.match(
+    workbench,
+    /disabled=\{!validation\?\.canApprove \|\| hasBlockedHighRiskActions\}/u,
+  );
+  assert.match(
+    workbench,
+    /const exported = await exportApprovedPdfFromUi\(approval\.state, source\)/u,
+  );
 });
 
 void test('keeps real WebMCP discovery and evidence atomic under the target budget', async () => {
@@ -254,9 +326,19 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
           : parseFormContextCursor(
               input.cursor,
               initialState.source.sourceHash,
+              input,
             );
-      assert.equal(parsed.ok, true);
-      if (!parsed.ok) throw new Error('Generated context cursor was invalid.');
+      if (!parsed.ok) {
+        return {
+          ok: false,
+          stateVersion: initialState.stateVersion,
+          sourceHash: initialState.source.sourceHash,
+          error: {
+            code: parsed.code,
+            message: 'The field cursor is invalid for this context scope.',
+          },
+        };
+      }
       return {
         ok: true,
         stateVersion: initialState.stateVersion,
@@ -266,6 +348,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
           inspection,
           parsed.offset,
           input.limit,
+          input,
         ),
       };
     },
@@ -302,6 +385,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
   assert.ok(evidence);
 
   const discoveredNames: string[] = [];
+  let firstContextPage = true;
   let cursor: string | null = null;
   do {
     const response: FormProofToolResponse = await context.execute(
@@ -316,9 +400,37 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
     );
     const data = response.data as {
       fields: Array<Record<string, unknown>>;
-      pagination: { returned: number; nextCursor: string | null };
+      pagination: {
+        returned: number;
+        total: number;
+        nextCursor: string | null;
+      };
+      validation?: {
+        structurallyValid: boolean;
+        completionStatus: 'incomplete' | 'unknown';
+        ruleCoverage: 'pdf_required_flags_only';
+        formCompletenessAssessed: false;
+      };
     };
     assert.equal(data.pagination.returned, data.fields.length);
+    if (firstContextPage) {
+      assert.deepEqual(data.validation, {
+        blockerCount: initialState.validation.blockerCount,
+        reviewCount: initialState.validation.reviewCount,
+        structurallyValid: false,
+        completionStatus: 'incomplete',
+        ruleCoverage: 'pdf_required_flags_only',
+        formCompletenessAssessed: false,
+        canApprove: initialState.validation.canApprove,
+        canOpenReview: false,
+        blockingFieldNames: initialState.validation.issues
+          .filter(({ severity }) => severity === 'error')
+          .map(({ fieldName }) => fieldName),
+        reviewFieldNames: initialState.validation.reviewFieldNames,
+      });
+      assert.equal('valid' in data.validation!, false);
+      firstContextPage = false;
+    }
     for (const field of data.fields) {
       assert.equal(typeof field.name, 'string');
       assert.equal(typeof field.label, 'string');
@@ -336,6 +448,74 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
     inspection.fields.map(({ name }) => name),
   );
   assert.equal(new Set(discoveredNames).size, discoveredNames.length);
+
+  const queryScope = {
+    queries: ['contact'],
+    agentWritableOnly: true,
+    limit: 1,
+  } as const;
+  const firstQueryPage = await context.execute(queryScope);
+  assert.equal(firstQueryPage.ok, true);
+  if (!firstQueryPage.ok) throw new Error('Scoped context search failed.');
+  const firstQueryData = firstQueryPage.data as {
+    fields: Array<{ name: string; matchedQueries: string[] }>;
+    pagination: { returned: number; total: number; nextCursor: string | null };
+    search: {
+      matchMethod: 'lexical';
+      agentWritableOnly: true;
+      queries: Array<{ query: string; matchCount: number }>;
+    };
+  };
+  assert.deepEqual(firstQueryData.fields, [
+    {
+      name: FIELD.contact,
+      label: 'Preferred contact method',
+      type: 'dropdown',
+      matchedQueries: ['contact'],
+    },
+  ]);
+  assert.deepEqual(firstQueryData.search, {
+    matchMethod: 'lexical',
+    agentWritableOnly: true,
+    queries: [{ query: 'contact', matchCount: 2 }],
+  });
+  assert.equal(firstQueryData.pagination.returned, 1);
+  assert.equal(firstQueryData.pagination.total, 2);
+  assert.ok(firstQueryData.pagination.nextCursor);
+
+  const secondQueryPage = await context.execute({
+    ...queryScope,
+    cursor: firstQueryData.pagination.nextCursor,
+  });
+  assert.equal(secondQueryPage.ok, true);
+  if (!secondQueryPage.ok) {
+    throw new Error('Scoped context pagination failed.');
+  }
+  const secondQueryData = secondQueryPage.data as {
+    fields: Array<{ name: string }>;
+    pagination: { returned: number; total: number; nextCursor: string | null };
+  };
+  assert.deepEqual(
+    secondQueryData.fields.map(({ name }) => name),
+    [FIELD.consent],
+  );
+  assert.deepEqual(secondQueryData.pagination, {
+    returned: 1,
+    total: 2,
+    nextCursor: null,
+  });
+
+  const mismatchedQueryScope = await context.execute({
+    ...queryScope,
+    queries: ['review'],
+    cursor: firstQueryData.pagination.nextCursor,
+  });
+  assert.equal(mismatchedQueryScope.ok, false);
+  if (mismatchedQueryScope.ok) {
+    throw new Error('A cursor was accepted under a different query scope.');
+  }
+  assert.equal(mismatchedQueryScope.error.code, 'INVALID_INPUT');
+  assert.equal(mismatchedQueryScope.nextAction, 'fix_tool_input');
 
   const evidenceResponse = await evidence.execute({
     expectedStateVersion: initialState.stateVersion,
@@ -476,7 +656,11 @@ void test('keeps journey read mocks aligned with the real demo projector', async
       const parsed =
         cursor === undefined
           ? ({ ok: true, offset: 0 } as const)
-          : parseFormContextCursor(cursor, initialState.source.sourceHash);
+          : parseFormContextCursor(
+              cursor,
+              initialState.source.sourceHash,
+              call.arguments,
+            );
       assert.equal(parsed.ok, true, `${evaluation.name} has an invalid cursor`);
       if (!parsed.ok) throw new Error('Authored context cursor was invalid.');
       const actual = createFormContextToolData(
@@ -484,6 +668,7 @@ void test('keeps journey read mocks aligned with the real demo projector', async
         inspection,
         parsed.offset,
         call.arguments.limit ?? 6,
+        call.arguments,
       );
       assert.deepEqual(
         call.mockOutput.data,
@@ -650,7 +835,13 @@ void test('reports an overlong field name without silently skipping it', async (
         ok: true,
         stateVersion: state.stateVersion,
         sourceHash: state.source.sourceHash,
-        data: createFormContextToolData(state, longInspection, 0, input.limit),
+        data: createFormContextToolData(
+          state,
+          longInspection,
+          0,
+          input.limit,
+          input,
+        ),
       };
     },
     getFieldEvidence: async () => {
@@ -684,12 +875,20 @@ void test('reports an overlong field name without silently skipping it', async (
       nameLength: number;
       name?: string;
     }>;
-    pagination: { returned: number; nextCursor: string | null };
+    pagination: {
+      returned: number;
+      total: number;
+      nextCursor: string | null;
+    };
   };
   assert.equal(data.fields[0].agentAddressable, false);
   assert.equal(data.fields[0].nameLength, longName.length);
   assert.equal('name' in data.fields[0], false);
-  assert.deepEqual(data.pagination, { returned: 1, nextCursor: null });
+  assert.deepEqual(data.pagination, {
+    returned: 1,
+    total: 1,
+    nextCursor: null,
+  });
 });
 
 void test('never repeats an unreturnable choice cursor', async () => {
