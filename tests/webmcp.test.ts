@@ -19,6 +19,7 @@ const {
   FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
   FORMPROOF_WEBMCP_TOOL_NAMES,
   createFieldChoiceCursor,
+  createFieldEvidenceToolData,
   createFormContextCursor,
   createFormContextToolData,
   parseFieldChoiceCursor,
@@ -28,9 +29,10 @@ const {
   new URL('../lib/webmcp.ts', import.meta.url).href
 )) as typeof import('../lib/webmcp');
 
-const { createFormState } = (await import(
-  new URL('../lib/form-state.ts', import.meta.url).href
-)) as typeof import('../lib/form-state');
+const { createFormState, resolvePdfFieldLabel, stageFieldUpdates } =
+  (await import(
+    new URL('../lib/form-state.ts', import.meta.url).href
+  )) as typeof import('../lib/form-state');
 
 const SOURCE_HASH = 'a'.repeat(64);
 
@@ -59,6 +61,11 @@ const NO_PROTECTION = {
     permsKeys: [],
     usageRightsKeys: [],
     byteRangeEntryCount: 0,
+    rawByteRangeNameCount: 0,
+    historicalByteRangeNameCount: 0,
+    revisionMarkerCount: 1,
+    historyScanComplete: true,
+    historyScanIssues: [],
     malformedByteRangeCount: 0,
     byteRanges: [],
     byteRangesCoverWholeFile: null,
@@ -98,6 +105,11 @@ const USAGE_RIGHTS_PROTECTION = {
     permsKeys: ['UR3'],
     usageRightsKeys: ['UR3'],
     byteRangeEntryCount: 1,
+    rawByteRangeNameCount: 1,
+    historicalByteRangeNameCount: 0,
+    revisionMarkerCount: 3,
+    historyScanComplete: true,
+    historyScanIssues: [],
     malformedByteRangeCount: 0,
     byteRanges: [[0, 100, 200, 20] as const],
     byteRangesCoverWholeFile: true,
@@ -137,6 +149,8 @@ interface ContextFieldSpec {
   label?: string;
   current?: string;
   tooltip?: string | null;
+  xfaSpeak?: string | null;
+  xfaCaption?: string | null;
   type?: PdfFieldType;
   required?: boolean;
   readOnly?: boolean;
@@ -169,6 +183,8 @@ async function createContextFixture(
       rect,
       maxLength: null,
       tooltip: spec.tooltip ?? null,
+      xfaSpeak: spec.xfaSpeak ?? null,
+      xfaCaption: spec.xfaCaption ?? null,
       widgetCount: 1,
       widgets: [
         {
@@ -190,7 +206,7 @@ async function createContextFixture(
     },
     specs.map((spec, index) => ({
       name: spec.name,
-      label: spec.label ?? spec.name,
+      label: spec.label ?? resolvePdfFieldLabel(fields[index]).label,
       type:
         fields[index].type === 'signature'
           ? ('signature' as const)
@@ -371,6 +387,18 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   );
   assert.ok(contextSchema.properties.cursor.description.length <= 150);
   assert.ok(contextSchema.properties.queries.description.length <= 150);
+  assert.match(
+    contextSchema.properties.queries.description,
+    /bounded untrusted XFA text/u,
+  );
+  assert.match(
+    contextSchema.properties.queries.description,
+    /exact-SOM and tooltip gating/u,
+  );
+  assert.match(
+    contextSchema.properties.queries.description,
+    /not semantic search/u,
+  );
   assert.equal(contextSchema.properties.queries.maxItems, 3);
   assert.match(
     byName(tools, 'validate_fill_plan').description,
@@ -431,6 +459,32 @@ void test('reports exact PDF protection without allowing agent strategy selectio
       requiresHumanConfirmation: true,
       exportStrategySelection: 'human_ui_only',
       agentMaySelectExportStrategy: false,
+    },
+  );
+  const protectionEvidence = response.data.protectionEvidence;
+  if (
+    protectionEvidence === null ||
+    typeof protectionEvidence !== 'object' ||
+    Array.isArray(protectionEvidence)
+  ) {
+    throw new Error('Protection evidence must remain structured.');
+  }
+  assert.deepEqual(protectionEvidence, USAGE_RIGHTS_PROTECTION.evidence);
+  assert.deepEqual(
+    {
+      rawByteRangeNameCount: protectionEvidence.rawByteRangeNameCount,
+      historicalByteRangeNameCount:
+        protectionEvidence.historicalByteRangeNameCount,
+      revisionMarkerCount: protectionEvidence.revisionMarkerCount,
+      historyScanComplete: protectionEvidence.historyScanComplete,
+      historyScanIssues: protectionEvidence.historyScanIssues,
+    },
+    {
+      rawByteRangeNameCount: 1,
+      historicalByteRangeNameCount: 0,
+      revisionMarkerCount: 3,
+      historyScanComplete: true,
+      historyScanIssues: [],
     },
   );
   assert.ok(serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES);
@@ -718,6 +772,109 @@ void test('ranks batched lexical search deterministically and indexes bounded ra
   assert.equal('tooltip' in tooltipSearch.fields[0], false);
 });
 
+void test('finds a W-4-style opaque SOM field through bounded XFA text', async () => {
+  const fieldName = 'topmostSubform[0].Page1[0].Step1a[0].f1_01[0]';
+  const { state, inspection } = await createContextFixture([
+    {
+      name: fieldName,
+      xfaSpeak: 'Page 1. Step 1: Enter Personal Information.',
+      xfaCaption: '(a) First name and middle initial',
+    },
+  ]);
+
+  const context = createFormContextToolData(state, inspection, 0, 6, {
+    queries: ['first name and middle initial'],
+  });
+  assert.equal(context.fields.length, 1);
+  assert.equal(
+    'name' in context.fields[0] ? context.fields[0].name : undefined,
+    fieldName,
+  );
+  assert.deepEqual(context.fields[0].matchedQueries, [
+    'first name and middle initial',
+  ]);
+  assert.deepEqual(context.search?.queries, [
+    { query: 'first name and middle initial', matchCount: 1 },
+  ]);
+
+  const evidence = createFieldEvidenceToolData(state, inspection, [fieldName]);
+  assert.equal(evidence.fields[0].labelSource, 'xfa_speak');
+  assert.equal(
+    evidence.fields[0].label,
+    'Page 1. Step 1: Enter Personal Information.',
+  );
+  assert.equal(Object.hasOwn(evidence.fields[0], 'xfaSpeak'), false);
+  assert.equal(Object.hasOwn(evidence.fields[0], 'xfaCaption'), false);
+});
+
+void test('keeps an AcroForm tooltip authoritative over conflicting XFA search text', async () => {
+  const fieldName = 'topmostSubform[0].Page1[0].SexGroup[0].CheckBox1[0]';
+  const { state, inspection } = await createContextFixture([
+    {
+      name: fieldName,
+      tooltip: 'Birth sex',
+      xfaSpeak: 'Male',
+      xfaCaption: 'Female',
+    },
+  ]);
+
+  const tooltipSearch = createFormContextToolData(state, inspection, 0, 6, {
+    queries: ['birth sex'],
+  });
+  assert.equal(tooltipSearch.fields.length, 1);
+  assert.equal(
+    'name' in tooltipSearch.fields[0]
+      ? tooltipSearch.fields[0].name
+      : undefined,
+    fieldName,
+  );
+
+  const blockedXfaSearch = createFormContextToolData(state, inspection, 0, 6, {
+    queries: ['male', 'female'],
+  });
+  assert.deepEqual(blockedXfaSearch.fields, []);
+  assert.deepEqual(blockedXfaSearch.search?.queries, [
+    { query: 'male', matchCount: 0, unmatched: true },
+    { query: 'female', matchCount: 0, unmatched: true },
+  ]);
+
+  const evidence = createFieldEvidenceToolData(state, inspection, [fieldName]);
+  assert.equal(evidence.fields[0].label, 'Birth sex');
+  assert.equal(evidence.fields[0].labelSource, 'acroform_tooltip');
+});
+
+void test('does not return long raw XFA text or exceed the evidence byte target', async () => {
+  const rawXfaMarker = 'NEVER_RETURN_RAW_XFA';
+  const specs = Array.from({ length: 3 }, (_, index) => ({
+    name: `topmostSubform[0].Page1[0].Section[${index}].f1_0${index}[0]`,
+    xfaSpeak: `Page 1. Semantic field ${index + 1}.`,
+    xfaCaption: `${rawXfaMarker}-${index}-${'表单😀\\"'.repeat(600)}`,
+  }));
+  const { state, inspection } = await createContextFixture(specs);
+  const fieldNames = specs.map(({ name }) => name);
+  const data = createFieldEvidenceToolData(state, inspection, fieldNames);
+  const { tools } = await captureTools(
+    createAdapter({
+      getFieldEvidence: async () => success(data, Number.MAX_SAFE_INTEGER),
+    }),
+  );
+  const response = await byName(tools, 'get_field_evidence').execute({
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: SOURCE_HASH,
+    fieldNames,
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.outputTruncated, false);
+  assert.ok(
+    serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+    `XFA evidence response used ${serializedBytes(response)} bytes`,
+  );
+  const serialized = JSON.stringify(response);
+  assert.doesNotMatch(serialized, /xfaSpeak|xfaCaption/u);
+  assert.equal(serialized.includes(rawXfaMarker), false);
+});
+
 void test('gives every matched query a first-page representative without duplicates', async () => {
   const broadFields = Array.from({ length: 12 }, (_, index) => ({
     name: `name_${index}`,
@@ -887,6 +1044,60 @@ void test('emits compact safety and validation diagnostics only on the initial c
   assert.ok(
     serializedBytes(continuation) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
   );
+});
+
+void test('does not claim review can open when unknown protection offers no artifact', async () => {
+  const { state, inspection } = await createContextFixture(
+    [{ name: 'name', label: 'Name' }],
+    {
+      protection: {
+        ...NO_PROTECTION,
+        protectionType: 'unknown',
+        allowedMutations: ['inspect_fields', 'stage_field_values'],
+        exportStrategies: [],
+        signatureImpact: 'rewrite_blocked_for_unknown_protection',
+        evidence: {
+          ...NO_PROTECTION.evidence,
+          unknownStructures: ['historical_scan_inconclusive'],
+        },
+      },
+    },
+  );
+  const staged = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: {
+          kind: 'user_instruction',
+          confidence: 1,
+          evidence: ['The user supplied this name.'],
+        },
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('Synthetic writable field did not stage.');
+
+  const unknownContext = createFormContextToolData(
+    staged.state,
+    inspection,
+    0,
+    6,
+  );
+  const ordinaryContext = createFormContextToolData(
+    staged.state,
+    { ...inspection, protection: NO_PROTECTION },
+    0,
+    6,
+  );
+
+  assert.equal(unknownContext.validation?.canApprove, true);
+  assert.equal(unknownContext.validation?.canOpenReview, false);
+  assert.equal(ordinaryContext.validation?.canOpenReview, true);
 });
 
 void test('keeps a complete escaped UTF-8 context response under the recommended budget', async () => {

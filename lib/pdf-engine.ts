@@ -23,6 +23,19 @@ import {
   StandardFonts,
 } from 'pdf-lib';
 
+import {
+  fingerprintPdfSignatures,
+  type PdfSignatureFingerprint,
+  // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
+} from './pdf-signature-history.ts';
+import {
+  BoundedZlibDecodeLimitError,
+  decodeBoundedZlib,
+  extractXfaSemantics,
+  type XfaSemanticsResult,
+  // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
+} from './xfa-semantics.ts';
+
 export const PDF_ENGINE_SUPPORT = {
   formType: 'AcroForm',
   preservesInteractiveFields: true,
@@ -86,6 +99,7 @@ export type PdfEngineWarningCode =
   | 'ACTIVE_CONTENT_PRESERVED'
   | 'USAGE_RIGHTS_DETECTED'
   | 'XFA_PRESENT_INSPECTION_ONLY'
+  | 'XFA_SEMANTICS_UNAVAILABLE'
   | 'DOCUMENT_SIGNATURE_PROTECTED'
   | 'DOC_MDP_PROTECTED'
   | 'UNKNOWN_PROTECTION';
@@ -122,6 +136,11 @@ export interface PdfProtectionEvidence {
   readonly permsKeys: readonly string[];
   readonly usageRightsKeys: readonly ('UR' | 'UR3')[];
   readonly byteRangeEntryCount: number;
+  readonly rawByteRangeNameCount?: number;
+  readonly historicalByteRangeNameCount?: number;
+  readonly revisionMarkerCount?: number;
+  readonly historyScanComplete?: boolean;
+  readonly historyScanIssues?: readonly string[];
   readonly malformedByteRangeCount: number;
   readonly byteRanges: readonly (readonly [number, number, number, number])[];
   readonly byteRangesCoverWholeFile: boolean | null;
@@ -199,6 +218,10 @@ export interface PdfFieldDescriptor {
   rect: PdfRect | null;
   maxLength: number | null;
   tooltip: string | null;
+  xfaSomNameMatched?: boolean;
+  xfaSignatureWidget?: boolean;
+  xfaSpeak?: string | null;
+  xfaCaption?: string | null;
   widgetCount: number;
   widgets: PdfWidgetDescriptor[];
 }
@@ -276,6 +299,7 @@ interface LoadedPdf {
   form: ReturnType<PDFDocument['getForm']>;
   activeContent: PdfActiveContentSummary;
   protectionAnalysis: PdfProtectionAnalysis;
+  xfaSemantics: XfaSemanticsResult;
 }
 
 interface PdfProtectionAnalysis {
@@ -286,6 +310,8 @@ interface PdfProtectionAnalysis {
 }
 
 const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/i;
+const HUMAN_ONLY_MARKER_GLOBAL = /\[\s*HUMAN[_ -]?ONLY\s*\]/gi;
+const MAX_SEMANTIC_FIELD_LABEL_LENGTH = 180;
 const EXPLICIT_SIGNATURE_FIELD =
   /(?:^|[\s.,;:])signature\s+of(?:\s|$)|\benter\s+(?:the\s+)?signature(?!\s+date\b)(?:\s|[:.]|$)|\bcannot\s+be\s+signed\s+electronically\b|\bprint\s+and\s+sign\s+in\s+ink\b/i;
 const DIRECT_SIGNATURE_FIELD_NAME = /(?:^|[\s.])signature(?:\s+\d+)?\s*$/i;
@@ -304,9 +330,1603 @@ const REPORT_ONLY_ACTION_TYPES = new Set([
   'GoTo3DView',
   'RichMediaExecute',
 ]);
+const MAX_ACTION_GRAPH_DEPTH = 64;
+const MAX_ACTION_GRAPH_EDGES = 4_096;
+const MAX_ACTION_GRAPH_NODES = 4_096;
+const MAX_ACROFORM_FIELD_GRAPH_DEPTH = 128;
+const MAX_ACROFORM_FIELD_GRAPH_NODES = 16_384;
+const MAX_PAGE_TREE_DEPTH = 128;
+const MAX_PAGE_TREE_NODES = 65_536;
+const MAX_PDF_OBJECT_GRAPH_EDGES = 65_536;
+const MAX_PDF_OBJECT_GRAPH_NODES = 65_536;
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return Uint8Array.from(bytes);
+}
+
+function isPdfWhitespace(byte: number): boolean {
+  return (
+    byte === 0 ||
+    byte === 9 ||
+    byte === 10 ||
+    byte === 12 ||
+    byte === 13 ||
+    byte === 32
+  );
+}
+
+function rawBytesMatch(
+  bytes: Uint8Array,
+  start: number,
+  expected: Uint8Array,
+): boolean {
+  if (start < 0 || start + expected.length > bytes.length) return false;
+  return expected.every((byte, offset) => bytes[start + offset] === byte);
+}
+
+interface PdfRevisionCandidate {
+  readonly start: number;
+  readonly end: number;
+  readonly xrefOffset: number;
+  readonly linearizedPseudoMarker?: true;
+}
+
+interface PdfRevisionHistorySummary {
+  readonly byteRangeNameCount: number;
+  readonly historicalByteRangeNameCount: number;
+  readonly historicalSignatureStructureCount: number;
+  readonly revisionMarkerCount: number;
+  readonly complete: boolean;
+  readonly issues: readonly string[];
+}
+
+const STARTXREF_BYTES = new TextEncoder().encode('startxref');
+const XREF_BYTES = new TextEncoder().encode('xref');
+const OBJ_BYTES = new TextEncoder().encode('obj');
+const EOF_BYTES = new TextEncoder().encode('%%EOF');
+const MAX_PDF_HISTORY_REVISIONS = 32;
+const MAX_PDF_HISTORY_PARSE_BYTES = 64 * 1024 * 1024;
+
+function decimalIntegerAt(
+  bytes: Uint8Array,
+  start: number,
+): { readonly end: number; readonly value: number } | null {
+  let index = start;
+  let value = 0;
+  while (index < bytes.length && bytes[index] >= 48 && bytes[index] <= 57) {
+    value = value * 10 + (bytes[index] - 48);
+    if (!Number.isSafeInteger(value)) return null;
+    index += 1;
+  }
+  return index === start ? null : { end: index, value };
+}
+
+function xrefOffsetLooksValid(
+  bytes: Uint8Array,
+  offset: number,
+  revisionEnd: number,
+): boolean {
+  if (offset < 0 || offset >= revisionEnd) return false;
+  if (rawBytesMatch(bytes, offset, XREF_BYTES)) return true;
+
+  const objectNumber = decimalIntegerAt(bytes, offset);
+  if (objectNumber === null) return false;
+  let index = objectNumber.end;
+  if (!isPdfWhitespace(bytes[index])) return false;
+  while (isPdfWhitespace(bytes[index])) index += 1;
+  const generation = decimalIntegerAt(bytes, index);
+  if (generation === null) return false;
+  index = generation.end;
+  if (!isPdfWhitespace(bytes[index])) return false;
+  while (isPdfWhitespace(bytes[index])) index += 1;
+  return rawBytesMatch(bytes, index, OBJ_BYTES);
+}
+
+type RawPdfTokenKind =
+  | 'array_close'
+  | 'array_open'
+  | 'dictionary_close'
+  | 'dictionary_open'
+  | 'hex_string'
+  | 'literal_string'
+  | 'name'
+  | 'word';
+
+interface RawPdfToken {
+  readonly kind: RawPdfTokenKind;
+  readonly start: number;
+  readonly end: number;
+}
+
+type RawPdfStreamLength =
+  | { readonly kind: 'direct'; readonly value: number }
+  | { readonly kind: 'duplicate' | 'indirect' | 'invalid' | 'missing' };
+
+interface RawPdfParsedValue {
+  readonly end: number;
+  readonly kind: 'dictionary' | 'integer' | 'other' | 'reference';
+  readonly integer?: number;
+  readonly integerArray?: readonly number[];
+  readonly name?: string;
+  readonly nameArray?: readonly string[];
+  readonly linearization?: RawPdfLinearizationInfo;
+  readonly objectStreamDictionary?: true;
+  readonly objectStreamFirst?: number;
+  readonly objectStreamMetadataInvalid?: true;
+  readonly objectStreamN?: number;
+  readonly streamDecodeParmsPresent?: true;
+  readonly streamFilter?: 'flate' | 'unsupported';
+  readonly typeIndirect?: true;
+  readonly xrefStreamDictionary?: true;
+  readonly xrefStmOffset?: number;
+  readonly prevOffset?: number;
+  readonly xrefMetadataInvalid?: true;
+  readonly streamLength?: RawPdfStreamLength;
+}
+
+interface RawPdfLinearizationInfo {
+  readonly length: number;
+  readonly firstPageObject: number;
+  readonly firstPageEnd: number;
+  readonly pageCount: number;
+  readonly mainXrefOffset: number;
+  readonly hintOffsets: readonly number[];
+}
+
+interface RawPdfScanState {
+  readonly bytes: Uint8Array;
+  readonly budget: RawPdfScanBudget;
+  readonly issues: Set<string>;
+  readonly strictValueWords: boolean;
+  readonly allowLinearizedPseudoMarker: boolean;
+  readonly classicXrefOffsets: number[];
+  readonly xrefStreamOffsets: number[];
+  readonly xrefStreamPrevOffsets: Map<number, number | null>;
+  readonly linearization: RawPdfLinearizationInfo | null;
+  linearizedPseudoMarkerCount: number;
+  linearizedPseudoMarkerEnd: number | null;
+  linearizedPseudoMarkerStart: number | null;
+}
+
+interface RawPdfScanBudget {
+  decodedNameBytes: number;
+  objectStreamCompressedBytes: number;
+  objectStreamCount: number;
+  objectStreamDecodedBytes: number;
+  objectStreamObjectCount: number;
+  tokenCount: number;
+}
+
+interface RawPdfRevisionScan {
+  readonly candidates: readonly PdfRevisionCandidate[];
+  readonly markerCount: number;
+  readonly complete: boolean;
+  readonly issues: readonly string[];
+}
+
+const MAX_RAW_PDF_CONTAINER_DEPTH = 128;
+const MAX_RAW_PDF_TOKENS = 2_000_000;
+const MAX_RAW_PDF_NAME_BYTES = 64 * 1024;
+const MAX_RAW_PDF_DECODED_NAME_BYTES = 16 * 1024 * 1024;
+const MAX_RAW_PDF_OBJECT_STREAMS = 4_096;
+const MAX_RAW_PDF_OBJECT_STREAM_OBJECTS = 200_000;
+const MAX_RAW_PDF_OBJECT_STREAM_COMPRESSED_BYTES = 32 * 1024 * 1024;
+const MAX_RAW_PDF_OBJECT_STREAM_DECODED_BYTES = 64 * 1024 * 1024;
+const MAX_RAW_PDF_SINGLE_OBJECT_STREAM_COMPRESSED_BYTES = 8 * 1024 * 1024;
+const MAX_RAW_PDF_SINGLE_OBJECT_STREAM_DECODED_BYTES = 16 * 1024 * 1024;
+const STREAM_BYTES = new TextEncoder().encode('stream');
+const ENDSTREAM_BYTES = new TextEncoder().encode('endstream');
+const LENGTH_BYTES = new TextEncoder().encode('Length');
+const LINEARIZED_BYTES = new TextEncoder().encode('Linearized');
+const LINEARIZED_LENGTH_BYTES = new TextEncoder().encode('L');
+const LINEARIZED_OBJECT_BYTES = new TextEncoder().encode('O');
+const LINEARIZED_END_BYTES = new TextEncoder().encode('E');
+const LINEARIZED_PAGE_COUNT_BYTES = new TextEncoder().encode('N');
+const LINEARIZED_MAIN_XREF_BYTES = new TextEncoder().encode('T');
+const LINEARIZED_HINTS_BYTES = new TextEncoder().encode('H');
+const PREV_BYTES = new TextEncoder().encode('Prev');
+const FIRST_BYTES = new TextEncoder().encode('First');
+const FILTER_BYTES = new TextEncoder().encode('Filter');
+const DECODE_PARMS_BYTES = new TextEncoder().encode('DecodeParms');
+const OBJ_STM_BYTES = new TextEncoder().encode('ObjStm');
+const FLATE_DECODE_NAME = 'FlateDecode';
+const REFERENCE_BYTES = new TextEncoder().encode('R');
+const TRUE_BYTES = new TextEncoder().encode('true');
+const FALSE_BYTES = new TextEncoder().encode('false');
+const NULL_BYTES = new TextEncoder().encode('null');
+const TRAILER_BYTES = new TextEncoder().encode('trailer');
+const TYPE_BYTES = new TextEncoder().encode('Type');
+const XREF_NAME_BYTES = new TextEncoder().encode('XRef');
+const XREF_STM_BYTES = new TextEncoder().encode('XRefStm');
+
+function createRawPdfScanBudget(): RawPdfScanBudget {
+  return {
+    decodedNameBytes: 0,
+    objectStreamCompressedBytes: 0,
+    objectStreamCount: 0,
+    objectStreamDecodedBytes: 0,
+    objectStreamObjectCount: 0,
+    tokenCount: 0,
+  };
+}
+
+function isPdfDelimiter(byte: number): boolean {
+  return (
+    isPdfWhitespace(byte) ||
+    byte === 37 ||
+    byte === 40 ||
+    byte === 41 ||
+    byte === 47 ||
+    byte === 60 ||
+    byte === 62 ||
+    byte === 91 ||
+    byte === 93 ||
+    byte === 123 ||
+    byte === 125
+  );
+}
+
+function hexNibble(byte: number): number | null {
+  if (byte >= 48 && byte <= 57) return byte - 48;
+  if (byte >= 65 && byte <= 70) return byte - 55;
+  if (byte >= 97 && byte <= 102) return byte - 87;
+  return null;
+}
+
+function markRawPdfIssue(state: RawPdfScanState, issue: string): null {
+  state.issues.add(issue);
+  return null;
+}
+
+function nextRawPdfToken(
+  state: RawPdfScanState,
+  start: number,
+): RawPdfToken | null {
+  const { bytes } = state;
+  let index = start;
+  while (index < bytes.length) {
+    if (isPdfWhitespace(bytes[index])) {
+      index += 1;
+      continue;
+    }
+    if (bytes[index] === 37) {
+      while (
+        index < bytes.length &&
+        bytes[index] !== 10 &&
+        bytes[index] !== 13
+      ) {
+        index += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  if (index >= bytes.length) return null;
+  state.budget.tokenCount += 1;
+  if (state.budget.tokenCount > MAX_RAW_PDF_TOKENS) {
+    return markRawPdfIssue(state, 'raw_token_budget_exceeded');
+  }
+
+  const tokenStart = index;
+  if (bytes[index] === 40) {
+    let depth = 1;
+    index += 1;
+    while (index < bytes.length && depth > 0) {
+      if (bytes[index] === 92) {
+        index += 1;
+        if (bytes[index] === 13 && bytes[index + 1] === 10) index += 2;
+        else if (index < bytes.length) index += 1;
+        continue;
+      }
+      if (bytes[index] === 40) depth += 1;
+      else if (bytes[index] === 41) depth -= 1;
+      index += 1;
+    }
+    if (depth !== 0)
+      return markRawPdfIssue(state, 'literal_string_unterminated');
+    return { kind: 'literal_string', start: tokenStart, end: index };
+  }
+  if (bytes[index] === 60) {
+    if (bytes[index + 1] === 60) {
+      return { kind: 'dictionary_open', start: tokenStart, end: index + 2 };
+    }
+    index += 1;
+    while (index < bytes.length && bytes[index] !== 62) index += 1;
+    if (index >= bytes.length) {
+      return markRawPdfIssue(state, 'hex_string_unterminated');
+    }
+    return { kind: 'hex_string', start: tokenStart, end: index + 1 };
+  }
+  if (bytes[index] === 62 && bytes[index + 1] === 62) {
+    return { kind: 'dictionary_close', start: tokenStart, end: index + 2 };
+  }
+  if (bytes[index] === 91) {
+    return { kind: 'array_open', start: tokenStart, end: index + 1 };
+  }
+  if (bytes[index] === 93) {
+    return { kind: 'array_close', start: tokenStart, end: index + 1 };
+  }
+  if (bytes[index] === 47) {
+    index += 1;
+    while (index < bytes.length && !isPdfDelimiter(bytes[index])) index += 1;
+    return { kind: 'name', start: tokenStart, end: index };
+  }
+
+  index += 1;
+  while (index < bytes.length && !isPdfDelimiter(bytes[index])) index += 1;
+  return { kind: 'word', start: tokenStart, end: index };
+}
+
+function rawPdfWordEquals(
+  bytes: Uint8Array,
+  token: RawPdfToken,
+  expected: Uint8Array,
+): boolean {
+  return (
+    token.kind === 'word' &&
+    token.end - token.start === expected.length &&
+    rawBytesMatch(bytes, token.start, expected)
+  );
+}
+
+function rawPdfNameEquals(
+  bytes: Uint8Array,
+  token: RawPdfToken,
+  expected: Uint8Array,
+): boolean {
+  if (token.kind !== 'name') return false;
+  let source = token.start + 1;
+  let target = 0;
+  while (source < token.end) {
+    let decoded = bytes[source];
+    if (decoded === 35 && source + 2 < token.end) {
+      const high = hexNibble(bytes[source + 1]);
+      const low = hexNibble(bytes[source + 2]);
+      if (high !== null && low !== null) {
+        decoded = high * 16 + low;
+        source += 2;
+      }
+    }
+    if (target >= expected.length || decoded !== expected[target]) return false;
+    source += 1;
+    target += 1;
+  }
+  return target === expected.length;
+}
+
+function rawPdfDecodedName(
+  state: RawPdfScanState,
+  token: RawPdfToken,
+): string | null {
+  if (token.kind !== 'name') return null;
+  const chunks: string[] = [];
+  let characters: number[] = [];
+  let decodedLength = 0;
+  let source = token.start + 1;
+  while (source < token.end) {
+    let decoded = state.bytes[source];
+    if (decoded === 35 && source + 2 < token.end) {
+      const high = hexNibble(state.bytes[source + 1]);
+      const low = hexNibble(state.bytes[source + 2]);
+      if (high !== null && low !== null) {
+        decoded = high * 16 + low;
+        source += 2;
+      }
+    }
+    decodedLength += 1;
+    if (decodedLength > MAX_RAW_PDF_NAME_BYTES) {
+      return markRawPdfIssue(state, 'raw_name_too_long');
+    }
+    characters.push(decoded);
+    if (characters.length === 1_024) {
+      chunks.push(String.fromCharCode(...characters));
+      characters = [];
+    }
+    source += 1;
+  }
+  state.budget.decodedNameBytes += decodedLength;
+  if (state.budget.decodedNameBytes > MAX_RAW_PDF_DECODED_NAME_BYTES) {
+    return markRawPdfIssue(state, 'raw_name_budget_exceeded');
+  }
+  if (characters.length > 0) {
+    chunks.push(String.fromCharCode(...characters));
+  }
+  return chunks.join('');
+}
+
+function rawPdfUnsignedInteger(
+  bytes: Uint8Array,
+  token: RawPdfToken,
+): number | null {
+  if (token.kind !== 'word') return null;
+  let index = token.start;
+  if (bytes[index] === 43) index += 1;
+  if (index >= token.end) return null;
+  let value = 0;
+  while (index < token.end) {
+    if (bytes[index] < 48 || bytes[index] > 57) return null;
+    value = value * 10 + (bytes[index] - 48);
+    if (!Number.isSafeInteger(value)) return null;
+    index += 1;
+  }
+  return value;
+}
+
+function rawPdfNumberIsValid(bytes: Uint8Array, token: RawPdfToken): boolean {
+  if (token.kind !== 'word') return false;
+  let index = token.start;
+  if (bytes[index] === 43 || bytes[index] === 45) index += 1;
+  if (index >= token.end) return false;
+
+  let sawDecimal = false;
+  let sawDigit = false;
+  while (index < token.end) {
+    const byte = bytes[index];
+    if (byte === 46 && !sawDecimal) {
+      sawDecimal = true;
+    } else if (byte >= 48 && byte <= 57) {
+      sawDigit = true;
+    } else {
+      return false;
+    }
+    index += 1;
+  }
+  return sawDigit;
+}
+
+function rawPdfPrimitiveWordIsValid(
+  bytes: Uint8Array,
+  token: RawPdfToken,
+): boolean {
+  return (
+    rawPdfNumberIsValid(bytes, token) ||
+    rawPdfWordEquals(bytes, token, TRUE_BYTES) ||
+    rawPdfWordEquals(bytes, token, FALSE_BYTES) ||
+    rawPdfWordEquals(bytes, token, NULL_BYTES)
+  );
+}
+
+function rawPdfNumberEqualsOne(bytes: Uint8Array, token: RawPdfToken): boolean {
+  if (token.kind !== 'word' || token.end - token.start > 64) return false;
+  let index = token.start;
+  if (bytes[index] === 43) index += 1;
+  if (index >= token.end || bytes[index] === 45) return false;
+
+  let sawOne = false;
+  let sawDecimalPoint = false;
+  for (; index < token.end; index += 1) {
+    const byte = bytes[index];
+    if (byte === 46 && !sawDecimalPoint) {
+      sawDecimalPoint = true;
+      continue;
+    }
+    if (byte < 48 || byte > 57) return false;
+    if (sawDecimalPoint) {
+      if (byte !== 48) return false;
+    } else if (byte === 49 && !sawOne) {
+      sawOne = true;
+    } else if (byte !== 48 || sawOne) {
+      return false;
+    }
+  }
+  return sawOne;
+}
+
+function parseRawPdfValueFromToken(
+  state: RawPdfScanState,
+  token: RawPdfToken,
+  depth: number,
+): RawPdfParsedValue | null {
+  if (depth > MAX_RAW_PDF_CONTAINER_DEPTH) {
+    return markRawPdfIssue(state, 'raw_container_depth_exceeded');
+  }
+  if (token.kind === 'dictionary_open') {
+    return parseRawPdfDictionary(state, token, depth + 1);
+  }
+  if (token.kind === 'array_open') {
+    return parseRawPdfArray(state, token, depth + 1);
+  }
+  if (token.kind === 'dictionary_close' || token.kind === 'array_close') {
+    return markRawPdfIssue(state, 'raw_container_close_unexpected');
+  }
+  if (token.kind === 'name') {
+    const name = rawPdfDecodedName(state, token);
+    return name === null ? null : { end: token.end, kind: 'other', name };
+  }
+
+  const integer = rawPdfUnsignedInteger(state.bytes, token);
+  if (integer === null) {
+    if (
+      state.strictValueWords &&
+      token.kind === 'word' &&
+      !rawPdfPrimitiveWordIsValid(state.bytes, token)
+    ) {
+      return markRawPdfIssue(state, 'object_stream_value_invalid');
+    }
+    return { end: token.end, kind: 'other' };
+  }
+  const generationToken = nextRawPdfToken(state, token.end);
+  const generation =
+    generationToken === null
+      ? null
+      : rawPdfUnsignedInteger(state.bytes, generationToken);
+  if (generationToken !== null && generation !== null) {
+    const referenceToken = nextRawPdfToken(state, generationToken.end);
+    if (
+      referenceToken !== null &&
+      rawPdfWordEquals(state.bytes, referenceToken, REFERENCE_BYTES)
+    ) {
+      return { end: referenceToken.end, kind: 'reference' };
+    }
+  }
+  return { end: token.end, kind: 'integer', integer };
+}
+
+function parseRawPdfArray(
+  state: RawPdfScanState,
+  open: RawPdfToken,
+  depth: number,
+): RawPdfParsedValue | null {
+  let index = open.end;
+  const integers: number[] = [];
+  const names: string[] = [];
+  let integersOnly = true;
+  let namesOnly = true;
+  while (index < state.bytes.length) {
+    const token = nextRawPdfToken(state, index);
+    if (token === null) break;
+    if (token.kind === 'array_close') {
+      return {
+        end: token.end,
+        kind: 'other',
+        ...(integersOnly ? { integerArray: integers } : {}),
+        ...(namesOnly ? { nameArray: names } : {}),
+      };
+    }
+    const value = parseRawPdfValueFromToken(state, token, depth);
+    if (value === null) return null;
+    if (value.kind === 'integer' && value.integer !== undefined) {
+      integers.push(value.integer);
+    } else {
+      integersOnly = false;
+    }
+    if (value.name !== undefined) names.push(value.name);
+    else namesOnly = false;
+    index = value.end;
+  }
+  return markRawPdfIssue(state, 'array_unterminated');
+}
+
+function parseRawPdfDictionary(
+  state: RawPdfScanState,
+  open: RawPdfToken,
+  depth: number,
+): RawPdfParsedValue | null {
+  let index = open.end;
+  let sawLength = false;
+  let sawType = false;
+  let sawPrev = false;
+  let sawXrefStm = false;
+  let streamLength: RawPdfStreamLength = { kind: 'missing' };
+  let typeIndirect = false;
+  let xrefStreamDictionary = false;
+  let objectStreamDictionary = false;
+  let objectStreamN: number | undefined;
+  let objectStreamFirst: number | undefined;
+  let objectStreamMetadataInvalid = false;
+  let streamFilter: 'flate' | 'unsupported' | undefined;
+  let streamDecodeParmsPresent = false;
+  let xrefStmOffset: number | undefined;
+  let prevOffset: number | undefined;
+  let xrefMetadataInvalid = false;
+  let linearizationInvalid = false;
+  const linearizationKeys = new Set<string>();
+  let linearized: number | undefined;
+  let linearizedLength: number | undefined;
+  let firstPageObject: number | undefined;
+  let firstPageEnd: number | undefined;
+  let pageCount: number | undefined;
+  let mainXrefOffset: number | undefined;
+  let hintOffsets: readonly number[] | undefined;
+  const dictionaryKeys = new Set<string>();
+  while (index < state.bytes.length) {
+    const key = nextRawPdfToken(state, index);
+    if (key === null) break;
+    if (key.kind === 'dictionary_close') {
+      let linearization: RawPdfLinearizationInfo | undefined;
+      if (
+        !linearizationInvalid &&
+        linearized === 1 &&
+        linearizedLength !== undefined &&
+        firstPageObject !== undefined &&
+        firstPageEnd !== undefined &&
+        pageCount !== undefined &&
+        mainXrefOffset !== undefined &&
+        hintOffsets !== undefined
+      ) {
+        linearization = {
+          length: linearizedLength,
+          firstPageObject,
+          firstPageEnd,
+          pageCount,
+          mainXrefOffset,
+          hintOffsets,
+        };
+      }
+      return {
+        end: key.end,
+        kind: 'dictionary',
+        streamLength,
+        ...(linearization === undefined ? {} : { linearization }),
+        ...(objectStreamDictionary ? { objectStreamDictionary: true } : {}),
+        ...(objectStreamFirst === undefined ? {} : { objectStreamFirst }),
+        ...(objectStreamMetadataInvalid
+          ? { objectStreamMetadataInvalid: true }
+          : {}),
+        ...(objectStreamN === undefined ? {} : { objectStreamN }),
+        ...(streamDecodeParmsPresent ? { streamDecodeParmsPresent: true } : {}),
+        ...(streamFilter === undefined ? {} : { streamFilter }),
+        ...(typeIndirect ? { typeIndirect: true } : {}),
+        ...(xrefStreamDictionary ? { xrefStreamDictionary: true } : {}),
+        ...(xrefStmOffset === undefined ? {} : { xrefStmOffset }),
+        ...(prevOffset === undefined ? {} : { prevOffset }),
+        ...(xrefMetadataInvalid ? { xrefMetadataInvalid: true } : {}),
+      };
+    }
+    if (key.kind !== 'name') {
+      return markRawPdfIssue(state, 'dictionary_key_invalid');
+    }
+    const decodedKey = rawPdfDecodedName(state, key);
+    if (decodedKey === null) return null;
+    if (dictionaryKeys.has(decodedKey)) {
+      return markRawPdfIssue(state, 'dictionary_key_duplicate');
+    }
+    dictionaryKeys.add(decodedKey);
+    const valueToken = nextRawPdfToken(state, key.end);
+    if (valueToken === null) {
+      return markRawPdfIssue(state, 'dictionary_value_missing');
+    }
+    const value = parseRawPdfValueFromToken(state, valueToken, depth);
+    if (value === null) return null;
+    if (rawPdfNameEquals(state.bytes, key, LENGTH_BYTES)) {
+      if (sawLength) streamLength = { kind: 'duplicate' };
+      else if (value.kind === 'integer' && value.integer !== undefined) {
+        streamLength = { kind: 'direct', value: value.integer };
+      } else if (value.kind === 'reference') {
+        streamLength = { kind: 'indirect' };
+      } else {
+        streamLength = { kind: 'invalid' };
+      }
+      sawLength = true;
+    }
+    if (rawPdfNameEquals(state.bytes, key, TYPE_BYTES)) {
+      if (sawType) xrefMetadataInvalid = true;
+      typeIndirect = value.kind === 'reference';
+      xrefStreamDictionary = rawPdfNameEquals(
+        state.bytes,
+        valueToken,
+        XREF_NAME_BYTES,
+      );
+      objectStreamDictionary = rawPdfNameEquals(
+        state.bytes,
+        valueToken,
+        OBJ_STM_BYTES,
+      );
+      sawType = true;
+    }
+    if (rawPdfNameEquals(state.bytes, key, LINEARIZED_PAGE_COUNT_BYTES)) {
+      if (value.kind === 'integer' && value.integer !== undefined) {
+        objectStreamN = value.integer;
+      } else {
+        objectStreamMetadataInvalid = true;
+      }
+    }
+    if (rawPdfNameEquals(state.bytes, key, FIRST_BYTES)) {
+      if (value.kind === 'integer' && value.integer !== undefined) {
+        objectStreamFirst = value.integer;
+      } else {
+        objectStreamMetadataInvalid = true;
+      }
+    }
+    if (rawPdfNameEquals(state.bytes, key, FILTER_BYTES)) {
+      streamFilter =
+        value.name === FLATE_DECODE_NAME ||
+        (value.nameArray?.length === 1 &&
+          value.nameArray[0] === FLATE_DECODE_NAME)
+          ? 'flate'
+          : 'unsupported';
+    }
+    if (rawPdfNameEquals(state.bytes, key, DECODE_PARMS_BYTES)) {
+      streamDecodeParmsPresent = true;
+    }
+    if (rawPdfNameEquals(state.bytes, key, PREV_BYTES)) {
+      if (sawPrev || value.kind !== 'integer' || value.integer === undefined) {
+        xrefMetadataInvalid = true;
+      } else {
+        prevOffset = value.integer;
+      }
+      sawPrev = true;
+    }
+    if (rawPdfNameEquals(state.bytes, key, XREF_STM_BYTES)) {
+      if (
+        sawXrefStm ||
+        value.kind !== 'integer' ||
+        value.integer === undefined
+      ) {
+        xrefMetadataInvalid = true;
+      } else {
+        xrefStmOffset = value.integer;
+      }
+      sawXrefStm = true;
+    }
+
+    const setLinearizationInteger = (
+      identifier: string,
+      assign: (integer: number) => void,
+    ) => {
+      if (
+        linearizationKeys.has(identifier) ||
+        value.kind !== 'integer' ||
+        value.integer === undefined
+      ) {
+        linearizationInvalid = true;
+      } else {
+        assign(value.integer);
+      }
+      linearizationKeys.add(identifier);
+    };
+    if (rawPdfNameEquals(state.bytes, key, LINEARIZED_BYTES)) {
+      if (
+        linearizationKeys.has('Linearized') ||
+        !rawPdfNumberEqualsOne(state.bytes, valueToken)
+      ) {
+        linearizationInvalid = true;
+      } else {
+        linearized = 1;
+      }
+      linearizationKeys.add('Linearized');
+    } else if (rawPdfNameEquals(state.bytes, key, LINEARIZED_LENGTH_BYTES)) {
+      setLinearizationInteger('L', (integer) => {
+        linearizedLength = integer;
+      });
+    } else if (rawPdfNameEquals(state.bytes, key, LINEARIZED_OBJECT_BYTES)) {
+      setLinearizationInteger('O', (integer) => {
+        firstPageObject = integer;
+      });
+    } else if (rawPdfNameEquals(state.bytes, key, LINEARIZED_END_BYTES)) {
+      setLinearizationInteger('E', (integer) => {
+        firstPageEnd = integer;
+      });
+    } else if (
+      rawPdfNameEquals(state.bytes, key, LINEARIZED_PAGE_COUNT_BYTES)
+    ) {
+      setLinearizationInteger('N', (integer) => {
+        pageCount = integer;
+      });
+    } else if (rawPdfNameEquals(state.bytes, key, LINEARIZED_MAIN_XREF_BYTES)) {
+      setLinearizationInteger('T', (integer) => {
+        mainXrefOffset = integer;
+      });
+    } else if (rawPdfNameEquals(state.bytes, key, LINEARIZED_HINTS_BYTES)) {
+      if (linearizationKeys.has('H') || value.integerArray === undefined) {
+        linearizationInvalid = true;
+      } else {
+        hintOffsets = value.integerArray;
+      }
+      linearizationKeys.add('H');
+    }
+    index = value.end;
+  }
+  return markRawPdfIssue(state, 'dictionary_unterminated');
+}
+
+interface RawPdfIndirectDictionary {
+  readonly objectStart: number;
+  readonly value: RawPdfParsedValue;
+}
+
+function parseRawPdfIndirectDictionary(
+  state: RawPdfScanState,
+  objectNumberToken: RawPdfToken,
+): RawPdfIndirectDictionary | null {
+  if (rawPdfUnsignedInteger(state.bytes, objectNumberToken) === null) {
+    return null;
+  }
+  const generationToken = nextRawPdfToken(state, objectNumberToken.end);
+  if (
+    generationToken === null ||
+    rawPdfUnsignedInteger(state.bytes, generationToken) === null
+  ) {
+    return null;
+  }
+  const objectToken = nextRawPdfToken(state, generationToken.end);
+  if (
+    objectToken === null ||
+    !rawPdfWordEquals(state.bytes, objectToken, OBJ_BYTES)
+  ) {
+    return null;
+  }
+  const valueToken = nextRawPdfToken(state, objectToken.end);
+  if (valueToken === null || valueToken.kind !== 'dictionary_open') {
+    return null;
+  }
+  const value = parseRawPdfValueFromToken(state, valueToken, 0);
+  return value?.kind === 'dictionary'
+    ? { objectStart: objectNumberToken.start, value }
+    : null;
+}
+
+function firstRawPdfLinearization(
+  bytes: Uint8Array,
+): RawPdfLinearizationInfo | null {
+  const state: RawPdfScanState = {
+    bytes,
+    budget: createRawPdfScanBudget(),
+    issues: new Set(),
+    strictValueWords: false,
+    allowLinearizedPseudoMarker: false,
+    classicXrefOffsets: [],
+    xrefStreamOffsets: [],
+    xrefStreamPrevOffsets: new Map(),
+    linearization: null,
+    linearizedPseudoMarkerCount: 0,
+    linearizedPseudoMarkerEnd: null,
+    linearizedPseudoMarkerStart: null,
+  };
+  const firstToken = nextRawPdfToken(state, 0);
+  if (firstToken === null) return null;
+  const firstObject = parseRawPdfIndirectDictionary(state, firstToken);
+  if (firstObject === null || state.issues.size > 0) return null;
+  const linearization = firstObject.value.linearization;
+  if (linearization === undefined) return null;
+
+  const {
+    length,
+    firstPageObject,
+    firstPageEnd,
+    pageCount,
+    mainXrefOffset,
+    hintOffsets,
+  } = linearization;
+  if (
+    !Number.isSafeInteger(length) ||
+    length <= 0 ||
+    length > bytes.length ||
+    !Number.isSafeInteger(firstPageObject) ||
+    firstPageObject <= 0 ||
+    !Number.isSafeInteger(firstPageEnd) ||
+    firstPageEnd <= firstObject.value.end ||
+    firstPageEnd > length ||
+    !Number.isSafeInteger(pageCount) ||
+    pageCount <= 0 ||
+    !Number.isSafeInteger(mainXrefOffset) ||
+    mainXrefOffset <= 0 ||
+    mainXrefOffset >= length ||
+    (hintOffsets.length !== 2 && hintOffsets.length !== 4) ||
+    hintOffsets.some(
+      (value) => !Number.isSafeInteger(value) || value < 0 || value > length,
+    )
+  ) {
+    return null;
+  }
+  for (let index = 0; index < hintOffsets.length; index += 2) {
+    if (hintOffsets[index] + hintOffsets[index + 1] > length) return null;
+  }
+  return linearization;
+}
+
+interface RawPdfStreamExtent {
+  readonly dataStart: number;
+  readonly dataEnd: number;
+  readonly end: number;
+}
+
+function rawPdfStreamExtent(
+  state: RawPdfScanState,
+  streamToken: RawPdfToken,
+  length: RawPdfStreamLength,
+): RawPdfStreamExtent | null {
+  if (length.kind !== 'direct') {
+    return markRawPdfIssue(state, `stream_length_${length.kind}`);
+  }
+  let dataStart = streamToken.end;
+  while (
+    dataStart < state.bytes.length &&
+    (state.bytes[dataStart] === 0 ||
+      state.bytes[dataStart] === 9 ||
+      state.bytes[dataStart] === 12 ||
+      state.bytes[dataStart] === 32)
+  ) {
+    dataStart += 1;
+  }
+  if (state.bytes[dataStart] === 13) {
+    dataStart += state.bytes[dataStart + 1] === 10 ? 2 : 1;
+  } else if (state.bytes[dataStart] === 10) {
+    dataStart += 1;
+  } else {
+    return markRawPdfIssue(state, 'stream_eol_missing');
+  }
+  const dataEnd = dataStart + length.value;
+  if (!Number.isSafeInteger(dataEnd) || dataEnd > state.bytes.length) {
+    return markRawPdfIssue(state, 'stream_length_out_of_bounds');
+  }
+
+  let endstreamStart = dataEnd;
+  if (state.bytes[endstreamStart] === 13) {
+    endstreamStart += state.bytes[endstreamStart + 1] === 10 ? 2 : 1;
+  } else if (state.bytes[endstreamStart] === 10) {
+    endstreamStart += 1;
+  }
+  while (
+    endstreamStart < state.bytes.length &&
+    (state.bytes[endstreamStart] === 0 ||
+      state.bytes[endstreamStart] === 9 ||
+      state.bytes[endstreamStart] === 12 ||
+      state.bytes[endstreamStart] === 32)
+  ) {
+    endstreamStart += 1;
+  }
+  if (
+    !rawBytesMatch(state.bytes, endstreamStart, ENDSTREAM_BYTES) ||
+    (endstreamStart > 0 && !isPdfDelimiter(state.bytes[endstreamStart - 1])) ||
+    (endstreamStart + ENDSTREAM_BYTES.length < state.bytes.length &&
+      !isPdfDelimiter(state.bytes[endstreamStart + ENDSTREAM_BYTES.length]))
+  ) {
+    return markRawPdfIssue(state, 'stream_extent_unverified');
+  }
+  return {
+    dataStart,
+    dataEnd,
+    end: endstreamStart + ENDSTREAM_BYTES.length,
+  };
+}
+
+function rawPdfChildState(
+  parent: RawPdfScanState,
+  bytes: Uint8Array,
+): RawPdfScanState {
+  return {
+    bytes,
+    budget: parent.budget,
+    issues: parent.issues,
+    strictValueWords: true,
+    allowLinearizedPseudoMarker: false,
+    classicXrefOffsets: [],
+    xrefStreamOffsets: [],
+    xrefStreamPrevOffsets: new Map(),
+    linearization: null,
+    linearizedPseudoMarkerCount: 0,
+    linearizedPseudoMarkerEnd: null,
+    linearizedPseudoMarkerStart: null,
+  };
+}
+
+function onlyRawPdfWhitespaceAndCommentsRange(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  allowFinalComment: boolean,
+): boolean {
+  if (start < 0 || end < start || end > bytes.length) return false;
+  let index = start;
+  while (index < end) {
+    if (isPdfWhitespace(bytes[index])) {
+      index += 1;
+      continue;
+    }
+    if (bytes[index] !== 37) return false;
+    index += 1;
+    while (index < end && bytes[index] !== 10 && bytes[index] !== 13) {
+      index += 1;
+    }
+    if (index === end && !allowFinalComment) return false;
+  }
+  return true;
+}
+
+function markObjectStreamIssue(state: RawPdfScanState, issue: string): false {
+  state.issues.add(issue);
+  return false;
+}
+
+function scanRawPdfObjectStreamPayload(
+  state: RawPdfScanState,
+  payload: Uint8Array,
+  objectCount: number,
+  firstObjectOffset: number,
+): boolean {
+  if (
+    firstObjectOffset > payload.byteLength ||
+    (objectCount > 0 && firstObjectOffset === 0)
+  ) {
+    return markObjectStreamIssue(state, 'object_stream_metadata_invalid');
+  }
+  if (
+    state.budget.objectStreamObjectCount + objectCount >
+    MAX_RAW_PDF_OBJECT_STREAM_OBJECTS
+  ) {
+    return markObjectStreamIssue(state, 'object_stream_object_budget_exceeded');
+  }
+  state.budget.objectStreamObjectCount += objectCount;
+
+  const headerState = rawPdfChildState(state, payload);
+  const objectNumbers = new Set<number>();
+  const offsets: number[] = [];
+  let index = 0;
+  for (let objectIndex = 0; objectIndex < objectCount; objectIndex += 1) {
+    const objectNumberToken = nextRawPdfToken(headerState, index);
+    if (
+      objectNumberToken === null ||
+      objectNumberToken.start >= firstObjectOffset ||
+      objectNumberToken.end > firstObjectOffset
+    ) {
+      return markObjectStreamIssue(state, 'object_stream_header_invalid');
+    }
+    const objectNumber = rawPdfUnsignedInteger(payload, objectNumberToken);
+    if (objectNumber === null || objectNumber === 0) {
+      return markObjectStreamIssue(state, 'object_stream_header_invalid');
+    }
+
+    const offsetToken = nextRawPdfToken(headerState, objectNumberToken.end);
+    if (
+      offsetToken === null ||
+      offsetToken.start >= firstObjectOffset ||
+      offsetToken.end > firstObjectOffset
+    ) {
+      return markObjectStreamIssue(state, 'object_stream_header_invalid');
+    }
+    const offset = rawPdfUnsignedInteger(payload, offsetToken);
+    if (
+      offset === null ||
+      offset > payload.byteLength - firstObjectOffset ||
+      objectNumbers.has(objectNumber) ||
+      (offsets.length > 0 && offset <= offsets[offsets.length - 1])
+    ) {
+      return markObjectStreamIssue(state, 'object_stream_header_invalid');
+    }
+    objectNumbers.add(objectNumber);
+    offsets.push(offset);
+    index = offsetToken.end;
+  }
+
+  if (
+    !onlyRawPdfWhitespaceAndCommentsRange(
+      payload,
+      index,
+      firstObjectOffset,
+      false,
+    )
+  ) {
+    return markObjectStreamIssue(state, 'object_stream_header_invalid');
+  }
+  if (objectCount === 0) {
+    return onlyRawPdfWhitespaceAndCommentsRange(
+      payload,
+      firstObjectOffset,
+      payload.byteLength,
+      true,
+    )
+      ? true
+      : markObjectStreamIssue(state, 'object_stream_payload_invalid');
+  }
+  if (
+    !onlyRawPdfWhitespaceAndCommentsRange(
+      payload,
+      firstObjectOffset,
+      firstObjectOffset + offsets[0],
+      false,
+    )
+  ) {
+    return markObjectStreamIssue(state, 'object_stream_payload_invalid');
+  }
+
+  for (let objectIndex = 0; objectIndex < objectCount; objectIndex += 1) {
+    const objectStart = firstObjectOffset + offsets[objectIndex];
+    const objectEnd =
+      objectIndex + 1 < objectCount
+        ? firstObjectOffset + offsets[objectIndex + 1]
+        : payload.byteLength;
+    if (objectStart >= objectEnd) {
+      return markObjectStreamIssue(state, 'object_stream_payload_invalid');
+    }
+
+    const objectBytes = payload.subarray(objectStart, objectEnd);
+    const objectState = rawPdfChildState(state, objectBytes);
+    const valueToken = nextRawPdfToken(objectState, 0);
+    if (valueToken === null) {
+      return markObjectStreamIssue(state, 'object_stream_payload_invalid');
+    }
+    const issueCount = state.issues.size;
+    const value = parseRawPdfValueFromToken(objectState, valueToken, 0);
+    if (value === null) {
+      return state.issues.size > issueCount
+        ? false
+        : markObjectStreamIssue(state, 'object_stream_payload_invalid');
+    }
+    if (
+      !onlyRawPdfWhitespaceAndCommentsRange(
+        objectBytes,
+        value.end,
+        objectBytes.byteLength,
+        objectIndex + 1 === objectCount,
+      )
+    ) {
+      return markObjectStreamIssue(state, 'object_stream_payload_invalid');
+    }
+  }
+  return true;
+}
+
+function scanRawPdfObjectStream(
+  state: RawPdfScanState,
+  dictionary: RawPdfParsedValue,
+  extent: RawPdfStreamExtent,
+): boolean {
+  state.budget.objectStreamCount += 1;
+  if (state.budget.objectStreamCount > MAX_RAW_PDF_OBJECT_STREAMS) {
+    return markObjectStreamIssue(state, 'object_stream_count_limit_exceeded');
+  }
+  if (
+    dictionary.objectStreamMetadataInvalid ||
+    dictionary.objectStreamN === undefined ||
+    dictionary.objectStreamFirst === undefined
+  ) {
+    return markObjectStreamIssue(state, 'object_stream_metadata_invalid');
+  }
+  if (
+    dictionary.streamDecodeParmsPresent ||
+    dictionary.streamFilter === 'unsupported'
+  ) {
+    return markObjectStreamIssue(state, 'object_stream_filter_unsupported');
+  }
+
+  const input = state.bytes.subarray(extent.dataStart, extent.dataEnd);
+  if (
+    input.byteLength > MAX_RAW_PDF_SINGLE_OBJECT_STREAM_COMPRESSED_BYTES ||
+    state.budget.objectStreamCompressedBytes + input.byteLength >
+      MAX_RAW_PDF_OBJECT_STREAM_COMPRESSED_BYTES
+  ) {
+    return markObjectStreamIssue(
+      state,
+      'object_stream_compressed_budget_exceeded',
+    );
+  }
+  state.budget.objectStreamCompressedBytes += input.byteLength;
+
+  let payload: Uint8Array;
+  if (dictionary.streamFilter === 'flate') {
+    const remainingDecodedBytes =
+      MAX_RAW_PDF_OBJECT_STREAM_DECODED_BYTES -
+      state.budget.objectStreamDecodedBytes;
+    const outputLimit = Math.min(
+      remainingDecodedBytes,
+      MAX_RAW_PDF_SINGLE_OBJECT_STREAM_DECODED_BYTES,
+    );
+    if (outputLimit <= 0) {
+      return markObjectStreamIssue(
+        state,
+        'object_stream_decoded_budget_exceeded',
+      );
+    }
+    try {
+      payload = decodeBoundedZlib(input, outputLimit);
+    } catch (error) {
+      return markObjectStreamIssue(
+        state,
+        error instanceof BoundedZlibDecodeLimitError
+          ? 'object_stream_decoded_budget_exceeded'
+          : 'object_stream_decode_failed',
+      );
+    }
+  } else {
+    payload = input;
+  }
+  if (
+    payload.byteLength > MAX_RAW_PDF_SINGLE_OBJECT_STREAM_DECODED_BYTES ||
+    state.budget.objectStreamDecodedBytes + payload.byteLength >
+      MAX_RAW_PDF_OBJECT_STREAM_DECODED_BYTES
+  ) {
+    return markObjectStreamIssue(
+      state,
+      'object_stream_decoded_budget_exceeded',
+    );
+  }
+  state.budget.objectStreamDecodedBytes += payload.byteLength;
+  return scanRawPdfObjectStreamPayload(
+    state,
+    payload,
+    dictionary.objectStreamN,
+    dictionary.objectStreamFirst,
+  );
+}
+
+function revisionCandidateAfterStartXref(
+  state: RawPdfScanState,
+  startXref: RawPdfToken,
+): PdfRevisionCandidate | null {
+  const offsetToken = nextRawPdfToken(state, startXref.end);
+  if (offsetToken === null) return null;
+  const xrefOffset = rawPdfUnsignedInteger(state.bytes, offsetToken);
+  if (xrefOffset === null) return null;
+  let index = offsetToken.end;
+  while (index < state.bytes.length) {
+    while (index < state.bytes.length && isPdfWhitespace(state.bytes[index])) {
+      index += 1;
+    }
+    if (rawBytesMatch(state.bytes, index, EOF_BYTES)) {
+      const end = index + EOF_BYTES.length;
+      if (end !== state.bytes.length && !isPdfWhitespace(state.bytes[end])) {
+        return null;
+      }
+      if (!xrefOffsetLooksValid(state.bytes, xrefOffset, index)) {
+        if (
+          xrefOffset === 0 &&
+          state.allowLinearizedPseudoMarker &&
+          startXref.start < 4_096 &&
+          state.linearizedPseudoMarkerCount === 0
+        ) {
+          state.linearizedPseudoMarkerCount += 1;
+          state.linearizedPseudoMarkerStart = startXref.start;
+          state.linearizedPseudoMarkerEnd = end;
+          return {
+            start: startXref.start,
+            end,
+            xrefOffset,
+            linearizedPseudoMarker: true,
+          };
+        }
+        return markRawPdfIssue(state, 'revision_xref_offset_invalid');
+      }
+      return { start: startXref.start, end, xrefOffset };
+    }
+    if (state.bytes[index] !== 37) return null;
+    while (
+      index < state.bytes.length &&
+      state.bytes[index] !== 10 &&
+      state.bytes[index] !== 13
+    ) {
+      index += 1;
+    }
+  }
+  return null;
+}
+
+function scanRawPdfRevisions(
+  bytes: Uint8Array,
+  linearization: RawPdfLinearizationInfo | null,
+): RawPdfRevisionScan {
+  const state: RawPdfScanState = {
+    bytes,
+    budget: createRawPdfScanBudget(),
+    issues: new Set(),
+    strictValueWords: false,
+    allowLinearizedPseudoMarker: linearization !== null,
+    classicXrefOffsets: [],
+    xrefStreamOffsets: [],
+    xrefStreamPrevOffsets: new Map(),
+    linearization,
+    linearizedPseudoMarkerCount: 0,
+    linearizedPseudoMarkerEnd: null,
+    linearizedPseudoMarkerStart: null,
+  };
+  const candidates: PdfRevisionCandidate[] = [];
+  let markerCount = 0;
+  let index = 0;
+  while (index < bytes.length && state.issues.size === 0) {
+    const token = nextRawPdfToken(state, index);
+    if (token === null) break;
+    if (rawPdfWordEquals(bytes, token, STARTXREF_BYTES)) {
+      const candidate = revisionCandidateAfterStartXref(state, token);
+      if (candidate !== null) {
+        if (candidate.linearizedPseudoMarker) {
+          index = candidate.end;
+          continue;
+        }
+        markerCount += 1;
+        if (candidates.length < MAX_PDF_HISTORY_REVISIONS + 1) {
+          candidates.push(candidate);
+        }
+        index = candidate.end;
+        continue;
+      }
+      if (state.issues.size === 0) {
+        state.issues.add('revision_marker_malformed');
+      }
+      break;
+    }
+    if (rawPdfWordEquals(bytes, token, XREF_BYTES)) {
+      state.classicXrefOffsets.push(token.start);
+    }
+    if (rawPdfWordEquals(bytes, token, TRAILER_BYTES)) {
+      const dictionaryToken = nextRawPdfToken(state, token.end);
+      if (
+        dictionaryToken === null ||
+        dictionaryToken.kind !== 'dictionary_open'
+      ) {
+        state.issues.add('trailer_dictionary_missing');
+        break;
+      }
+      const trailer = parseRawPdfValueFromToken(state, dictionaryToken, 0);
+      if (trailer === null || trailer.kind !== 'dictionary') break;
+      if (trailer.xrefMetadataInvalid) {
+        state.issues.add('trailer_xref_metadata_invalid');
+        break;
+      }
+      if (trailer.xrefStmOffset !== undefined) {
+        state.issues.add('hybrid_xref_unverified');
+        break;
+      }
+      index = trailer.end;
+      continue;
+    }
+
+    const indirectDictionary = parseRawPdfIndirectDictionary(state, token);
+    if (indirectDictionary !== null) {
+      const { objectStart, value } = indirectDictionary;
+      if (value.xrefStreamDictionary) {
+        state.xrefStreamOffsets.push(objectStart);
+        state.xrefStreamPrevOffsets.set(objectStart, value.prevOffset ?? null);
+        if (value.xrefMetadataInvalid) {
+          state.issues.add('xref_stream_metadata_invalid');
+          break;
+        }
+      }
+      index = value.end;
+      const streamToken = nextRawPdfToken(state, value.end);
+      const hasStream =
+        streamToken !== null &&
+        rawPdfWordEquals(bytes, streamToken, STREAM_BYTES);
+      if (value.objectStreamDictionary && !hasStream) {
+        state.issues.add('object_stream_missing');
+        break;
+      }
+      if (hasStream) {
+        if (value.typeIndirect) {
+          state.issues.add('stream_type_indirect');
+          break;
+        }
+        const extent = rawPdfStreamExtent(
+          state,
+          streamToken,
+          value.streamLength ?? { kind: 'missing' },
+        );
+        if (extent === null) break;
+        if (
+          value.objectStreamDictionary &&
+          !scanRawPdfObjectStream(state, value, extent)
+        ) {
+          break;
+        }
+        index = extent.end;
+      }
+      continue;
+    }
+
+    const value = parseRawPdfValueFromToken(state, token, 0);
+    if (value === null) break;
+    index = value.end;
+    if (value.kind !== 'dictionary') continue;
+    const next = nextRawPdfToken(state, value.end);
+    if (next === null || !rawPdfWordEquals(bytes, next, STREAM_BYTES)) continue;
+    if (value.objectStreamDictionary) {
+      state.issues.add('object_stream_not_indirect');
+      break;
+    }
+    const extent = rawPdfStreamExtent(
+      state,
+      next,
+      value.streamLength ?? { kind: 'missing' },
+    );
+    if (extent === null) break;
+    index = extent.end;
+  }
+
+  if (markerCount > MAX_PDF_HISTORY_REVISIONS) {
+    state.issues.add('revision_candidate_limit_exceeded');
+  }
+  const markedXrefOffsets = new Set(
+    candidates.map(({ xrefOffset }) => xrefOffset),
+  );
+  const classicXrefOffsets = new Set(state.classicXrefOffsets);
+  const xrefStreamOffsets = new Set(state.xrefStreamOffsets);
+  if (
+    state.classicXrefOffsets.some((offset) => !markedXrefOffsets.has(offset))
+  ) {
+    state.issues.add('unmarked_classic_xref_section');
+  }
+  if (
+    [...markedXrefOffsets].some(
+      (offset) =>
+        !classicXrefOffsets.has(offset) && !xrefStreamOffsets.has(offset),
+    )
+  ) {
+    state.issues.add('xref_target_unrecognized');
+  }
+  const unmarkedXrefStreams = state.xrefStreamOffsets.filter(
+    (offset) => !markedXrefOffsets.has(offset),
+  );
+  let linearizedMainXrefOffset = state.linearization?.mainXrefOffset ?? -1;
+  while (
+    linearizedMainXrefOffset >= 0 &&
+    linearizedMainXrefOffset < bytes.length &&
+    isPdfWhitespace(bytes[linearizedMainXrefOffset])
+  ) {
+    linearizedMainXrefOffset += 1;
+  }
+  const allowedLinearizedXrefStream =
+    state.linearizedPseudoMarkerCount === 1 &&
+    unmarkedXrefStreams.includes(linearizedMainXrefOffset)
+      ? linearizedMainXrefOffset
+      : null;
+  if (
+    unmarkedXrefStreams.some((offset) => offset !== allowedLinearizedXrefStream)
+  ) {
+    state.issues.add('unmarked_xref_stream');
+  }
+
+  if (state.linearizedPseudoMarkerCount > 0) {
+    const originalBoundary =
+      state.linearization === null
+        ? undefined
+        : candidates.find(
+            ({ end }) =>
+              end <= state.linearization!.length &&
+              onlyPdfWhitespaceRange(bytes, end, state.linearization!.length),
+          );
+    const linearizationVerified =
+      state.linearization !== null &&
+      state.linearizedPseudoMarkerCount === 1 &&
+      state.linearizedPseudoMarkerStart !== null &&
+      state.linearizedPseudoMarkerEnd !== null &&
+      state.linearizedPseudoMarkerEnd < state.linearization.firstPageEnd &&
+      originalBoundary !== undefined &&
+      originalBoundary.xrefOffset < state.linearizedPseudoMarkerStart &&
+      allowedLinearizedXrefStream !== null &&
+      state.xrefStreamPrevOffsets.get(originalBoundary.xrefOffset) ===
+        allowedLinearizedXrefStream;
+    if (!linearizationVerified) {
+      state.issues.add('linearized_boundary_unverified');
+    }
+  }
+  return {
+    candidates,
+    markerCount,
+    complete: state.issues.size === 0,
+    issues: [...state.issues].sort(),
+  };
+}
+
+function findPdfRevisionCandidates(bytes: Uint8Array): RawPdfRevisionScan {
+  const scan = scanRawPdfRevisions(bytes, firstRawPdfLinearization(bytes));
+  if (scan.markerCount > MAX_PDF_HISTORY_REVISIONS) {
+    return {
+      ...scan,
+      candidates: scan.candidates.slice(0, MAX_PDF_HISTORY_REVISIONS),
+    };
+  }
+  return scan;
+}
+
+function onlyPdfWhitespace(bytes: Uint8Array, start: number): boolean {
+  for (let index = start; index < bytes.length; index += 1) {
+    if (!isPdfWhitespace(bytes[index])) return false;
+  }
+  return true;
+}
+
+function onlyPdfWhitespaceRange(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+): boolean {
+  if (start < 0 || end < start || end > bytes.length) return false;
+  for (let index = start; index < end; index += 1) {
+    if (!isPdfWhitespace(bytes[index])) return false;
+  }
+  return true;
+}
+
+function signatureByteRangeFingerprint(
+  signature: PdfSignatureFingerprint,
+): string | null {
+  if (signature.byteRangeRaw.kind === 'missing') return null;
+  return JSON.stringify([
+    signature.byteRangeRaw,
+    signature.byteRangeElementRaw,
+    signature.resolvedByteRange,
+  ]);
+}
+
+async function inspectPdfRevisionHistory(
+  bytes: Uint8Array,
+  currentDocument: PDFDocument,
+): Promise<PdfRevisionHistorySummary> {
+  const scan = findPdfRevisionCandidates(bytes);
+  const { candidates, markerCount } = scan;
+  const issues = new Set(scan.issues);
+  const currentSnapshot = await fingerprintPdfSignatures(currentDocument);
+  const currentSignatures = new Map(
+    currentSnapshot.signatures.map((signature) => [
+      signature.identity,
+      signature,
+    ]),
+  );
+  const byteRangeIdentities = new Set(
+    currentSnapshot.signatures
+      .filter((signature) => signature.byteRangeRaw.kind !== 'missing')
+      .map((signature) => signature.identity),
+  );
+  const historicalByteRangeMismatches = new Set<string>();
+  const historicalSignatureMismatches = new Set<string>();
+  if (!currentSnapshot.complete) {
+    issues.add('current_signature_fingerprint_inconclusive');
+  }
+
+  if (candidates.length === 0) issues.add('revision_marker_missing');
+  if (markerCount > MAX_PDF_HISTORY_REVISIONS) {
+    issues.add('revision_candidate_limit_exceeded');
+  }
+  const finalCandidate = candidates.at(-1);
+  if (
+    finalCandidate === undefined ||
+    !onlyPdfWhitespace(bytes, finalCandidate.end)
+  ) {
+    issues.add('final_revision_boundary_unverified');
+  }
+
+  if (markerCount <= MAX_PDF_HISTORY_REVISIONS) {
+    let parsedBytes = 0;
+    for (const candidate of candidates.slice(0, -1)) {
+      parsedBytes += candidate.end;
+      if (parsedBytes > MAX_PDF_HISTORY_PARSE_BYTES) {
+        issues.add('revision_parse_byte_budget_exceeded');
+        break;
+      }
+      try {
+        const revision = await PDFDocument.load(
+          copyBytes(bytes.subarray(0, candidate.end)),
+          { updateMetadata: false },
+        );
+        const historicalSnapshot = await fingerprintPdfSignatures(revision);
+        if (!historicalSnapshot.complete) {
+          issues.add('revision_signature_fingerprint_inconclusive');
+        }
+        for (const historical of historicalSnapshot.signatures) {
+          const historicalRange = signatureByteRangeFingerprint(historical);
+          if (historicalRange !== null) {
+            byteRangeIdentities.add(historical.identity);
+          }
+          const current = currentSignatures.get(historical.identity);
+          if (
+            historicalRange !== null &&
+            (current === undefined ||
+              signatureByteRangeFingerprint(current) !== historicalRange)
+          ) {
+            historicalByteRangeMismatches.add(historical.identity);
+          }
+          if (
+            historical.fingerprint === null ||
+            current?.fingerprint === null ||
+            current === undefined ||
+            current.fingerprint !== historical.fingerprint
+          ) {
+            historicalSignatureMismatches.add(historical.identity);
+          }
+        }
+      } catch {
+        issues.add('revision_prefix_parse_failed');
+      }
+    }
+  }
+
+  return {
+    byteRangeNameCount: byteRangeIdentities.size,
+    historicalByteRangeNameCount: historicalByteRangeMismatches.size,
+    historicalSignatureStructureCount: historicalSignatureMismatches.size,
+    revisionMarkerCount: markerCount,
+    complete: issues.size === 0,
+    issues: [...issues].sort(),
+  };
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -330,23 +1950,33 @@ function collectPdfDictionaries(document: PDFDocument): PDFDict[] {
   const dictionaries: PDFDict[] = [];
   const seen = new Set<PDFObject>();
   const pending: PDFObject[] = [document.catalog];
+  let edgeCount = 0;
+  const enqueue = (object: PDFObject): void => {
+    edgeCount += 1;
+    if (edgeCount > MAX_PDF_OBJECT_GRAPH_EDGES) {
+      malformedPdfObjectGraph('edge_limit_exceeded');
+    }
+    pending.push(object);
+  };
 
   while (pending.length > 0) {
     const object = pending.pop();
     if (object === undefined || seen.has(object)) continue;
+    if (seen.size >= MAX_PDF_OBJECT_GRAPH_NODES) {
+      malformedPdfObjectGraph('node_limit_exceeded');
+    }
     seen.add(object);
 
     if (object instanceof PDFRef) {
-      const resolved = document.context.lookup(object);
-      if (resolved !== undefined) pending.push(resolved);
+      enqueue(requiredGraphLookup(document, object));
     } else if (object instanceof PDFStream) {
-      pending.push(object.dict);
+      enqueue(object.dict);
     } else if (object instanceof PDFDict) {
       dictionaries.push(object);
-      pending.push(...object.values());
+      for (const value of object.values()) enqueue(value);
     } else if (object instanceof PDFArray) {
       for (let index = 0; index < object.size(); index += 1) {
-        pending.push(object.get(index));
+        enqueue(object.get(index));
       }
     }
   }
@@ -359,15 +1989,47 @@ function collectUnreachableSignatureDictionaries(
   reachableDictionaries: readonly PDFDict[],
 ): PDFDict[] {
   const reachable = new Set(reachableDictionaries);
+  const seen = new Set<PDFObject>();
   const unreachable: PDFDict[] = [];
+  let edgeCount = 0;
   for (const [, object] of document.context.enumerateIndirectObjects()) {
-    if (
-      object instanceof PDFDict &&
-      !reachable.has(object) &&
-      (dictionaryName(object, 'Type') === 'Sig' ||
-        object.has(PDFName.of('ByteRange')))
-    ) {
-      unreachable.push(object);
+    const pending: PDFObject[] = [object];
+    const enqueue = (candidate: PDFObject): void => {
+      edgeCount += 1;
+      if (edgeCount > MAX_PDF_OBJECT_GRAPH_EDGES) {
+        malformedPdfObjectGraph('unreachable_edge_limit_exceeded');
+      }
+      pending.push(candidate);
+    };
+    while (pending.length > 0) {
+      const candidate = pending.pop();
+      if (
+        candidate === undefined ||
+        candidate instanceof PDFRef ||
+        seen.has(candidate)
+      ) {
+        continue;
+      }
+      if (seen.size >= MAX_PDF_OBJECT_GRAPH_NODES) {
+        malformedPdfObjectGraph('unreachable_node_limit_exceeded');
+      }
+      seen.add(candidate);
+      if (candidate instanceof PDFStream) {
+        enqueue(candidate.dict);
+      } else if (candidate instanceof PDFArray) {
+        for (let index = 0; index < candidate.size(); index += 1) {
+          enqueue(candidate.get(index));
+        }
+      } else if (candidate instanceof PDFDict) {
+        if (
+          !reachable.has(candidate) &&
+          (dictionaryName(candidate, 'Type') === 'Sig' ||
+            candidate.has(PDFName.of('ByteRange')))
+        ) {
+          unreachable.push(candidate);
+        }
+        for (const value of candidate.values()) enqueue(value);
+      }
     }
   }
   return unreachable;
@@ -378,76 +2040,709 @@ function dictionaryName(dictionary: PDFDict, key: string): string | null {
   return value instanceof PDFName ? value.decodeText() : null;
 }
 
+function malformedPdfObjectGraph(reason: string, cause?: unknown): never {
+  throw new PdfEngineError(
+    'PDF_LOAD_FAILED',
+    'The PDF object graph is malformed or exceeds inspection limits.',
+    { details: { hierarchy: 'pdf_object_graph', reason }, cause },
+  );
+}
+
+function requiredGraphLookup(
+  document: PDFDocument,
+  reference: PDFRef,
+): PDFObject {
+  let resolved: PDFObject | undefined;
+  try {
+    resolved = document.context.lookup(reference);
+  } catch (cause) {
+    malformedPdfObjectGraph('reference_lookup_failed', cause);
+  }
+  if (resolved === undefined) {
+    malformedPdfObjectGraph('reference_unresolved');
+  }
+  return resolved;
+}
+
+function malformedPdfHierarchy(
+  hierarchy: 'acroform_fields' | 'page_tree',
+  reason: string,
+): never {
+  throw new PdfEngineError(
+    'PDF_LOAD_FAILED',
+    hierarchy === 'acroform_fields'
+      ? 'The PDF AcroForm field hierarchy is malformed.'
+      : 'The PDF page tree is malformed.',
+    { details: { hierarchy, reason } },
+  );
+}
+
+function lookedUpObject(
+  document: PDFDocument,
+  object: PDFObject | undefined,
+): PDFObject | undefined {
+  try {
+    return document.context.lookup(object);
+  } catch {
+    return undefined;
+  }
+}
+
+interface PendingPageTreeNode {
+  readonly depth: number;
+  readonly dictionary: PDFDict;
+  readonly parentRef: PDFRef | null;
+  readonly ref: PDFRef;
+}
+
+interface ValidatedPageTreeNode {
+  readonly childRefs: readonly PDFRef[];
+  readonly declaredCount: number | null;
+  readonly ref: PDFRef;
+  readonly type: 'Page' | 'Pages';
+}
+
+function validatePageTree(document: PDFDocument): void {
+  const rawRoot = document.catalog.get(PDFName.of('Pages'));
+  if (!(rawRoot instanceof PDFRef)) {
+    malformedPdfHierarchy('page_tree', 'catalog_pages_not_indirect_reference');
+  }
+  const root = lookedUpObject(document, rawRoot);
+  if (!(root instanceof PDFDict)) {
+    malformedPdfHierarchy('page_tree', 'catalog_pages_not_dictionary');
+  }
+
+  const discovered = new Set<string>([rawRoot.toString()]);
+  const pending: PendingPageTreeNode[] = [
+    { depth: 0, dictionary: root, parentRef: null, ref: rawRoot },
+  ];
+  const nodes: ValidatedPageTreeNode[] = [];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) continue;
+    if (current.depth > MAX_PAGE_TREE_DEPTH) {
+      malformedPdfHierarchy('page_tree', 'depth_limit_exceeded');
+    }
+    if (nodes.length >= MAX_PAGE_TREE_NODES) {
+      malformedPdfHierarchy('page_tree', 'node_limit_exceeded');
+    }
+
+    const rawParent = current.dictionary.get(PDFName.of('Parent'));
+    if (current.parentRef === null) {
+      if (rawParent !== undefined) {
+        malformedPdfHierarchy('page_tree', 'root_parent_present');
+      }
+    } else if (
+      !(rawParent instanceof PDFRef) ||
+      rawParent.toString() !== current.parentRef.toString()
+    ) {
+      malformedPdfHierarchy('page_tree', 'child_parent_mismatch');
+    }
+
+    const type = dictionaryName(current.dictionary, 'Type');
+    if (type === 'Page') {
+      if (current.dictionary.has(PDFName.of('Kids'))) {
+        malformedPdfHierarchy('page_tree', 'page_leaf_has_kids');
+      }
+      nodes.push({
+        childRefs: [],
+        declaredCount: null,
+        ref: current.ref,
+        type,
+      });
+      continue;
+    }
+    if (type !== 'Pages') {
+      malformedPdfHierarchy('page_tree', 'node_type_unrecognized');
+    }
+
+    const rawKids = current.dictionary.get(PDFName.of('Kids'));
+    const kids = lookedUpObject(document, rawKids);
+    if (!(kids instanceof PDFArray)) {
+      malformedPdfHierarchy('page_tree', 'kids_not_array');
+    }
+    const rawCount = lookedUpObject(
+      document,
+      current.dictionary.get(PDFName.of('Count')),
+    );
+    const declaredCount =
+      rawCount instanceof PDFNumber ? rawCount.asNumber() : Number.NaN;
+    if (!Number.isSafeInteger(declaredCount) || declaredCount < 0) {
+      malformedPdfHierarchy('page_tree', 'count_invalid');
+    }
+
+    const children: PendingPageTreeNode[] = [];
+    for (let index = 0; index < kids.size(); index += 1) {
+      const childRef = kids.get(index);
+      if (!(childRef instanceof PDFRef)) {
+        malformedPdfHierarchy('page_tree', 'kid_not_indirect_reference');
+      }
+      const key = childRef.toString();
+      if (discovered.has(key)) {
+        malformedPdfHierarchy('page_tree', 'duplicate_or_cyclic_kid');
+      }
+      if (discovered.size >= MAX_PAGE_TREE_NODES) {
+        malformedPdfHierarchy('page_tree', 'node_limit_exceeded');
+      }
+      const child = lookedUpObject(document, childRef);
+      if (!(child instanceof PDFDict)) {
+        malformedPdfHierarchy('page_tree', 'kid_not_dictionary');
+      }
+      discovered.add(key);
+      children.push({
+        depth: current.depth + 1,
+        dictionary: child,
+        parentRef: current.ref,
+        ref: childRef,
+      });
+    }
+    nodes.push({
+      childRefs: children.map(({ ref }) => ref),
+      declaredCount,
+      ref: current.ref,
+      type,
+    });
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push(children[index]);
+    }
+  }
+
+  const leafCounts = new Map<string, number>();
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const node = nodes[index];
+    if (node.type === 'Page') {
+      leafCounts.set(node.ref.toString(), 1);
+      continue;
+    }
+    let actualCount = 0;
+    for (const childRef of node.childRefs) {
+      const childCount = leafCounts.get(childRef.toString());
+      if (childCount === undefined) {
+        malformedPdfHierarchy('page_tree', 'kid_count_unavailable');
+      }
+      actualCount += childCount;
+      if (!Number.isSafeInteger(actualCount)) {
+        malformedPdfHierarchy('page_tree', 'count_overflow');
+      }
+    }
+    if (node.declaredCount !== actualCount) {
+      malformedPdfHierarchy('page_tree', 'count_mismatch');
+    }
+    leafCounts.set(node.ref.toString(), actualCount);
+  }
+}
+
+interface PendingAcroFormFieldNode {
+  readonly depth: number;
+  readonly dictionary: PDFDict;
+  readonly parentRef: PDFRef | null;
+  readonly ref: PDFRef;
+}
+
+function validateAcroFormFieldGraph(
+  document: PDFDocument,
+): ReadonlySet<PDFDict> {
+  const fieldAndWidgetDictionaries = new Set<PDFDict>();
+  const rawAcroForm = document.catalog.get(PDFName.of('AcroForm'));
+  if (rawAcroForm === undefined) return fieldAndWidgetDictionaries;
+  const acroForm = lookedUpObject(document, rawAcroForm);
+  if (!(acroForm instanceof PDFDict)) {
+    malformedPdfHierarchy('acroform_fields', 'acroform_not_dictionary');
+  }
+
+  const rawFields = acroForm.get(PDFName.of('Fields'));
+  if (rawFields === undefined) return fieldAndWidgetDictionaries;
+  const fields = lookedUpObject(document, rawFields);
+  if (!(fields instanceof PDFArray)) {
+    malformedPdfHierarchy('acroform_fields', 'fields_not_array');
+  }
+
+  const discovered = new Set<string>();
+  const pending: PendingAcroFormFieldNode[] = [];
+  const discover = (
+    object: PDFObject,
+    depth: number,
+    parentRef: PDFRef | null,
+  ): PendingAcroFormFieldNode => {
+    if (!(object instanceof PDFRef)) {
+      malformedPdfHierarchy('acroform_fields', 'field_not_indirect_reference');
+    }
+    const key = object.toString();
+    if (discovered.has(key)) {
+      malformedPdfHierarchy(
+        'acroform_fields',
+        'duplicate_or_cyclic_field_reference',
+      );
+    }
+    if (discovered.size >= MAX_ACROFORM_FIELD_GRAPH_NODES) {
+      malformedPdfHierarchy('acroform_fields', 'node_limit_exceeded');
+    }
+    if (depth > MAX_ACROFORM_FIELD_GRAPH_DEPTH) {
+      malformedPdfHierarchy('acroform_fields', 'depth_limit_exceeded');
+    }
+    const dictionary = lookedUpObject(document, object);
+    if (!(dictionary instanceof PDFDict)) {
+      malformedPdfHierarchy('acroform_fields', 'field_not_dictionary');
+    }
+    discovered.add(key);
+    fieldAndWidgetDictionaries.add(dictionary);
+    return { depth, dictionary, parentRef, ref: object };
+  };
+
+  for (let index = fields.size() - 1; index >= 0; index -= 1) {
+    pending.push(discover(fields.get(index), 0, null));
+  }
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) continue;
+
+    const rawParent = current.dictionary.get(PDFName.of('Parent'));
+    if (current.parentRef === null) {
+      if (rawParent !== undefined) {
+        malformedPdfHierarchy('acroform_fields', 'root_parent_present');
+      }
+    } else if (
+      !(rawParent instanceof PDFRef) ||
+      rawParent.toString() !== current.parentRef.toString()
+    ) {
+      malformedPdfHierarchy('acroform_fields', 'child_parent_mismatch');
+    }
+
+    if (!current.dictionary.has(PDFName.of('Kids'))) continue;
+    const kids = lookedUpObject(
+      document,
+      current.dictionary.get(PDFName.of('Kids')),
+    );
+    if (!(kids instanceof PDFArray)) {
+      malformedPdfHierarchy('acroform_fields', 'kids_not_array');
+    }
+
+    const children: PendingAcroFormFieldNode[] = [];
+    let containsChildField = false;
+    for (let index = 0; index < kids.size(); index += 1) {
+      const child = discover(kids.get(index), current.depth + 1, current.ref);
+      const rawChildParent = child.dictionary.get(PDFName.of('Parent'));
+      if (
+        !(rawChildParent instanceof PDFRef) ||
+        rawChildParent.toString() !== current.ref.toString()
+      ) {
+        malformedPdfHierarchy('acroform_fields', 'child_parent_mismatch');
+      }
+      if (child.dictionary.has(PDFName.of('T'))) {
+        containsChildField = true;
+      } else if (child.dictionary.has(PDFName.of('Kids'))) {
+        malformedPdfHierarchy('acroform_fields', 'widget_kid_has_kids');
+      }
+      children.push(child);
+    }
+    if (!containsChildField) continue;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push(children[index]);
+    }
+  }
+  return fieldAndWidgetDictionaries;
+}
+
+interface ActionGraphFrame {
+  readonly depth: number;
+  readonly expectation: 'action' | 'action_or_array';
+  readonly object: PDFObject;
+  readonly parent: ActionGraphFrame | null;
+  readonly rootPath: boolean;
+  phase: 'enter' | 'exit';
+  valid: boolean;
+}
+
+interface ReferencedActionSummary {
+  readonly actions: ReadonlySet<PDFDict>;
+  readonly malformedActionGraphCount: number;
+}
+
+const ACTION_ANNOTATION_SUBTYPES = new Set([
+  'Text',
+  'Link',
+  'FreeText',
+  'Line',
+  'Square',
+  'Circle',
+  'Polygon',
+  'PolyLine',
+  'Highlight',
+  'Underline',
+  'Squiggly',
+  'StrikeOut',
+  'Stamp',
+  'Caret',
+  'Ink',
+  'Popup',
+  'FileAttachment',
+  'Sound',
+  'Movie',
+  'Widget',
+  'Screen',
+  'PrinterMark',
+  'TrapNet',
+  'Watermark',
+  '3D',
+  'Redact',
+  'Projection',
+  'RichMedia',
+]);
+
+function dictionaryOwnsActionEntry(
+  document: PDFDocument,
+  dictionary: PDFDict,
+  fieldAndWidgetDictionaries: ReadonlySet<PDFDict>,
+): boolean {
+  if (
+    dictionary === document.catalog ||
+    fieldAndWidgetDictionaries.has(dictionary) ||
+    dictionaryName(dictionary, 'Type') === 'Annot' ||
+    dictionaryName(dictionary, 'Type') === 'Page'
+  ) {
+    return true;
+  }
+  const subtype = dictionaryName(dictionary, 'Subtype');
+  return (
+    (subtype !== null && ACTION_ANNOTATION_SUBTYPES.has(subtype)) ||
+    (dictionary.has(PDFName.of('Title')) &&
+      dictionary.has(PDFName.of('Parent')))
+  );
+}
+
+function isDirectActionDictionary(
+  document: PDFDocument,
+  object: PDFObject | undefined,
+): boolean {
+  const seenRefs = new Set<string>();
+  let candidate = object;
+  for (let depth = 0; candidate instanceof PDFRef; depth += 1) {
+    if (depth > MAX_ACTION_GRAPH_DEPTH || seenRefs.has(candidate.toString())) {
+      return false;
+    }
+    seenRefs.add(candidate.toString());
+    candidate = lookedUpObject(document, candidate);
+  }
+  return (
+    candidate instanceof PDFDict && dictionaryName(candidate, 'S') !== null
+  );
+}
+
+function isOpenActionDestination(
+  document: PDFDocument,
+  object: PDFObject,
+): boolean {
+  const seenRefs = new Set<string>();
+  let candidate: PDFObject | undefined = object;
+  for (let depth = 0; candidate instanceof PDFRef; depth += 1) {
+    if (depth > MAX_ACTION_GRAPH_DEPTH || seenRefs.has(candidate.toString())) {
+      return false;
+    }
+    seenRefs.add(candidate.toString());
+    candidate = lookedUpObject(document, candidate);
+  }
+  if (!(candidate instanceof PDFArray) || candidate.size() < 2) return false;
+
+  const page = lookedUpObject(document, candidate.get(0));
+  const destinationType = lookedUpObject(document, candidate.get(1));
+  if (
+    !(page instanceof PDFDict) ||
+    dictionaryName(page, 'Type') !== 'Page' ||
+    !(destinationType instanceof PDFName)
+  ) {
+    return false;
+  }
+
+  const parameterCounts: Readonly<Record<string, number>> = {
+    XYZ: 3,
+    Fit: 0,
+    FitH: 1,
+    FitV: 1,
+    FitR: 4,
+    FitB: 0,
+    FitBH: 1,
+    FitBV: 1,
+  };
+  const parameterCount = parameterCounts[destinationType.decodeText()];
+  if (parameterCount === undefined || candidate.size() !== parameterCount + 2) {
+    return false;
+  }
+  for (let index = 2; index < candidate.size(); index += 1) {
+    const parameter = lookedUpObject(document, candidate.get(index));
+    if (!(parameter instanceof PDFNumber) && parameter !== PDFNull) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function explicitlyReferencedActions(
   document: PDFDocument,
   dictionaries: readonly PDFDict[],
-): ReadonlySet<PDFDict> {
+  fieldAndWidgetDictionaries: ReadonlySet<PDFDict>,
+): ReferencedActionSummary {
   const actions = new Set<PDFDict>();
-  const pending: PDFDict[] = [];
+  let malformedActionGraphCount = 0;
+  let traversedEdgeCount = 0;
+  let traversedNodeCount = 0;
+  const reserveEdges = (count: number): boolean => {
+    if (count > MAX_ACTION_GRAPH_EDGES - traversedEdgeCount) return false;
+    traversedEdgeCount += count;
+    return true;
+  };
 
-  const addAction = (object: PDFObject | undefined) => {
+  const addAction = (
+    object: PDFObject | undefined,
+    allowRootArray: boolean,
+  ): void => {
     if (object === undefined) return;
-    const resolved = document.context.lookup(object);
-    if (resolved instanceof PDFArray) {
-      for (let index = 0; index < resolved.size(); index += 1) {
-        addAction(resolved.get(index));
+    let rootKind: 'array' | 'dictionary' | 'invalid' | null = null;
+    const completed = new Map<
+      PDFObject,
+      Partial<Record<ActionGraphFrame['expectation'], boolean>>
+    >();
+    const visiting = new Set<PDFObject>();
+    const root: ActionGraphFrame = {
+      depth: 0,
+      expectation: 'action_or_array',
+      object,
+      parent: null,
+      rootPath: true,
+      phase: 'enter',
+      valid: true,
+    };
+    const pending: ActionGraphFrame[] = [root];
+
+    while (pending.length > 0) {
+      const frame = pending.pop();
+      if (frame === undefined) continue;
+      if (frame.phase === 'exit') {
+        visiting.delete(frame.object);
+        const state = completed.get(frame.object) ?? {};
+        state[frame.expectation] = frame.valid;
+        completed.set(frame.object, state);
+        if (!frame.valid && frame.parent !== null) frame.parent.valid = false;
+        continue;
       }
-    } else if (
-      resolved instanceof PDFDict &&
-      dictionaryName(resolved, 'S') !== null &&
-      !actions.has(resolved)
-    ) {
-      actions.add(resolved);
-      pending.push(resolved);
+
+      const cached = completed.get(frame.object)?.[frame.expectation];
+      if (cached !== undefined) {
+        if (!cached) {
+          frame.valid = false;
+          if (frame.parent !== null) frame.parent.valid = false;
+        }
+        continue;
+      }
+      if (
+        visiting.has(frame.object) ||
+        frame.depth > MAX_ACTION_GRAPH_DEPTH ||
+        traversedNodeCount >= MAX_ACTION_GRAPH_NODES
+      ) {
+        frame.valid = false;
+        if (frame.parent !== null) frame.parent.valid = false;
+        continue;
+      }
+
+      traversedNodeCount += 1;
+      visiting.add(frame.object);
+      frame.phase = 'exit';
+      pending.push(frame);
+
+      if (frame.object instanceof PDFRef) {
+        const resolved = lookedUpObject(document, frame.object);
+        if (resolved === undefined || !reserveEdges(1)) {
+          frame.valid = false;
+        } else {
+          pending.push({
+            depth: frame.depth + 1,
+            expectation: frame.expectation,
+            object: resolved,
+            parent: frame,
+            rootPath: frame.rootPath,
+            phase: 'enter',
+            valid: true,
+          });
+        }
+        continue;
+      }
+
+      if (frame.object instanceof PDFArray) {
+        if (frame.rootPath) rootKind = 'array';
+        if (frame.expectation === 'action' || frame.object.size() === 0) {
+          frame.valid = false;
+        }
+        if (!reserveEdges(frame.object.size())) {
+          frame.valid = false;
+          continue;
+        }
+        for (let index = frame.object.size() - 1; index >= 0; index -= 1) {
+          pending.push({
+            depth: frame.depth + 1,
+            expectation: 'action',
+            object: frame.object.get(index),
+            parent: frame,
+            rootPath: false,
+            phase: 'enter',
+            valid: true,
+          });
+        }
+        continue;
+      }
+
+      if (frame.object instanceof PDFDict) {
+        if (frame.rootPath) rootKind = 'dictionary';
+        if (dictionaryName(frame.object, 'S') === null) {
+          frame.valid = false;
+          continue;
+        }
+        actions.add(frame.object);
+        if (frame.object.has(PDFName.of('Next'))) {
+          if (!reserveEdges(1)) {
+            frame.valid = false;
+          } else {
+            pending.push({
+              depth: frame.depth + 1,
+              expectation: 'action_or_array',
+              object: frame.object.get(PDFName.of('Next'))!,
+              parent: frame,
+              rootPath: false,
+              phase: 'enter',
+              valid: true,
+            });
+          }
+        }
+        continue;
+      }
+
+      if (frame.rootPath) rootKind = 'invalid';
+      frame.valid = false;
+    }
+
+    if (!root.valid || rootKind === 'invalid' || rootKind === null) {
+      malformedActionGraphCount += 1;
+    } else if (rootKind === 'array' && !allowRootArray) {
+      malformedActionGraphCount += 1;
     }
   };
 
   for (const dictionary of dictionaries) {
-    addAction(dictionary.get(PDFName.of('A')));
-    addAction(dictionary.get(PDFName.of('NA')));
-    const additionalActions = document.context.lookup(
-      dictionary.get(PDFName.of('AA')),
+    const ownsActionEntry = dictionaryOwnsActionEntry(
+      document,
+      dictionary,
+      fieldAndWidgetDictionaries,
     );
-    if (additionalActions instanceof PDFDict) {
-      for (const action of additionalActions.values()) addAction(action);
+    if (dictionary.has(PDFName.of('A'))) {
+      const action = dictionary.get(PDFName.of('A'));
+      if (ownsActionEntry || isDirectActionDictionary(document, action)) {
+        addAction(action, false);
+      }
+    }
+    if (dictionary.has(PDFName.of('NA'))) {
+      const action = dictionary.get(PDFName.of('NA'));
+      if (ownsActionEntry || isDirectActionDictionary(document, action)) {
+        addAction(action, false);
+      }
+    }
+    if (dictionary.has(PDFName.of('AA'))) {
+      const additionalActions = lookedUpObject(
+        document,
+        dictionary.get(PDFName.of('AA')),
+      );
+      if (additionalActions instanceof PDFDict) {
+        for (const action of additionalActions.values()) {
+          if (ownsActionEntry || isDirectActionDictionary(document, action)) {
+            addAction(action, false);
+          }
+        }
+      } else if (ownsActionEntry) {
+        malformedActionGraphCount += 1;
+      }
     }
   }
-  addAction(document.catalog.get(PDFName.of('OpenAction')));
+  if (document.catalog.has(PDFName.of('OpenAction'))) {
+    const openAction = document.catalog.get(PDFName.of('OpenAction'));
+    if (
+      openAction !== undefined &&
+      !isOpenActionDestination(document, openAction)
+    ) {
+      addAction(openAction, false);
+    }
+  }
 
-  const names = document.context.lookup(
+  const names = lookedUpObject(
+    document,
     document.catalog.get(PDFName.of('Names')),
   );
-  const javaScriptNameTree =
-    names instanceof PDFDict
-      ? document.context.lookup(names.get(PDFName.of('JavaScript')))
-      : undefined;
+  const javaScriptEntry =
+    names instanceof PDFDict ? names.get(PDFName.of('JavaScript')) : undefined;
+  const javaScriptNameTree = lookedUpObject(document, javaScriptEntry);
+  if (
+    javaScriptEntry !== undefined &&
+    !(javaScriptNameTree instanceof PDFDict)
+  ) {
+    malformedActionGraphCount += 1;
+  }
   const seenNameTrees = new Set<PDFDict>();
-  const pendingNameTrees =
-    javaScriptNameTree instanceof PDFDict ? [javaScriptNameTree] : [];
+  const queuedNameTrees = new Set<PDFDict>();
+  const pendingNameTrees: Array<{
+    readonly depth: number;
+    readonly tree: PDFDict;
+  }> = [];
+  if (javaScriptNameTree instanceof PDFDict) {
+    queuedNameTrees.add(javaScriptNameTree);
+    pendingNameTrees.push({ depth: 0, tree: javaScriptNameTree });
+  }
   while (pendingNameTrees.length > 0) {
-    const tree = pendingNameTrees.pop();
-    if (tree === undefined || seenNameTrees.has(tree)) continue;
+    const current = pendingNameTrees.pop();
+    if (current === undefined) continue;
+    const { depth, tree } = current;
+    if (
+      seenNameTrees.has(tree) ||
+      depth > MAX_ACTION_GRAPH_DEPTH ||
+      traversedNodeCount >= MAX_ACTION_GRAPH_NODES
+    ) {
+      malformedActionGraphCount += 1;
+      continue;
+    }
+    traversedNodeCount += 1;
     seenNameTrees.add(tree);
 
-    const entries = document.context.lookup(tree.get(PDFName.of('Names')));
+    const rawEntries = tree.get(PDFName.of('Names'));
+    const entries = lookedUpObject(document, rawEntries);
     if (entries instanceof PDFArray) {
+      if (entries.size() % 2 !== 0) malformedActionGraphCount += 1;
       for (let index = 1; index < entries.size(); index += 2) {
-        addAction(entries.get(index));
+        addAction(entries.get(index), false);
       }
+    } else if (rawEntries !== undefined) {
+      malformedActionGraphCount += 1;
     }
-    const kids = document.context.lookup(tree.get(PDFName.of('Kids')));
+    const rawKids = tree.get(PDFName.of('Kids'));
+    const kids = lookedUpObject(document, rawKids);
     if (kids instanceof PDFArray) {
-      for (let index = 0; index < kids.size(); index += 1) {
-        const child = document.context.lookup(kids.get(index));
-        if (child instanceof PDFDict) pendingNameTrees.push(child);
+      if (!reserveEdges(kids.size())) {
+        malformedActionGraphCount += 1;
+      } else {
+        for (let index = 0; index < kids.size(); index += 1) {
+          const child = lookedUpObject(document, kids.get(index));
+          if (!(child instanceof PDFDict)) {
+            malformedActionGraphCount += 1;
+          } else if (queuedNameTrees.has(child)) {
+            malformedActionGraphCount += 1;
+          } else {
+            queuedNameTrees.add(child);
+            pendingNameTrees.push({ depth: depth + 1, tree: child });
+          }
+        }
       }
+    } else if (rawKids !== undefined) {
+      malformedActionGraphCount += 1;
     }
   }
 
-  while (pending.length > 0) {
-    addAction(pending.pop()?.get(PDFName.of('Next')));
-  }
-  return actions;
+  return { actions, malformedActionGraphCount };
 }
 
 function resolvedObject(
@@ -860,6 +3155,7 @@ function analyzeProtection(
   form: PDFForm,
   sourceByteLength: number,
   unreachableSignatureDictionaries: readonly PDFDict[],
+  revisionHistory: PdfRevisionHistorySummary,
 ): PdfProtectionAnalysis {
   const catalogPermsPresent = document.catalog.has(PDFName.of('Perms'));
   const rawPerms = document.catalog.get(PDFName.of('Perms'));
@@ -1091,6 +3387,15 @@ function analyzeProtection(
         : byteRanges.every((range) =>
             byteRangeCoversWholeFile(range, sourceByteLength),
           );
+  if (revisionHistory.historicalByteRangeNameCount > 0) {
+    unknownStructures.add('historical_byte_range_changed_or_missing');
+  }
+  if (revisionHistory.historicalSignatureStructureCount > 0) {
+    unknownStructures.add('historical_signature_structure_changed_or_missing');
+  }
+  if (!revisionHistory.complete) {
+    unknownStructures.add('historical_scan_inconclusive');
+  }
 
   const acroForm = document.catalog.AcroForm();
   const xfaPresent = acroForm?.has(PDFName.of('XFA')) ?? false;
@@ -1142,7 +3447,10 @@ function analyzeProtection(
   } else if (usageRightsSignatures.size > 0) protectionType = 'usage_rights';
   else protectionType = 'none';
 
-  const hasCmsCandidate = signatureCandidates.size > 0;
+  const hasCmsCandidate =
+    signatureCandidates.size > 0 ||
+    revisionHistory.historicalByteRangeNameCount > 0 ||
+    revisionHistory.historicalSignatureStructureCount > 0;
   return {
     protectionType,
     evidence: {
@@ -1150,6 +3458,12 @@ function analyzeProtection(
       permsKeys,
       usageRightsKeys,
       byteRangeEntryCount: byteRangeEntries.length,
+      rawByteRangeNameCount: revisionHistory.byteRangeNameCount,
+      historicalByteRangeNameCount:
+        revisionHistory.historicalByteRangeNameCount,
+      revisionMarkerCount: revisionHistory.revisionMarkerCount,
+      historyScanComplete: revisionHistory.complete,
+      historyScanIssues: revisionHistory.issues,
       malformedByteRangeCount,
       byteRanges,
       byteRangesCoverWholeFile,
@@ -1185,12 +3499,18 @@ function analyzeProtection(
 function summarizeActiveContent(
   document: PDFDocument,
   dictionaries: readonly PDFDict[],
+  fieldAndWidgetDictionaries: ReadonlySet<PDFDict>,
 ): PdfActiveContentSummary {
-  const referencedActions = explicitlyReferencedActions(document, dictionaries);
+  const referencedActionSummary = explicitlyReferencedActions(
+    document,
+    dictionaries,
+    fieldAndWidgetDictionaries,
+  );
+  const referencedActions = referencedActionSummary.actions;
   const additionalActions = new Set<PDFDict>();
   let javascriptActionCount = 0;
   let externalActionCount = 0;
-  let highRiskActionCount = 0;
+  let highRiskActionCount = referencedActionSummary.malformedActionGraphCount;
   let otherActionCount = 0;
 
   for (const dictionary of dictionaries) {
@@ -1353,20 +3673,51 @@ async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
     );
   }
 
-  const dictionaries = collectPdfDictionaries(document);
-  const unreachableSignatureDictionaries =
-    collectUnreachableSignatureDictionaries(document, dictionaries);
-  const activeContent = summarizeActiveContent(document, dictionaries);
-  const form = inspectionForm(document);
-  const protectionAnalysis = analyzeProtection(
-    document,
-    [...dictionaries, ...unreachableSignatureDictionaries],
-    form,
-    bytes.byteLength,
-    unreachableSignatureDictionaries,
-  );
+  try {
+    if (
+      !(document.catalog instanceof PDFDict) ||
+      dictionaryName(document.catalog, 'Type') !== 'Catalog'
+    ) {
+      malformedPdfObjectGraph('catalog_invalid');
+    }
 
-  return { document, form, activeContent, protectionAnalysis };
+    validatePageTree(document);
+    const fieldAndWidgetDictionaries = validateAcroFormFieldGraph(document);
+    const dictionaries = collectPdfDictionaries(document);
+    const unreachableSignatureDictionaries =
+      collectUnreachableSignatureDictionaries(document, dictionaries);
+    const activeContent = summarizeActiveContent(
+      document,
+      dictionaries,
+      fieldAndWidgetDictionaries,
+    );
+    const xfaSemantics = extractXfaSemantics(document);
+    const form = inspectionForm(document);
+    const revisionHistory = await inspectPdfRevisionHistory(bytes, document);
+    const protectionAnalysis = analyzeProtection(
+      document,
+      [...dictionaries, ...unreachableSignatureDictionaries],
+      form,
+      bytes.byteLength,
+      unreachableSignatureDictionaries,
+      revisionHistory,
+    );
+
+    return {
+      document,
+      form,
+      activeContent,
+      protectionAnalysis,
+      xfaSemantics,
+    };
+  } catch (cause) {
+    if (cause instanceof PdfEngineError) throw cause;
+    throw new PdfEngineError(
+      'PDF_LOAD_FAILED',
+      'The PDF structure could not be inspected safely.',
+      { cause },
+    );
+  }
 }
 
 function recoveredCheckBoxRadioOptions(field: PDFField): string[] | null {
@@ -1416,12 +3767,51 @@ function fieldTooltip(field: PDFField): string | null {
   );
 }
 
+function normalizedSemanticFieldLabel(
+  value: string | null | undefined,
+): string | null {
+  const normalized = value
+    ?.replace(HUMAN_ONLY_MARKER_GLOBAL, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  if (
+    normalized === undefined ||
+    normalized.length === 0 ||
+    normalized.toLowerCase() === 'undefined' ||
+    normalized.toLowerCase() === 'null'
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function conciseXfaSecurityLabel(
+  value: string | null | undefined,
+): string | null {
+  const normalized = normalizedSemanticFieldLabel(value);
+  return normalized !== null &&
+    normalized.length <= MAX_SEMANTIC_FIELD_LABEL_LENGTH &&
+    /[\p{L}\p{N}]/u.test(normalized)
+    ? normalized
+    : null;
+}
+
+function effectiveXfaSecurityLabel(
+  tooltip: string | null,
+  speak: string | null | undefined,
+  caption: string | null | undefined,
+): string | null {
+  if (normalizedSemanticFieldLabel(tooltip) !== null) return null;
+  return conciseXfaSecurityLabel(speak) ?? conciseXfaSecurityLabel(caption);
+}
+
 function isSignatureSemanticTextField(
   field: PDFField,
   tooltip: string | null,
+  xfaLabel: string | null = null,
 ): boolean {
   if (!(field instanceof PDFTextField)) return false;
-  return hasExplicitSignatureSemantics(field.getName(), tooltip);
+  return hasExplicitSignatureFieldSemantics(field.getName(), tooltip, xfaLabel);
 }
 
 function hasExplicitSignatureSemantics(
@@ -1435,14 +3825,26 @@ function hasExplicitSignatureSemantics(
   return tooltip !== null && EXPLICIT_SIGNATURE_FIELD.test(tooltip);
 }
 
+function hasExplicitSignatureFieldSemantics(
+  fieldName: string,
+  tooltip: string | null,
+  xfaLabel: string | null = null,
+): boolean {
+  return (
+    hasExplicitSignatureSemantics(fieldName, tooltip) ||
+    (xfaLabel !== null && hasExplicitSignatureSemantics(fieldName, xfaLabel))
+  );
+}
+
 function isHumanOnly(
   field: PDFField,
   type: PdfFieldType,
   tooltip: string | null,
+  xfaLabel: string | null = null,
 ): boolean {
   return (
     type === 'signature' ||
-    isSignatureSemanticTextField(field, tooltip) ||
+    isSignatureSemanticTextField(field, tooltip, xfaLabel) ||
     HUMAN_ONLY_MARKER.test(field.getName()) ||
     (tooltip !== null && HUMAN_ONLY_MARKER.test(tooltip))
   );
@@ -1576,11 +3978,30 @@ function describeWidgets(
 function describeField(
   document: PDFDocument,
   field: PDFField,
+  xfaSemantics?: XfaSemanticsResult,
 ): PdfFieldDescriptor {
   const type = fieldType(field);
   const tooltip = fieldTooltip(field);
   const widgets = describeWidgets(document, field);
   const choices = fieldChoices(field);
+  const xfa =
+    xfaSemantics?.status === 'available'
+      ? xfaSemantics.byExactSomName.get(field.getName())
+      : undefined;
+  const xfaSignatureWidget =
+    xfaSemantics?.status === 'available' &&
+    xfaSemantics.humanOnlyExactSomNames.has(field.getName());
+  const xfaReadOnly =
+    xfaSemantics?.status === 'available' &&
+    xfaSemantics.readOnlyExactSomNames.has(field.getName());
+  const xfaSemanticsUnavailable =
+    (document.catalog.AcroForm()?.has(PDFName.of('XFA')) ?? false) &&
+    xfaSemantics?.status === 'unavailable';
+  const xfaSecurityLabel = effectiveXfaSecurityLabel(
+    tooltip,
+    xfa?.speak,
+    xfa?.caption,
+  );
 
   return {
     name: field.getName(),
@@ -1590,13 +4011,20 @@ function describeField(
     choices,
     multiSelect: fieldAllowsMultiple(field),
     required: field.isRequired(),
-    readOnly: field.isReadOnly(),
-    humanOnly: isHumanOnly(field, type, tooltip),
+    readOnly: field.isReadOnly() || xfaReadOnly,
+    humanOnly:
+      xfaSemanticsUnavailable ||
+      xfaSignatureWidget ||
+      isHumanOnly(field, type, tooltip, xfaSecurityLabel),
     page: widgets[0]?.page ?? null,
     rect: widgets[0]?.rect ?? null,
     maxLength:
       field instanceof PDFTextField ? (field.getMaxLength() ?? null) : null,
     tooltip,
+    xfaSomNameMatched: xfa !== undefined,
+    ...(xfaSignatureWidget ? { xfaSignatureWidget: true } : {}),
+    xfaSpeak: xfa?.speak ?? null,
+    xfaCaption: xfa?.caption ?? null,
     widgetCount: widgets.length,
     widgets,
   };
@@ -1606,6 +4034,7 @@ function inspectionWarnings(
   fields: PdfFieldDescriptor[],
   activeContent: PdfActiveContentSummary,
   protection: PdfProtectionReport,
+  xfaSemantics: XfaSemanticsResult,
 ): PdfEngineWarning[] {
   const warnings: PdfEngineWarning[] = [];
 
@@ -1655,11 +4084,24 @@ function inspectionWarnings(
     });
   }
   if (protection.evidence.xfaPresent) {
+    const exactMatchCount =
+      xfaSemantics.status === 'available'
+        ? fields.filter((field) => xfaSemantics.byExactSomName.has(field.name))
+            .length
+        : 0;
     warnings.push({
       code: 'XFA_PRESENT_INSPECTION_ONLY',
       message:
-        'The PDF contains XFA. Only its AcroForm fallback fields are inspected; XFA scripts, validation, layout, and semantics are not evaluated, so PDF rewriting is disabled.',
+        xfaSemantics.status === 'available'
+          ? `The PDF contains XFA. Bounded field text was read for ${exactMatchCount} of ${fields.length} AcroForm fallback fields only when full SOM names matched exactly; XFA choices, scripts, calculations, validation, and layout were not evaluated, and PDF rewriting remains disabled.`
+          : 'The PDF contains XFA. Its AcroForm fallback fields remain inspectable, but agent staging is disabled because XFA field restrictions and meanings could not be resolved; PDF rewriting also remains disabled.',
     });
+    if (xfaSemantics.status === 'unavailable') {
+      warnings.push({
+        code: 'XFA_SEMANTICS_UNAVAILABLE',
+        message: `Bounded XFA field semantics were unavailable (${xfaSemantics.reason}); fallback fields are inspect-only and cannot be staged by an agent.`,
+      });
+    }
   }
 
   for (const field of fields) {
@@ -1670,9 +4112,24 @@ function inspectionWarnings(
         message:
           'Signature fields are shown for review but can only be completed by a person.',
       });
+    } else if (field.type === 'text' && field.xfaSignatureWidget === true) {
+      warnings.push({
+        code: 'SIGNATURE_TEXT_FIELD_HUMAN_ONLY',
+        fieldName: field.name,
+        message:
+          'XFA declares this fallback text field as a signature widget, so it is reserved for human completion.',
+      });
     } else if (
       field.type === 'text' &&
-      hasExplicitSignatureSemantics(field.name, field.tooltip)
+      hasExplicitSignatureFieldSemantics(
+        field.name,
+        field.tooltip,
+        effectiveXfaSecurityLabel(
+          field.tooltip,
+          field.xfaSpeak,
+          field.xfaCaption,
+        ),
+      )
     ) {
       warnings.push({
         code: 'SIGNATURE_TEXT_FIELD_HUMAN_ONLY',
@@ -1715,10 +4172,11 @@ function inspectLoadedPdf(
   sourceHash: string,
   activeContent: PdfActiveContentSummary,
   protectionAnalysis: PdfProtectionAnalysis,
+  xfaSemantics: XfaSemanticsResult,
 ): PdfInspection {
   const fields = form
     .getFields()
-    .map((field) => describeField(document, field));
+    .map((field) => describeField(document, field, xfaSemantics));
   const protection = createProtectionReport(
     protectionAnalysis,
     fields,
@@ -1732,13 +4190,18 @@ function inspectLoadedPdf(
     activeContent,
     protection,
     fields,
-    warnings: inspectionWarnings(fields, activeContent, protection),
+    warnings: inspectionWarnings(
+      fields,
+      activeContent,
+      protection,
+      xfaSemantics,
+    ),
   };
 }
 
 export async function inspectPdf(source: Uint8Array): Promise<PdfInspection> {
   const sourceHash = await sha256Hex(source);
-  const { document, form, activeContent, protectionAnalysis } =
+  const { document, form, activeContent, protectionAnalysis, xfaSemantics } =
     await loadPdf(source);
   return inspectLoadedPdf(
     document,
@@ -1746,6 +4209,7 @@ export async function inspectPdf(source: Uint8Array): Promise<PdfInspection> {
     sourceHash,
     activeContent,
     protectionAnalysis,
+    xfaSemantics,
   );
 }
 
@@ -2199,10 +4663,11 @@ async function applyValues(
 ): Promise<ApplyResult> {
   const sourceHash = await sha256Hex(source);
   const loaded = await loadPdf(source);
-  const { document, form, activeContent, protectionAnalysis } = loaded;
+  const { document, form, activeContent, protectionAnalysis, xfaSemantics } =
+    loaded;
   const descriptors = form
     .getFields()
-    .map((field) => describeField(document, field));
+    .map((field) => describeField(document, field, xfaSemantics));
   const sourceProtection = createProtectionReport(
     protectionAnalysis,
     descriptors,
@@ -2246,6 +4711,7 @@ async function applyValues(
       sourceHash,
       activeContent,
       protectionAnalysis,
+      xfaSemantics,
     );
     return {
       bytes: unchanged,
@@ -2442,6 +4908,7 @@ async function applyValues(
     outputHash,
     reopened.activeContent,
     reopened.protectionAnalysis,
+    reopened.xfaSemantics,
   );
   if (
     inspection.protection.protectionType !== 'none' ||

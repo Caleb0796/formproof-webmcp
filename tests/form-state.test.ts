@@ -1317,11 +1317,15 @@ void test('exports a deterministic source-bound fill package for protected hybri
   assert.deepEqual(manifest.protection.evidence.usageRightsKeys, ['UR3']);
   assert.equal(manifest.protection.evidence.xfaPresent, true);
   assert.equal(
-    manifest.limitations.some((item) => item.includes('no semantic tooltip')),
+    manifest.limitations.some((item) =>
+      item.includes('no bounded semantic label'),
+    ),
     true,
   );
   assert.equal(
-    manifest.limitations.some((item) => item.includes('XFA captions')),
+    manifest.limitations.some((item) =>
+      item.includes('Bounded XFA field text'),
+    ),
     true,
   );
 

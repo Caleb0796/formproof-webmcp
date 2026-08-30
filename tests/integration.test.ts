@@ -253,6 +253,40 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.doesNotMatch(workbench, /appearances (?:are )?verified/iu);
   assert.match(workbench, /normal appearance streams are present/iu);
   assert.match(workbench, /visual rendering is not independently checked/iu);
+  assert.match(layout, /Evidence-graded PDF filling/u);
+  assert.doesNotMatch(publicCopy, /Agent-safe PDF filling|failed safely/u);
+  for (const outcome of [
+    'Filled PDF available',
+    'Plain derivative available after confirmation',
+    'Original-untouched fill package',
+  ]) {
+    assert.equal(
+      workbench.includes(outcome),
+      true,
+      `missing UI outcome: ${outcome}`,
+    );
+  }
+  for (const protectionLabel of [
+    'Protection type:',
+    'Allowed mutations:',
+    'Export strategies:',
+    'Signature impact:',
+    'Human confirmation:',
+  ]) {
+    assert.equal(
+      workbench.includes(protectionLabel),
+      true,
+      `missing UI protection label: ${protectionLabel}`,
+    );
+  }
+  assert.match(
+    workbench,
+    /protection\.evidence\.xfaPresent[\s\S]*?protection\.protectionType === 'none'[\s\S]*?The source contains XFA\.[\s\S]*?The source contains XFA and the protection shown below\./u,
+  );
+  assert.match(
+    workbench,
+    /exportStrategies\.length === 0[\s\S]*?protectionType === 'unknown'[\s\S]*?Unknown protection remains inspection-only[\s\S]*?no agent-writable addressable fields/u,
+  );
 });
 
 void test('gives the UI reviewer a way to reject staged proposals', async () => {
@@ -577,7 +611,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
       name: string;
       rect: unknown;
       constraints: {
-        choices: Array<{ value: string; label: string }>;
+        choices: Array<{ value: string; label?: string }>;
       };
     }>;
   };
@@ -600,14 +634,14 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
   const housingField = (
     housingResponse.data as {
       fields: Array<{
-        constraints: { choices: Array<{ value: string; label: string }> };
+        constraints: { choices: Array<{ value: string; label?: string }> };
       }>;
     }
   ).fields[0];
   assert.deepEqual(housingField.constraints.choices, [
-    { value: 'rent', label: 'rent' },
-    { value: 'own', label: 'own' },
-    { value: 'other', label: 'other' },
+    { value: 'rent' },
+    { value: 'own' },
+    { value: 'other' },
   ]);
 
   for (const fieldNames of fieldCombinations(discoveredNames, 3)) {

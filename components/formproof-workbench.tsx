@@ -224,7 +224,9 @@ function protectionOutcome(inspection: PdfInspection): {
     return {
       title: 'Original-untouched fill package',
       detail: protection.evidence.xfaPresent
-        ? 'The source combines protection with XFA. FormProof will not rewrite it; the UI can export reviewed field data, coordinates, provenance, and limitations as JSON.'
+        ? protection.protectionType === 'none'
+          ? 'The source contains XFA. FormProof will not rewrite it; the UI can export reviewed field data, coordinates, provenance, and limitations as JSON.'
+          : 'The source contains XFA and the protection shown below. FormProof will not rewrite it; the UI can export reviewed field data, coordinates, provenance, and limitations as JSON.'
         : 'The source PDF will not be rewritten. The UI can export reviewed field data, coordinates, provenance, and limitations as JSON.',
     };
   }
@@ -908,7 +910,7 @@ export function FormProofWorkbench() {
           setToolState({
             status: 'error',
             count: 0,
-            message: 'WebMCP registration failed safely',
+            message: 'WebMCP registration failed; agent tools are unavailable',
           });
         }
       },
@@ -1912,7 +1914,9 @@ export function FormProofWorkbench() {
           <p className="button-note">
             {documentState &&
             documentState.inspection.protection.exportStrategies.length === 0
-              ? 'Unknown protection remains inspection-only; no artifact export is offered.'
+              ? documentState.inspection.protection.protectionType === 'unknown'
+                ? 'Unknown protection remains inspection-only; no artifact export is offered.'
+                : 'No artifact export is available because this PDF has no agent-writable addressable fields.'
               : hasBlockedHighRiskActions
                 ? 'PDF rewriting is not offered because of high-risk native actions; an original-untouched fill package remains available.'
                 : validation && validation.blockerCount > 0

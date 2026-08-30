@@ -1158,6 +1158,7 @@ function assertEvidenceFieldShape(value: unknown, path: string): void {
     [
       'name',
       'label',
+      'labelSource',
       'labelTruncated',
       'sourceValue',
       'sourceValueAvailable',
@@ -1175,6 +1176,12 @@ function assertEvidenceFieldShape(value: unknown, path: string): void {
   );
   assert.equal(typeof field.name, 'string', `${path}.name must be text`);
   assert.equal(typeof field.label, 'string', `${path}.label must be text`);
+  assert.ok(
+    ['acroform_tooltip', 'xfa_speak', 'xfa_caption', 'field_name'].includes(
+      field.labelSource as string,
+    ),
+    `${path}.labelSource must identify the bounded label source`,
+  );
   assert.ok(
     Number.isInteger(field.page) && (field.page as number) > 0,
     `${path}.page must be a positive integer`,
@@ -1243,7 +1250,9 @@ function assertEvidenceFieldShape(value: unknown, path: string): void {
       `${path}.constraints.choices[${index}]`,
     );
     assert.equal(typeof choice.value, 'string');
-    assert.equal(typeof choice.label, 'string');
+    if (hasOwn(choice, 'label')) {
+      assert.equal(typeof choice.label, 'string');
+    }
   }
   if (hasOwn(constraints, 'choicePage')) {
     const page = requireRecord(
@@ -1299,6 +1308,11 @@ function assertOptionalMockDataTypes(
         'permsKeys',
         'usageRightsKeys',
         'byteRangeEntryCount',
+        'rawByteRangeNameCount',
+        'historicalByteRangeNameCount',
+        'revisionMarkerCount',
+        'historyScanComplete',
+        'historyScanIssues',
         'malformedByteRangeCount',
         'byteRanges',
         'byteRangesCoverWholeFile',
@@ -1333,6 +1347,9 @@ function assertOptionalMockDataTypes(
     assert.ok(Array.isArray(evidence.byteRanges));
     for (const key of [
       'byteRangeEntryCount',
+      'rawByteRangeNameCount',
+      'historicalByteRangeNameCount',
+      'revisionMarkerCount',
       'malformedByteRangeCount',
       'signatureDictionaryCount',
       'usageRightsSignatureCount',
@@ -1348,6 +1365,11 @@ function assertOptionalMockDataTypes(
         `${path}.protectionEvidence.${key}`,
       );
     }
+    assert.equal(typeof evidence.historyScanComplete, 'boolean');
+    assertStringArray(
+      evidence.historyScanIssues,
+      `${path}.protectionEvidence.historyScanIssues`,
+    );
     assert.equal(typeof evidence.docMdpPresent, 'boolean');
     assertStringArray(
       evidence.unknownStructures,
@@ -2556,6 +2578,200 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
     assert.deepEqual(protection.exportStrategies, ['fill_package']);
   }
 
+  const expectedCompatibility = new Map([
+    [
+      'irs-1040-2025',
+      {
+        filledPdfAvailable: false,
+        originalUntouchedFillPackageAvailable: true,
+      },
+    ],
+    [
+      'irs-w4-2026',
+      {
+        filledPdfAvailable: false,
+        originalUntouchedFillPackageAvailable: true,
+      },
+    ],
+    [
+      'uscis-i9-2025',
+      {
+        filledPdfAvailable: true,
+        originalUntouchedFillPackageAvailable: true,
+      },
+    ],
+    [
+      'state-ds11-2025',
+      {
+        filledPdfAvailable: true,
+        originalUntouchedFillPackageAvailable: true,
+      },
+    ],
+    [
+      'va-10-10ez-2025',
+      {
+        filledPdfAvailable: false,
+        originalUntouchedFillPackageAvailable: true,
+      },
+    ],
+  ]);
+  for (const [index, document] of documents.entries()) {
+    const outcome = requireRecord(
+      document.expectedEngineOutcome,
+      `corpus.documents[${index}].expectedEngineOutcome`,
+    );
+    const protection = requireRecord(
+      outcome.protection,
+      `corpus.documents[${index}].expectedEngineOutcome.protection`,
+    );
+    const exportStrategies = assertStringArray(
+      protection.exportStrategies,
+      `corpus.documents[${index}].expectedEngineOutcome.protection.exportStrategies`,
+    );
+    assert.deepEqual(
+      {
+        filledPdfAvailable: exportStrategies.includes('filled_pdf'),
+        originalUntouchedFillPackageAvailable:
+          exportStrategies.includes('fill_package'),
+      },
+      expectedCompatibility.get(document.id as string),
+      `${document.id as string} compatibility must describe available capabilities, not only the exercised artifact`,
+    );
+  }
+
+  const expectedXfaCounts = new Map([
+    [
+      'irs-1040-2025',
+      { exactSomMatchCount: 199, speakFieldCount: 0, captionFieldCount: 68 },
+    ],
+    [
+      'irs-w4-2026',
+      { exactSomMatchCount: 48, speakFieldCount: 0, captionFieldCount: 38 },
+    ],
+    [
+      'va-10-10ez-2025',
+      { exactSomMatchCount: 122, speakFieldCount: 100, captionFieldCount: 36 },
+    ],
+  ]);
+  for (const document of documents) {
+    const documentId = document.id as string;
+    const expectedCounts = expectedXfaCounts.get(documentId);
+    if (expectedCounts === undefined) {
+      assert.equal(document.xfaExperiment, undefined);
+      continue;
+    }
+    const experiment = requireRecord(
+      document.xfaExperiment,
+      `corpus.${documentId}.xfaExperiment`,
+    );
+    assert.equal(
+      experiment.exactSomMatchCount,
+      expectedCounts.exactSomMatchCount,
+    );
+    assert.equal(experiment.speakFieldCount, expectedCounts.speakFieldCount);
+    assert.equal(
+      experiment.captionFieldCount,
+      expectedCounts.captionFieldCount,
+    );
+  }
+
+  const expectedSemanticLabelGoldens = new Map([
+    [
+      'irs-1040-2025',
+      {
+        fieldName: 'topmostSubform[0].Page1[0].f1_14[0]',
+        finalLabel: 'Your first name and middle initial',
+        labelSource: 'xfa_caption',
+        query: 'your first name middle initial',
+        expectedMatchCount: 1,
+      },
+    ],
+    [
+      'irs-w4-2026',
+      {
+        fieldName: 'topmostSubform[0].Page1[0].f1_05[0]',
+        finalLabel: '(b) Social security number',
+        labelSource: 'xfa_caption',
+        query: 'social security number',
+        expectedMatchCount: 1,
+      },
+    ],
+    [
+      'va-10-10ez-2025',
+      {
+        fieldName: 'F[0].P4[0].SSN[0]',
+        finalLabel:
+          '5. SOCIAL SECURITY NUMBER. Enter 9 digit social security number.',
+        labelSource: 'acroform_tooltip',
+        query: '5 social security number',
+        expectedMatchCount: 1,
+      },
+    ],
+  ]);
+  for (const document of documents) {
+    const documentId = document.id as string;
+    const golden = expectedSemanticLabelGoldens.get(documentId);
+    assert.deepEqual(
+      document.semanticLabelGoldens,
+      golden === undefined ? undefined : [golden],
+      `${documentId} semantic-label golden changed`,
+    );
+  }
+
+  const w4 = documents.find(({ id }) => id === 'irs-w4-2026');
+  assert.ok(w4);
+  const w4Query = requireRecord(
+    w4.queryExperiment,
+    'corpus.w4.queryExperiment',
+  );
+  assert.deepEqual(w4Query.queries, ['f1_01']);
+  assert.deepEqual(w4Query.expectedFirstPageFieldNames, [
+    'topmostSubform[0].Page1[0].Step1a[0].f1_01[0]',
+  ]);
+  assert.deepEqual(w4Query.expectedMatchCounts, [1]);
+  assert.equal(w4Query.expectedTotalMatchedFields, 1);
+  assert.deepEqual(w4Query.naturalLanguageCoverageLoss, {
+    queries: ['first name and middle initial'],
+    expectedFirstPageFieldNames: [],
+    expectedMatchCounts: [0],
+    expectedTotalMatchedFields: 0,
+    reason:
+      'All 48 W-4 XFA speak entries are disabled (disable=1), and f1_01 has no usable XFA caption. Disabled assist text is not trusted as field evidence.',
+  });
+
+  const ds11 = documents.find(({ id }) => id === 'state-ds11-2025');
+  assert.ok(ds11);
+  const ds11Query = requireRecord(
+    ds11.queryExperiment,
+    'corpus.ds11.queryExperiment',
+  );
+  assert.deepEqual(ds11Query.naturalLanguageCoverageLoss, {
+    queries: ['social security'],
+    expectedFirstPageFieldNames: [],
+    expectedMatchCounts: [0],
+    expectedTotalMatchedFields: 0,
+    reason:
+      'The visible page says Social Security Number, but page text is not indexed and the AcroForm exposes only SSN-named fields with no tooltip. Lexical WebMCP search does not infer that synonym.',
+  });
+
+  const va = documents.find(({ id }) => id === 'va-10-10ez-2025');
+  assert.ok(va);
+  const vaXfa = requireRecord(va.xfaExperiment, 'corpus.va.xfaExperiment');
+  assert.equal(
+    hasOwn(vaXfa, 'semanticLabelGoldens'),
+    false,
+    'VA semantic-label evidence must not be attributed to XFA',
+  );
+  assert.deepEqual(vaXfa.acroFormChoiceLabelGoldens, [
+    {
+      fieldName: 'F[0].P4[0].CurrentMaritalStatus[0]',
+      choices: ['1', '2', '3', '4', '5'].map((value) => ({
+        value,
+        label: value,
+      })),
+    },
+  ]);
+
   const benchmarkSource = await readFile(
     new URL('../scripts/benchmark-real-pdfs.ts', import.meta.url),
     'utf8',
@@ -2564,6 +2780,19 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
   assert.match(benchmarkSource, /TextEncoder\(\)/u);
   assert.match(benchmarkSource, /tokenProxyIsTokenizer: false/u);
   assert.match(benchmarkSource, /parseFormContextCursor/u);
+  assert.match(benchmarkSource, /measureSemanticLabelGoldens/u);
+  assert.match(
+    benchmarkSource,
+    /filledPdfAvailable:\s*inspection\.protection\.exportStrategies\.includes\('filled_pdf'\)/u,
+  );
+  assert.match(
+    benchmarkSource,
+    /originalUntouchedFillPackageAvailable:\s*inspection\.protection\.exportStrategies\.includes\('fill_package'\)/u,
+  );
+  assert.doesNotMatch(
+    benchmarkSource,
+    /filledPdf:\s*expected\.artifactType|originalUntouchedFillPackage:\s*expected\.artifactType/u,
+  );
 });
 
 void test('isolated eval arguments pass the real runtime parser', async () => {

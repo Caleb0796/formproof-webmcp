@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 import { PDFDocument } from 'pdf-lib';
 
-import type { FormState } from '../lib/form-state';
+import type { FormState, PdfFieldLabelSource } from '../lib/form-state';
 import type {
   PdfActiveContentSummary,
   PdfFieldValue,
@@ -23,6 +23,7 @@ const {
   createFormState,
   exportFillPackageFromUi,
   getArtifactReviewFieldNames,
+  resolvePdfFieldLabel,
   stageFieldUpdates,
 } = (await import(
   new URL('../lib/form-state.ts', import.meta.url).href
@@ -48,6 +49,11 @@ interface ExpectedProtectionFacts {
   permsKeys: PdfInspection['protection']['evidence']['permsKeys'];
   usageRightsKeys: PdfInspection['protection']['evidence']['usageRightsKeys'];
   byteRangeEntryCount: number;
+  rawByteRangeNameCount: number;
+  historicalByteRangeNameCount: number;
+  revisionMarkerCount: number;
+  historyScanComplete: boolean;
+  historyScanIssues: readonly string[];
   malformedByteRangeCount: number;
   byteRangeCount: number;
   byteRangesCoverWholeFile: boolean | null;
@@ -87,6 +93,13 @@ interface QueryExperiment {
   expectedFirstPageFieldNames: string[];
   expectedMatchCounts: number[];
   expectedTotalMatchedFields: number;
+  naturalLanguageCoverageLoss?: {
+    queries: string[];
+    expectedFirstPageFieldNames: string[];
+    expectedMatchCounts: number[];
+    expectedTotalMatchedFields: number;
+    reason: string;
+  };
 }
 
 interface WriteExperiment {
@@ -95,6 +108,24 @@ interface WriteExperiment {
 
 interface FillPackageExperiment extends WriteExperiment {
   createdAt: string;
+}
+
+interface XfaExperiment {
+  exactSomMatchCount: number;
+  speakFieldCount: number;
+  captionFieldCount: number;
+  acroFormChoiceLabelGoldens?: {
+    fieldName: string;
+    choices: { value: string; label: string }[];
+  }[];
+}
+
+interface SemanticLabelGolden {
+  fieldName: string;
+  finalLabel: string;
+  labelSource: PdfFieldLabelSource;
+  query: string;
+  expectedMatchCount: 1;
 }
 
 interface CorpusDocument {
@@ -107,6 +138,8 @@ interface CorpusDocument {
   byteLength: number;
   pageCount: number;
   expectedEngineOutcome: HonestUsefulResult;
+  xfaExperiment?: XfaExperiment;
+  semanticLabelGoldens?: SemanticLabelGolden[];
   queryExperiment: QueryExperiment;
   writeExperiment?: WriteExperiment;
   fillPackageExperiment?: FillPackageExperiment;
@@ -364,6 +397,12 @@ function protectionFacts(inspection: PdfInspection): ExpectedProtectionFacts {
     permsKeys: protection.evidence.permsKeys,
     usageRightsKeys: protection.evidence.usageRightsKeys,
     byteRangeEntryCount: protection.evidence.byteRangeEntryCount,
+    rawByteRangeNameCount: protection.evidence.rawByteRangeNameCount ?? 0,
+    historicalByteRangeNameCount:
+      protection.evidence.historicalByteRangeNameCount ?? 0,
+    revisionMarkerCount: protection.evidence.revisionMarkerCount ?? 0,
+    historyScanComplete: protection.evidence.historyScanComplete ?? false,
+    historyScanIssues: protection.evidence.historyScanIssues ?? [],
     malformedByteRangeCount: protection.evidence.malformedByteRangeCount,
     byteRangeCount: protection.evidence.byteRanges.length,
     byteRangesCoverWholeFile: protection.evidence.byteRangesCoverWholeFile,
@@ -417,9 +456,33 @@ function semanticCoverage(state: FormState, inspection: PdfInspection) {
       normalized !== 'null'
     );
   }).length;
-  const semanticLabelAvailableCount = Object.values(state.fields).filter(
-    ({ name, label }) => label !== name,
-  ).length;
+  const semanticLabelSources = {
+    acroformTooltip: 0,
+    xfaSpeak: 0,
+    xfaCaption: 0,
+    fieldNameOnly: 0,
+  };
+  for (const field of inspection.fields) {
+    const resolved = resolvePdfFieldLabel(field);
+    assertEqual(
+      state.fields[field.name]?.label,
+      resolved.label,
+      `UI label resolution changed: ${field.name}`,
+    );
+    if (resolved.source === 'acroform_tooltip') {
+      semanticLabelSources.acroformTooltip += 1;
+    } else if (resolved.source === 'xfa_speak') {
+      semanticLabelSources.xfaSpeak += 1;
+    } else if (resolved.source === 'xfa_caption') {
+      semanticLabelSources.xfaCaption += 1;
+    } else {
+      semanticLabelSources.fieldNameOnly += 1;
+    }
+  }
+  const semanticLabelAvailableCount =
+    semanticLabelSources.acroformTooltip +
+    semanticLabelSources.xfaSpeak +
+    semanticLabelSources.xfaCaption;
   return {
     meaningfulTooltipCount,
     semanticLabelAvailableCount,
@@ -428,11 +491,105 @@ function semanticCoverage(state: FormState, inspection: PdfInspection) {
     semanticLabelCoveragePercent: Number(
       ((semanticLabelAvailableCount / inspection.fieldCount) * 100).toFixed(2),
     ),
+    semanticLabelSources,
+    xfaExactSomMatchCount: inspection.fields.filter(
+      ({ xfaSomNameMatched }) => xfaSomNameMatched === true,
+    ).length,
+    xfaSpeakFieldCount: inspection.fields.filter(
+      ({ xfaSpeak }) => xfaSpeak !== null && xfaSpeak !== undefined,
+    ).length,
+    xfaCaptionFieldCount: inspection.fields.filter(
+      ({ xfaCaption }) => xfaCaption !== null && xfaCaption !== undefined,
+    ).length,
     xfaFallbackOnly: inspection.protection.evidence.xfaPresent,
     xfaSemanticLimitation: inspection.protection.evidence.xfaPresent
-      ? 'Only AcroForm fallback names/tooltips were measured; XFA captions, scripts, calculations, validation, and layout were not evaluated.'
+      ? 'AcroForm /TU remains authoritative. Bounded XFA speak/caption text is used only after an exact full-SOM-name match; XFA choices, scripts, calculations, validation, and layout were not evaluated, and PDF rewriting remains disabled.'
       : null,
   };
+}
+
+async function measureSemanticLabelGoldens(
+  documentId: string,
+  state: FormState,
+  inspection: PdfInspection,
+  contextTool: WebMcpToolDefinition,
+  goldens: readonly SemanticLabelGolden[],
+) {
+  const measurements: Array<
+    Omit<SemanticLabelGolden, 'expectedMatchCount'> & {
+      queryMatchCount: 1;
+      exactFieldMatch: true;
+      verified: true;
+    }
+  > = [];
+
+  for (const golden of goldens) {
+    assertEqual(
+      golden.expectedMatchCount,
+      1,
+      `${documentId} semantic-label golden must require exactly one query match: ${golden.fieldName}`,
+    );
+    const field = inspection.fields.find(
+      ({ name }) => name === golden.fieldName,
+    );
+    if (field === undefined) {
+      throw new TypeError(
+        `${documentId} semantic-label golden field disappeared: ${golden.fieldName}`,
+      );
+    }
+    const resolved = resolvePdfFieldLabel(field);
+    assertEqual(
+      { finalLabel: resolved.label, labelSource: resolved.source },
+      { finalLabel: golden.finalLabel, labelSource: golden.labelSource },
+      `${documentId} semantic-label golden changed: ${golden.fieldName}`,
+    );
+    assertEqual(
+      state.fields[golden.fieldName]?.label,
+      golden.finalLabel,
+      `${documentId} form-state label diverged from its golden: ${golden.fieldName}`,
+    );
+
+    const queryMeasurement = await measureContext(
+      contextTool,
+      { queries: [golden.query] },
+      false,
+    );
+    assertEqual(
+      queryMeasurement.firstPageMatchMethod,
+      'lexical',
+      `${documentId} semantic-label query method changed: ${golden.query}`,
+    );
+    assertEqual(
+      queryMeasurement.firstPageQueryMatchCounts,
+      [golden.expectedMatchCount],
+      `${documentId} semantic-label query count changed: ${golden.query}`,
+    );
+    assertEqual(
+      queryMeasurement.returnedFields,
+      golden.expectedMatchCount,
+      `${documentId} semantic-label query total changed: ${golden.query}`,
+    );
+    assertEqual(
+      queryMeasurement.uniqueReturnedFields,
+      golden.expectedMatchCount,
+      `${documentId} semantic-label query repeated fields: ${golden.query}`,
+    );
+    assertEqual(
+      queryMeasurement.firstPageFieldNames,
+      [golden.fieldName],
+      `${documentId} semantic-label query resolved the wrong field: ${golden.query}`,
+    );
+
+    const { expectedMatchCount: queryMatchCount, ...evidence } = golden;
+    measurements.push({
+      ...evidence,
+      queryMatchCount,
+      exactFieldMatch: true,
+      verified: true,
+    });
+  }
+
+  return measurements;
 }
 
 async function measureWriteRoundTrip(
@@ -817,6 +974,68 @@ for (const document of manifest.documents) {
     expected.protection,
     `${document.id} protection facts changed`,
   );
+  const xfaMeasurements = {
+    exactSomMatchCount: inspection.fields.filter(
+      ({ xfaSomNameMatched }) => xfaSomNameMatched === true,
+    ).length,
+    speakFieldCount: inspection.fields.filter(
+      ({ xfaSpeak }) => xfaSpeak !== null && xfaSpeak !== undefined,
+    ).length,
+    captionFieldCount: inspection.fields.filter(
+      ({ xfaCaption }) => xfaCaption !== null && xfaCaption !== undefined,
+    ).length,
+  };
+  if (document.xfaExperiment === undefined) {
+    assertEqual(
+      [
+        inspection.protection.evidence.xfaPresent,
+        ...Object.values(xfaMeasurements),
+      ],
+      [false, 0, 0, 0],
+      `${document.id} unexpectedly exposed XFA semantics`,
+    );
+  } else {
+    assertEqual(
+      inspection.protection.evidence.xfaPresent,
+      true,
+      `${document.id} lost its XFA evidence`,
+    );
+    assertEqual(
+      xfaMeasurements,
+      {
+        exactSomMatchCount: document.xfaExperiment.exactSomMatchCount,
+        speakFieldCount: document.xfaExperiment.speakFieldCount,
+        captionFieldCount: document.xfaExperiment.captionFieldCount,
+      },
+      `${document.id} bounded XFA mapping changed`,
+    );
+    assertEqual(
+      [expected.artifactType, expected.expectedPdfRewriteError],
+      ['original_untouched_fill_package', 'PDF_XFA_UNSUPPORTED'],
+      `${document.id} must remain fill-package-only`,
+    );
+    assertEqual(
+      inspection.protection.exportStrategies,
+      ['fill_package'],
+      `${document.id} XFA unexpectedly became PDF-rewriteable`,
+    );
+    for (const golden of document.xfaExperiment.acroFormChoiceLabelGoldens ??
+      []) {
+      const field = inspection.fields.find(
+        ({ name }) => name === golden.fieldName,
+      );
+      if (field === undefined) {
+        throw new TypeError(
+          `${document.id} choice-label golden field disappeared: ${golden.fieldName}`,
+        );
+      }
+      assertEqual(
+        field.choices,
+        golden.choices,
+        `${document.id} AcroForm choice labels changed after XFA enrichment: ${golden.fieldName}`,
+      );
+    }
+  }
   if (expected.humanOnlyFieldCount !== undefined) {
     assertEqual(
       inspection.fields.filter(({ humanOnly }) => humanOnly).length,
@@ -885,6 +1104,13 @@ for (const document of manifest.documents) {
     `${document.id} source bytes changed during the experiment`,
   );
   const contextTool = createContextTool(state, inspection);
+  const semanticLabelGoldens = await measureSemanticLabelGoldens(
+    document.id,
+    state,
+    inspection,
+    contextTool,
+    document.semanticLabelGoldens ?? [],
+  );
   const fullTraversal = await measureContext(contextTool, {}, false);
   assertEqual(
     fullTraversal.returnedFields,
@@ -924,6 +1150,46 @@ for (const document of manifest.documents) {
     document.queryExperiment.expectedTotalMatchedFields,
     `${document.id} query traversal match total changed`,
   );
+  let naturalLanguageCoverageLoss: {
+    confirmed: true;
+    queries: string[];
+    firstPageFieldNames: string[];
+    matchCounts: number[] | null;
+    totalMatchedFields: number;
+    reason: string;
+  } | null = null;
+  const expectedCoverageLoss =
+    document.queryExperiment.naturalLanguageCoverageLoss;
+  if (expectedCoverageLoss !== undefined) {
+    const measuredCoverageLoss = await measureContext(
+      contextTool,
+      { queries: expectedCoverageLoss.queries },
+      false,
+    );
+    assertEqual(
+      measuredCoverageLoss.firstPageFieldNames,
+      expectedCoverageLoss.expectedFirstPageFieldNames,
+      `${document.id} known natural-language coverage-loss representatives changed`,
+    );
+    assertEqual(
+      measuredCoverageLoss.firstPageQueryMatchCounts,
+      expectedCoverageLoss.expectedMatchCounts,
+      `${document.id} known natural-language coverage-loss counts changed`,
+    );
+    assertEqual(
+      measuredCoverageLoss.returnedFields,
+      expectedCoverageLoss.expectedTotalMatchedFields,
+      `${document.id} known natural-language coverage-loss total changed`,
+    );
+    naturalLanguageCoverageLoss = {
+      confirmed: true,
+      queries: expectedCoverageLoss.queries,
+      firstPageFieldNames: measuredCoverageLoss.firstPageFieldNames,
+      matchCounts: measuredCoverageLoss.firstPageQueryMatchCounts,
+      totalMatchedFields: measuredCoverageLoss.returnedFields,
+      reason: expectedCoverageLoss.reason,
+    };
+  }
 
   results.push({
     id: document.id,
@@ -938,9 +1204,10 @@ for (const document of manifest.documents) {
     compatibility: {
       fieldInspection: true,
       fieldValueStaging: true,
-      filledPdf: expected.artifactType === 'filled_pdf',
-      originalUntouchedFillPackage:
-        expected.artifactType === 'original_untouched_fill_package',
+      filledPdfAvailable:
+        inspection.protection.exportStrategies.includes('filled_pdf'),
+      originalUntouchedFillPackageAvailable:
+        inspection.protection.exportStrategies.includes('fill_package'),
       pdfRewriteRejectedCode: expected.expectedPdfRewriteError ?? null,
     },
     safety: {
@@ -963,7 +1230,16 @@ for (const document of manifest.documents) {
       semanticSearchClaimed: false,
       expectedQueryRepresentativesVerified: true,
       expectedQueryMatchCountsVerified: true,
+      naturalLanguageCoverageLoss,
       ...semanticCoverage(state, inspection),
+      semanticLabelGoldenCount: semanticLabelGoldens.length,
+      semanticLabelGoldens,
+      xfaChoiceLabelGoldenCount:
+        document.xfaExperiment?.acroFormChoiceLabelGoldens?.length ?? 0,
+      xfaChoiceLabelsPreserved:
+        (document.xfaExperiment?.acroFormChoiceLabelGoldens?.length ?? 0) > 0
+          ? true
+          : 'not_measured',
     },
     structure: {
       fieldCount: inspection.fieldCount,

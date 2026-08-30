@@ -49,19 +49,80 @@ const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/gi;
 // Long PDF help text is instruction content, not a concise field label.
 const MAX_TOOLTIP_LABEL_LENGTH = 180;
 
+export type PdfFieldLabelSource =
+  | 'acroform_tooltip'
+  | 'xfa_speak'
+  | 'xfa_caption'
+  | 'field_name';
+
+export interface ResolvedPdfFieldLabel {
+  readonly label: string;
+  readonly source: PdfFieldLabelSource;
+  readonly xfaSearchAllowed: boolean;
+}
+
+function normalizedLabelText(value: string | null | undefined): string | null {
+  const normalized = value
+    ?.replace(HUMAN_ONLY_MARKER, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  if (
+    normalized === undefined ||
+    normalized.length === 0 ||
+    normalized.toLowerCase() === 'undefined' ||
+    normalized.toLowerCase() === 'null'
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function conciseXfaLabel(value: string | null | undefined): string | null {
+  const normalized = normalizedLabelText(value);
+  return normalized !== null &&
+    normalized.length <= MAX_TOOLTIP_LABEL_LENGTH &&
+    /[\p{L}\p{N}]/u.test(normalized)
+    ? normalized
+    : null;
+}
+
+export function resolvePdfFieldLabel(
+  field: PdfFieldDescriptor,
+): ResolvedPdfFieldLabel {
+  const tooltip = normalizedLabelText(field.tooltip);
+  if (tooltip !== null && tooltip.length <= MAX_TOOLTIP_LABEL_LENGTH) {
+    const label = tooltip.split(/\s+[–—-]\s+/u)[0]?.trim();
+    if (label) {
+      return {
+        label,
+        source: 'acroform_tooltip',
+        xfaSearchAllowed: false,
+      };
+    }
+  }
+
+  if (tooltip === null) {
+    const speak = conciseXfaLabel(field.xfaSpeak);
+    if (speak !== null) {
+      return { label: speak, source: 'xfa_speak', xfaSearchAllowed: true };
+    }
+    const caption = conciseXfaLabel(field.xfaCaption);
+    if (caption !== null) {
+      return { label: caption, source: 'xfa_caption', xfaSearchAllowed: true };
+    }
+  }
+
+  return {
+    label: field.name,
+    source: 'field_name',
+    xfaSearchAllowed: tooltip === null,
+  };
+}
+
 export function createFormFieldDefinitionFromPdf(
   field: PdfFieldDescriptor,
 ): FormFieldDefinition {
-  const tooltip = field.tooltip?.replace(HUMAN_ONLY_MARKER, '').trim();
-  const normalizedTooltip =
-    tooltip !== undefined &&
-    tooltip.length <= MAX_TOOLTIP_LABEL_LENGTH &&
-    tooltip.toLowerCase() !== 'undefined' &&
-    tooltip.toLowerCase() !== 'null'
-      ? tooltip
-      : undefined;
-  const label =
-    normalizedTooltip?.split(/\s+[–—-]\s+/u)[0]?.trim() || field.name;
+  const { label } = resolvePdfFieldLabel(field);
   const unsupported = field.type === 'unsupported';
   return {
     name: field.name,
@@ -1649,12 +1710,12 @@ export async function exportFillPackageFromUi(
     'Whole-form completeness is not assessed beyond PDF required flags.',
     ...(inspection.protection.evidence.xfaPresent
       ? [
-          'Only AcroForm fallback fields were inspected; XFA captions, scripts, calculations, validation, and layout were not evaluated. Verify every field meaning in the original PDF.',
+          'AcroForm fallback field names and geometry remain authoritative. Bounded XFA field text is used only when its full SOM name matches exactly; XFA choices, scripts, calculations, validation, and layout are not evaluated. Verify every field meaning in the original PDF.',
         ]
       : []),
     ...(stagedFields.some((field) => !field.semanticLabelAvailable)
       ? [
-          'At least one staged field has no semantic tooltip; use its exact name, page, and rectangle to verify it in the original PDF.',
+          'At least one staged field has no bounded semantic label; use its exact name, page, and rectangle to verify it in the original PDF.',
         ]
       : []),
   ];

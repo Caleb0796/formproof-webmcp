@@ -12,6 +12,7 @@ import {
   PDFName,
   PDFNumber,
   PDFOptionList,
+  PDFRef,
   PDFStream,
   PDFString,
   StandardFonts,
@@ -483,6 +484,248 @@ async function actionLikeMetadataBytes(): Promise<Uint8Array> {
   });
 }
 
+type ActionGraphFixture =
+  | 'cyclic_field_aa'
+  | 'cyclic_next'
+  | 'cyclic_open_action'
+  | 'deep_next'
+  | 'invalid_field_a'
+  | 'node_budget'
+  | 'open_destination'
+  | 'shared_next';
+
+async function actionGraphBytes(kind: ActionGraphFixture): Promise<Uint8Array> {
+  const document = await PDFDocument.load(
+    await activeContentBytes({ orphan: true }),
+    { updateMetadata: false },
+  );
+  const field = document.getForm().getTextField('active.name');
+
+  if (kind === 'cyclic_field_aa' || kind === 'cyclic_open_action') {
+    const cycle = document.context.obj([]) as PDFArray;
+    const cycleRef = document.context.register(cycle);
+    cycle.push(cycleRef);
+    if (kind === 'cyclic_open_action') {
+      document.catalog.set(PDFName.of('OpenAction'), cycleRef);
+    } else {
+      field.acroField.dict.set(
+        PDFName.of('AA'),
+        document.context.register(
+          document.context.obj({ K: cycleRef }) as PDFDict,
+        ),
+      );
+    }
+  } else if (kind === 'cyclic_next') {
+    const action = document.context.obj({ S: 'ResetForm' }) as PDFDict;
+    const actionRef = document.context.register(action);
+    action.set(PDFName.of('Next'), actionRef);
+    field.acroField.dict.set(PDFName.of('A'), actionRef);
+  } else if (kind === 'invalid_field_a') {
+    field.acroField.dict.set(
+      PDFName.of('A'),
+      PDFString.of('not an action container'),
+    );
+  } else if (kind === 'deep_next') {
+    let nestedRef = document.context.register(
+      document.context.obj([
+        document.context.register(
+          document.context.obj({ S: 'ResetForm' }) as PDFDict,
+        ),
+      ]) as PDFArray,
+    );
+    for (let depth = 0; depth < 80; depth += 1) {
+      nestedRef = document.context.register(
+        document.context.obj([nestedRef]) as PDFArray,
+      );
+    }
+    const root = document.context.obj({ S: 'ResetForm' }) as PDFDict;
+    root.set(PDFName.of('Next'), nestedRef);
+    field.acroField.dict.set(PDFName.of('A'), document.context.register(root));
+  } else if (kind === 'node_budget') {
+    const actions = Array.from(
+      { length: 4_200 },
+      () => document.context.obj({ S: 'ResetForm' }) as PDFDict,
+    );
+    const root = document.context.obj({ S: 'ResetForm' }) as PDFDict;
+    root.set(PDFName.of('Next'), document.context.obj(actions));
+    field.acroField.dict.set(PDFName.of('A'), document.context.register(root));
+  } else if (kind === 'shared_next') {
+    const sharedRef = document.context.register(
+      document.context.obj({ S: 'ResetForm' }) as PDFDict,
+    );
+    const root = document.context.obj({ S: 'ResetForm' }) as PDFDict;
+    root.set(PDFName.of('Next'), document.context.obj([sharedRef, sharedRef]));
+    field.acroField.dict.set(PDFName.of('A'), document.context.register(root));
+  } else {
+    document.catalog.set(
+      PDFName.of('OpenAction'),
+      document.context.obj([document.getPages()[0].ref, PDFName.of('Fit')]),
+    );
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+type AcroFormGraphFixture =
+  | 'deep_chain'
+  | 'duplicate_kid'
+  | 'self_kid'
+  | 'self_parent'
+  | 'widget_self_kid';
+
+async function acroFormGraphBytes(
+  kind: AcroFormGraphFixture,
+): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await singleTextFieldBytes({}), {
+    updateMetadata: false,
+  });
+  const field = document.getForm().getTextField('only.text');
+
+  if (kind === 'self_parent') {
+    field.acroField.dict.set(PDFName.of('Parent'), field.ref);
+  } else if (kind === 'self_kid') {
+    field.acroField.dict.set(
+      PDFName.of('Kids'),
+      document.context.obj([field.ref]),
+    );
+  } else if (kind === 'duplicate_kid') {
+    const kids = document.context.lookup(
+      field.acroField.dict.get(PDFName.of('Kids')),
+    );
+    assert.ok(kids instanceof PDFArray);
+    kids.push(kids.get(0));
+  } else if (kind === 'widget_self_kid') {
+    const kids = document.context.lookup(
+      field.acroField.dict.get(PDFName.of('Kids')),
+    );
+    assert.ok(kids instanceof PDFArray);
+    const widgetRef = kids.get(0);
+    const widget = document.context.lookup(widgetRef);
+    assert.ok(widgetRef instanceof PDFRef);
+    assert.ok(widget instanceof PDFDict);
+    widget.set(PDFName.of('Kids'), document.context.obj([widgetRef]));
+  } else {
+    let parentDictionary = field.acroField.dict;
+    let parentRef = field.ref;
+    for (let depth = 0; depth < 140; depth += 1) {
+      const child = document.context.obj({
+        Parent: parentRef,
+        T: PDFHexString.fromText(`child-${depth}`),
+      }) as PDFDict;
+      const childRef = document.context.register(child);
+      parentDictionary.set(
+        PDFName.of('Kids'),
+        document.context.obj([childRef]),
+      );
+      parentDictionary = child;
+      parentRef = childRef;
+    }
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+type PageTreeFixture = 'count_mismatch' | 'deep_chain' | 'self_kid';
+
+async function pageTreeBytes(kind: PageTreeFixture): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  document.addPage([300, 200]);
+  const rootRef = document.catalog.get(PDFName.of('Pages'));
+  const root = document.context.lookup(rootRef);
+  assert.ok(rootRef instanceof PDFRef);
+  assert.ok(root instanceof PDFDict);
+
+  if (kind === 'self_kid') {
+    root.set(PDFName.of('Kids'), document.context.obj([rootRef]));
+  } else if (kind === 'count_mismatch') {
+    root.set(PDFName.of('Count'), PDFNumber.of(2));
+  } else {
+    const rootKids = document.context.lookup(root.get(PDFName.of('Kids')));
+    assert.ok(rootKids instanceof PDFArray);
+    const pageRef = rootKids.get(0);
+    const page = document.context.lookup(pageRef);
+    assert.ok(pageRef instanceof PDFRef);
+    assert.ok(page instanceof PDFDict);
+
+    let parent = root;
+    let parentRef = rootRef;
+    for (let depth = 0; depth < 140; depth += 1) {
+      const child = document.context.obj({
+        Count: 1,
+        Kids: [],
+        Parent: parentRef,
+        Type: 'Pages',
+      }) as PDFDict;
+      const childRef = document.context.register(child);
+      parent.set(PDFName.of('Kids'), document.context.obj([childRef]));
+      parent = child;
+      parentRef = childRef;
+    }
+    parent.set(PDFName.of('Kids'), document.context.obj([pageRef]));
+    page.set(PDFName.of('Parent'), parentRef);
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function wideObjectGraphBytes(
+  kind: 'catalog' | 'unreachable',
+): Promise<Uint8Array> {
+  const document = await PDFDocument.create({ updateMetadata: false });
+  document.addPage([300, 200]);
+  const dictionary =
+    kind === 'catalog'
+      ? document.catalog
+      : (document.context.obj({}) as PDFDict);
+  for (let index = 0; index < 66_000; index += 1) {
+    dictionary.set(PDFName.of(`Wide${index}`), PDFNumber.of(0));
+  }
+  if (kind === 'unreachable') document.context.register(dictionary);
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function invalidCatalogBytes(): Promise<Uint8Array> {
+  const header = '%PDF-1.7\n';
+  const objects = [
+    '1 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n',
+    '2 0 obj\n[ ]\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [ 0 0 300 200 ] >>\nendobj\n',
+  ];
+  let offset = header.length;
+  const offsets = objects.map((object) => {
+    const objectOffset = offset;
+    offset += object.length;
+    return objectOffset;
+  });
+  const xrefOffset = offset;
+  const xrefEntries = offsets
+    .map(
+      (objectOffset) =>
+        `${objectOffset.toString().padStart(10, '0')} 00000 n \n`,
+    )
+    .join('');
+  return new TextEncoder().encode(
+    `${header}${objects.join('')}xref\n0 4\n0000000000 65535 f \n${xrefEntries}trailer\n<< /Size 4 /Root 2 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`,
+  );
+}
+
 function detachedSignatureDictionary(
   document: PDFDocument,
   options: {
@@ -552,6 +795,50 @@ async function saveWithStableSignatureByteRanges(
   throw new Error('Synthetic signature ByteRange size did not stabilize.');
 }
 
+function replaceAsciiOnce(
+  source: Uint8Array,
+  before: string,
+  after: string,
+): Uint8Array {
+  const encoder = new TextEncoder();
+  const beforeBytes = encoder.encode(before);
+  const afterBytes = encoder.encode(after);
+  assert.equal(afterBytes.byteLength, beforeBytes.byteLength);
+
+  const text = new TextDecoder('latin1').decode(source);
+  const offset = text.indexOf(before);
+  assert.ok(offset >= 0, `missing synthetic placeholder: ${before}`);
+  assert.equal(text.indexOf(before, offset + 1), -1);
+
+  const output = Uint8Array.from(source);
+  output.set(afterBytes, offset);
+  return output;
+}
+
+async function hiddenDuplicateXfaBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const acroForm = document.catalog.get(PDFName.of('AcroForm'));
+  assert.ok(acroForm);
+  document.catalog.delete(PDFName.of('AcroForm'));
+  document.catalog.set(
+    PDFName.of('DupPad'),
+    PDFName.of('AAAAAAAAAAAAAAAAAAAAAA'),
+  );
+  document.catalog.set(PDFName.of('AcroForm'), acroForm);
+  const source = await document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+  return replaceAsciiOnce(
+    source,
+    '/DupPad /AAAAAAAAAAAAAAAAAAAAAA',
+    '/AcroF#6Frm << /XFA (hidden) >>',
+  );
+}
+
 async function usageRightsBytes(
   options: {
     xfa?: boolean;
@@ -559,6 +846,7 @@ async function usageRightsBytes(
     unknownTransformParameter?: boolean;
     hiddenReference?: boolean;
     sigFlags?: number;
+    duplicateUnknownPerms?: boolean;
   } = {},
 ): Promise<Uint8Array> {
   const document = await PDFDocument.load(await demoBytes(), {
@@ -593,6 +881,12 @@ async function usageRightsBytes(
   const permsRef = document.context.register(
     document.context.obj({ UR3: signatureRef }) as PDFDict,
   );
+  if (options.duplicateUnknownPerms) {
+    document.catalog.set(
+      PDFName.of('DupPad'),
+      PDFName.of('AAAAAAAAAAAAAAAAAAAA'),
+    );
+  }
   document.catalog.set(PDFName.of('Perms'), permsRef);
   acroForm.set(PDFName.of('SigFlags'), PDFNumber.of(options.sigFlags ?? 3));
 
@@ -609,7 +903,14 @@ async function usageRightsBytes(
     );
   }
 
-  return saveWithStableSignatureByteRanges(document);
+  const source = await saveWithStableSignatureByteRanges(document);
+  return options.duplicateUnknownPerms
+    ? replaceAsciiOnce(
+        source,
+        '/DupPad /AAAAAAAAAAAAAAAAAAAA',
+        '/Perms << /VendorLock true >>',
+      )
+    : source;
 }
 
 async function approvalSignatureBytes(): Promise<Uint8Array> {
@@ -865,6 +1166,11 @@ void test('inspects canonical AcroForm fields, widgets, geometry, and policies',
       permsKeys: [],
       usageRightsKeys: [],
       byteRangeEntryCount: 0,
+      rawByteRangeNameCount: 0,
+      historicalByteRangeNameCount: 0,
+      revisionMarkerCount: 1,
+      historyScanComplete: true,
+      historyScanIssues: [],
       malformedByteRangeCount: 0,
       byteRanges: [],
       byteRangesCoverWholeFile: null,
@@ -1454,6 +1760,57 @@ void test('validates every requested change before mutating the fresh copy', asy
   assert.deepEqual(after, before);
 });
 
+void test('fails closed when an escaped duplicate Catalog AcroForm hides XFA', async () => {
+  const source = await hiddenDuplicateXfaBytes();
+  const rawText = new TextDecoder('latin1').decode(source);
+  assert.match(rawText, /\/AcroF#6Frm << \/XFA \(hidden\) >>/u);
+
+  const parsed = await PDFDocument.load(source, { updateMetadata: false });
+  assert.equal(parsed.catalog.AcroForm()?.has(PDFName.of('XFA')), false);
+
+  const inspection = await inspectPdf(source);
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.equal(inspection.protection.evidence.historyScanComplete, false);
+  assert.equal(
+    inspection.protection.evidence.historyScanIssues?.includes(
+      'dictionary_key_duplicate',
+    ),
+    true,
+  );
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  await expectEngineError(
+    applyApprovedValues(source, { [FIELD.legalName]: 'Must not be written' }),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+  );
+});
+
+void test('fails closed when duplicate Catalog Perms hides an unknown protection', async () => {
+  const source = await usageRightsBytes({ duplicateUnknownPerms: true });
+  const rawText = new TextDecoder('latin1').decode(source);
+  assert.match(rawText, /\/Perms << \/VendorLock true >>/u);
+  assert.equal(rawText.match(/\/Perms\b/gu)?.length, 2);
+
+  const inspection = await inspectPdf(source);
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.deepEqual(inspection.protection.evidence.permsKeys, ['UR3']);
+  assert.equal(inspection.protection.evidence.historyScanComplete, false);
+  assert.equal(
+    inspection.protection.evidence.historyScanIssues?.includes(
+      'dictionary_key_duplicate',
+    ),
+    true,
+  );
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  await expectEngineError(
+    applyConfirmedDerivativeValues(
+      source,
+      { [FIELD.legalName]: 'Must not be written' },
+      { humanConfirmedProtectionLoss: true },
+    ),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+  );
+});
+
 void test('requires human confirmation before creating a plain usage-rights derivative', async () => {
   const source = await usageRightsBytes();
   const sourceSnapshot = Uint8Array.from(source);
@@ -1475,6 +1832,11 @@ void test('requires human confirmation before creating a plain usage-rights deri
       permsKeys: ['UR3'],
       usageRightsKeys: ['UR3'],
       byteRangeEntryCount: 1,
+      rawByteRangeNameCount: 1,
+      historicalByteRangeNameCount: 0,
+      revisionMarkerCount: 1,
+      historyScanComplete: true,
+      historyScanIssues: [],
       malformedByteRangeCount: 0,
       byteRanges: [[0, 1, 2, source.byteLength - 2]],
       byteRangesCoverWholeFile: true,
@@ -1775,6 +2137,44 @@ void test('keeps shared-state multi-widget checkboxes boolean', async () => {
   assert.equal(output?.current, false);
 });
 
+void test('rejects cyclic, duplicate, and over-deep AcroForm field graphs before pdf-lib recursion', async () => {
+  for (const kind of [
+    'self_kid',
+    'self_parent',
+    'duplicate_kid',
+    'widget_self_kid',
+    'deep_chain',
+  ] as const) {
+    const source = await acroFormGraphBytes(kind);
+    await expectEngineError(inspectPdf(source), 'PDF_LOAD_FAILED');
+    await expectEngineError(
+      applyApprovedValues(source, { 'only.text': 'Must not be written' }),
+      'PDF_LOAD_FAILED',
+    );
+  }
+});
+
+void test('rejects cyclic, over-deep, and incoherent page trees before pdf-lib recursion', async () => {
+  for (const kind of ['self_kid', 'deep_chain', 'count_mismatch'] as const) {
+    const source = await pageTreeBytes(kind);
+    await expectEngineError(inspectPdf(source), 'PDF_LOAD_FAILED');
+  }
+});
+
+void test('fails closed on wide reachable and unreachable object graphs without overflowing the stack', async () => {
+  for (const kind of ['catalog', 'unreachable'] as const) {
+    const source = await wideObjectGraphBytes(kind);
+    await expectEngineError(inspectPdf(source), 'PDF_LOAD_FAILED');
+  }
+});
+
+void test('fails closed when the trailer root is not a Catalog dictionary', async () => {
+  await expectEngineError(
+    inspectPdf(await invalidCatalogBytes()),
+    'PDF_LOAD_FAILED',
+  );
+});
+
 void test('reports reachable active content without exposing or executing scripts', async () => {
   const source = await activeContentBytes();
   const inspection = await inspectPdf(source);
@@ -1813,6 +2213,59 @@ void test('reports reachable active content without exposing or executing script
     (await inspectPdf(result.bytes)).activeContent,
     inspection.activeContent,
   );
+});
+
+void test('treats cyclic and malformed action entry graphs as high risk without recursing', async () => {
+  for (const kind of [
+    'cyclic_open_action',
+    'cyclic_field_aa',
+    'cyclic_next',
+    'invalid_field_a',
+  ] as const) {
+    const source = await actionGraphBytes(kind);
+    const inspection = await inspectPdf(source);
+
+    assert.ok(inspection.activeContent.highRiskActionCount > 0, kind);
+    assert.equal(
+      inspection.protection.exportStrategies.includes('filled_pdf'),
+      false,
+      kind,
+    );
+    await expectEngineError(
+      applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+      'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+    );
+  }
+});
+
+void test('treats action graph depth and node budget exhaustion as high risk', async () => {
+  for (const kind of ['deep_next', 'node_budget'] as const) {
+    const source = await actionGraphBytes(kind);
+    const inspection = await inspectPdf(source);
+
+    assert.ok(inspection.activeContent.highRiskActionCount > 0, kind);
+    await expectEngineError(
+      applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+      'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+    );
+  }
+});
+
+void test('keeps legal OpenAction destinations and shared action references exportable', async () => {
+  const destination = await inspectPdf(
+    await actionGraphBytes('open_destination'),
+  );
+  assert.equal(destination.activeContent.openActionCount, 1);
+  assert.equal(destination.activeContent.highRiskActionCount, 0);
+
+  const sharedSource = await actionGraphBytes('shared_next');
+  const shared = await inspectPdf(sharedSource);
+  assert.equal(shared.activeContent.otherActionCount, 2);
+  assert.equal(shared.activeContent.highRiskActionCount, 0);
+  const result = await applyApprovedValues(sharedSource, {
+    'active.name': 'Synthetic Applicant',
+  });
+  assert.equal(result.verifiedFields[0]?.value, 'Synthetic Applicant');
 });
 
 void test('reports but refuses to export native high-risk PDF actions', async () => {
@@ -1998,6 +2451,11 @@ void test('inspects an approval signature but blocks both PDF rewrite strategies
       permsKeys: [],
       usageRightsKeys: [],
       byteRangeEntryCount: 1,
+      rawByteRangeNameCount: 1,
+      historicalByteRangeNameCount: 0,
+      revisionMarkerCount: 1,
+      historyScanComplete: true,
+      historyScanIssues: [],
       malformedByteRangeCount: 0,
       byteRanges: [[0, 1, 2, source.byteLength - 2]],
       byteRangesCoverWholeFile: true,
@@ -2114,17 +2572,26 @@ void test('reports unknown Perms variants and refuses every export strategy', as
     {
       kind: 'not_dictionary',
       permsKeys: [],
-      unknownStructures: ['catalog_perms_not_dictionary'],
+      unknownStructures: [
+        'catalog_perms_not_dictionary',
+        'historical_scan_inconclusive',
+      ],
     },
     {
       kind: 'unknown_key',
       permsKeys: ['VendorLock'],
-      unknownStructures: ['catalog_perms_VendorLock'],
+      unknownStructures: [
+        'catalog_perms_VendorLock',
+        'historical_scan_inconclusive',
+      ],
     },
     {
       kind: 'malformed_ur3',
       permsKeys: ['UR3'],
-      unknownStructures: ['ur3_structure_unrecognized'],
+      unknownStructures: [
+        'historical_scan_inconclusive',
+        'ur3_structure_unrecognized',
+      ],
     },
   ];
 

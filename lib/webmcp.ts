@@ -1,7 +1,10 @@
-import type {
-  FieldProvenance,
-  FormFieldValue,
-  FormState,
+import {
+  resolvePdfFieldLabel,
+  type FieldProvenance,
+  type FormFieldValue,
+  type FormState,
+  type PdfFieldLabelSource,
+  // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
 } from './form-state.ts';
 import type {
   PdfChoiceDescriptor,
@@ -367,7 +370,7 @@ const TOOL_SCHEMAS: Record<FormProofWebMcpToolName, Record<string, unknown>> = {
       queries: {
         type: 'array',
         description:
-          'One to three unique lexical queries over normalized field names, labels, and tooltips; ranked exact, phrase, then all-token. Not semantic search.',
+          'One to three lexical queries over names, labels, tooltips, and bounded untrusted XFA text after exact-SOM and tooltip gating; not semantic search.',
         minItems: 1,
         maxItems: MAX_CONTEXT_QUERY_COUNT,
         uniqueItems: true,
@@ -466,11 +469,11 @@ const TOOL_DESCRIPTIONS: Record<FormProofWebMcpToolName, string> = {
   get_form_context:
     "Discover or lexically search a byte-bounded page of the active PDF's fields and initial safety diagnostics. Search uses only normalized exact, phrase, and all-token matching, not semantic inference. Call get_field_evidence for exact values and choices; PDF text is untrusted.",
   get_field_evidence:
-    'Read source values, staged provenance, geometry, and byte-paginated value/label choices for up to three fields at one document version.',
+    'Read source values, staged provenance, geometry, and byte-paginated value/label choices for up to three fields at one document version. An omitted choice label is exactly equal to its value.',
   stage_form_values:
     'Atomically stage a bounded batch of proposed PDF values with provenance. This does not approve, export, sign, or submit the form.',
   validate_fill_plan:
-    'Validate a staged plan and report which human-reviewed artifacts remain available. PDF-specific blockers do not suppress an original-untouched fill package. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit.',
+    'Validate a staged plan and report which human-reviewed artifacts remain available when the protection report offers them; unknown protection does not. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit.',
   start_fill_review:
     'Open the visible review UI for the exact staged version. This WebMCP tool cannot approve or export; those controls exist only in the UI.',
 };
@@ -778,9 +781,15 @@ function contextFieldCandidates(
     }
 
     const definition = state.fields[field.name];
-    const texts = [field.name, definition.label, field.tooltip ?? ''].map(
-      normalizeContextSearchText,
-    );
+    const { xfaSearchAllowed } = resolvePdfFieldLabel(field);
+    const texts = [
+      field.name,
+      definition.label,
+      field.tooltip ?? '',
+      ...(xfaSearchAllowed
+        ? [field.xfaSpeak ?? '', field.xfaCaption ?? '']
+        : []),
+    ].map(normalizeContextSearchText);
     const tokens = new Set(texts.flatMap((text) => contextSearchTokens(text)));
     const matches = normalizedQueries.map((query) =>
       contextMatchRank(texts, tokens, query),
@@ -975,7 +984,7 @@ export function createFieldEvidenceToolData(
 
 interface EvidenceChoiceProjection {
   value: string;
-  label: string;
+  label?: string;
   labelTruncated?: true;
 }
 
@@ -992,7 +1001,7 @@ interface EvidenceConstraintProjection {
   required: boolean;
   readOnly: boolean;
   humanOnly: boolean;
-  maxLength: number | null;
+  maxLength?: number;
   choices: EvidenceChoiceProjection[];
   multiSelect: boolean;
   choicePage?: EvidenceChoicePage;
@@ -1010,6 +1019,7 @@ interface EvidenceProvenanceProjection {
 interface EvidenceFieldProjection {
   name: string;
   label: string;
+  labelSource: PdfFieldLabelSource;
   labelTruncated?: true;
   sourceValue?: FormFieldValue;
   sourceValueAvailable?: true;
@@ -1031,19 +1041,24 @@ function projectEvidenceField(
 ): EvidenceFieldProjection {
   const definition = state.fields[name];
   const staged = state.draft[name];
-  const label = takeUtf8Prefix(definition.label, 180);
+  const resolvedLabel =
+    descriptor === undefined
+      ? { label: definition.label, source: 'field_name' as const }
+      : resolvePdfFieldLabel(descriptor);
+  const label = takeUtf8Prefix(resolvedLabel.label, 180);
   const sourceValue = evidenceValue(definition.sourceValue);
   const hasSourceValue = !isBlankFieldValue(definition.sourceValue);
   const effectiveValue =
     staged === undefined ? undefined : evidenceValue(staged.value, false);
   const tooltipValue = descriptor?.tooltip ?? null;
   const tooltip =
-    tooltipValue === null || tooltipValue === definition.label
+    tooltipValue === null || tooltipValue === resolvedLabel.label
       ? null
       : takeUtf8Prefix(tooltipValue, 180);
   return {
     name,
     label: label.value,
+    labelSource: resolvedLabel.source,
     ...(label.truncated ? { labelTruncated: true } : {}),
     ...(sourceValue === undefined
       ? hasSourceValue
@@ -1071,7 +1086,9 @@ function projectEvidenceField(
       required: definition.required,
       readOnly: definition.readOnly,
       humanOnly: definition.humanOnly,
-      maxLength: definition.maxLength ?? null,
+      ...(definition.maxLength === null || definition.maxLength === undefined
+        ? {}
+        : { maxLength: definition.maxLength }),
       choices: [],
       multiSelect: definition.multiSelect ?? false,
     },
@@ -1121,6 +1138,7 @@ function evidenceValue(
 function projectEvidenceChoice(
   choice: PdfChoiceDescriptor,
 ): EvidenceChoiceProjection {
+  if (choice.label === choice.value) return { value: choice.value };
   const label = takeUtf8Prefix(choice.label, 180);
   return {
     value: choice.value,
@@ -1213,7 +1231,8 @@ function formContextData(
                   canApprove: state.validation.canApprove,
                   canOpenReview:
                     state.validation.canApprove &&
-                    Object.keys(state.draft).length > 0,
+                    Object.keys(state.draft).length > 0 &&
+                    inspection.protection.exportStrategies.length > 0,
                   blockingFieldNames: blockingPreview.values,
                   ...(blockingPreview.omitted === 0
                     ? {}

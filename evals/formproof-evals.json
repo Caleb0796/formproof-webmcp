@@ -71,6 +71,11 @@
               "permsKeys": [],
               "usageRightsKeys": [],
               "byteRangeEntryCount": 0,
+              "rawByteRangeNameCount": 0,
+              "historicalByteRangeNameCount": 0,
+              "revisionMarkerCount": 1,
+              "historyScanComplete": true,
+              "historyScanIssues": [],
               "malformedByteRangeCount": 0,
               "byteRanges": [],
               "byteRangesCoverWholeFile": null,
@@ -211,6 +216,7 @@
               {
                 "name": "frm.r4d6",
                 "label": "Current housing arrangement",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 66, "y": 346, "width": 18, "height": 18 },
                 "constraints": {
@@ -218,7 +224,6 @@
                   "required": true,
                   "readOnly": false,
                   "humanOnly": false,
-                  "maxLength": null,
                   "choices": [
                     {
                       "value": "north",
@@ -709,6 +714,7 @@
               {
                 "name": "frm.q7f1",
                 "label": "Legal name",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 52, "y": 560, "width": 508, "height": 30 },
                 "constraints": {
@@ -994,6 +1000,7 @@
               {
                 "name": "frm.q7f1",
                 "label": "Legal name",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 52, "y": 560, "width": 508, "height": 30 },
                 "constraints": {
@@ -1010,6 +1017,7 @@
               {
                 "name": "frm.p0x4",
                 "label": "Email address",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 52, "y": 486, "width": 322, "height": 30 },
                 "constraints": {
@@ -1026,6 +1034,7 @@
               {
                 "name": "frm.c8v3",
                 "label": "Permission to contact about this request",
+                "labelSource": "acroform_tooltip",
                 "sourceValue": false,
                 "page": 1,
                 "rect": { "x": 66, "y": 439, "width": 18, "height": 18 },
@@ -1034,7 +1043,6 @@
                   "required": true,
                   "readOnly": false,
                   "humanOnly": false,
-                  "maxLength": null,
                   "choices": [],
                   "multiSelect": false
                 },
@@ -1069,6 +1077,7 @@
               {
                 "name": "frm.r4d6",
                 "label": "Current housing arrangement",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 66, "y": 346, "width": 18, "height": 18 },
                 "constraints": {
@@ -1076,11 +1085,10 @@
                   "required": true,
                   "readOnly": false,
                   "humanOnly": false,
-                  "maxLength": null,
                   "choices": [
-                    { "value": "rent", "label": "rent" },
-                    { "value": "own", "label": "own" },
-                    { "value": "other", "label": "other" }
+                    { "value": "rent" },
+                    { "value": "own" },
+                    { "value": "other" }
                   ],
                   "multiSelect": false
                 },
@@ -1381,6 +1389,7 @@
               {
                 "name": "frm.p0x4",
                 "label": "Email address",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 52, "y": 486, "width": 322, "height": 30 },
                 "constraints": {
@@ -1397,6 +1406,7 @@
               {
                 "name": "frm.c8v3",
                 "label": "Permission to contact about this request",
+                "labelSource": "acroform_tooltip",
                 "sourceValue": false,
                 "page": 1,
                 "rect": { "x": 66, "y": 439, "width": 18, "height": 18 },
@@ -1405,7 +1415,6 @@
                   "required": true,
                   "readOnly": false,
                   "humanOnly": false,
-                  "maxLength": null,
                   "choices": [],
                   "multiSelect": false
                 },
@@ -1764,6 +1773,7 @@
               {
                 "name": "frm.r4d6",
                 "label": "Current housing arrangement",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 66, "y": 346, "width": 18, "height": 18 },
                 "constraints": {
@@ -1771,11 +1781,10 @@
                   "required": true,
                   "readOnly": false,
                   "humanOnly": false,
-                  "maxLength": null,
                   "choices": [
-                    { "value": "rent", "label": "rent" },
-                    { "value": "own", "label": "own" },
-                    { "value": "other", "label": "other" }
+                    { "value": "rent" },
+                    { "value": "own" },
+                    { "value": "other" }
                   ],
                   "multiSelect": false
                 },
@@ -1784,6 +1793,7 @@
               {
                 "name": "frm.l9n5",
                 "label": "Requested support categories",
+                "labelSource": "acroform_tooltip",
                 "sourceValue": ["Rent assistance"],
                 "page": 2,
                 "rect": { "x": 52, "y": 458, "width": 240, "height": 130 },
@@ -1792,12 +1802,11 @@
                   "required": false,
                   "readOnly": false,
                   "humanOnly": false,
-                  "maxLength": null,
                   "choices": [
-                    { "value": "Rent assistance", "label": "Rent assistance" },
-                    { "value": "Utilities", "label": "Utilities" },
-                    { "value": "Food access", "label": "Food access" },
-                    { "value": "Transportation", "label": "Transportation" }
+                    { "value": "Rent assistance" },
+                    { "value": "Utilities" },
+                    { "value": "Food access" },
+                    { "value": "Transportation" }
                   ],
                   "multiSelect": true
                 },
@@ -2170,6 +2179,7 @@
               {
                 "name": "frm.t3w8",
                 "label": "Context for reviewer",
+                "labelSource": "acroform_tooltip",
                 "page": 2,
                 "rect": { "x": 312, "y": 458, "width": 248, "height": 130 },
                 "constraints": {
@@ -2530,6 +2540,7 @@
               {
                 "name": "frm.q7f1",
                 "label": "Legal name",
+                "labelSource": "acroform_tooltip",
                 "page": 1,
                 "rect": { "x": 52, "y": 560, "width": 508, "height": 30 },
                 "constraints": {

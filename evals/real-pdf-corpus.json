@@ -43,6 +43,11 @@
           "permsKeys": ["UR3"],
           "usageRightsKeys": ["UR3"],
           "byteRangeEntryCount": 1,
+          "rawByteRangeNameCount": 1,
+          "historicalByteRangeNameCount": 0,
+          "revisionMarkerCount": 2,
+          "historyScanComplete": true,
+          "historyScanIssues": [],
           "malformedByteRangeCount": 0,
           "byteRangeCount": 1,
           "byteRangesCoverWholeFile": true,
@@ -69,6 +74,20 @@
         },
         "expectedPdfRewriteError": "PDF_XFA_UNSUPPORTED"
       },
+      "xfaExperiment": {
+        "exactSomMatchCount": 199,
+        "speakFieldCount": 0,
+        "captionFieldCount": 68
+      },
+      "semanticLabelGoldens": [
+        {
+          "fieldName": "topmostSubform[0].Page1[0].f1_14[0]",
+          "finalLabel": "Your first name and middle initial",
+          "labelSource": "xfa_caption",
+          "query": "your first name middle initial",
+          "expectedMatchCount": 1
+        }
+      ],
       "queryExperiment": {
         "queries": ["f1_01"],
         "expectedFirstPageFieldNames": ["topmostSubform[0].Page1[0].f1_01[0]"],
@@ -119,6 +138,11 @@
           "permsKeys": ["UR3"],
           "usageRightsKeys": ["UR3"],
           "byteRangeEntryCount": 1,
+          "rawByteRangeNameCount": 1,
+          "historicalByteRangeNameCount": 0,
+          "revisionMarkerCount": 2,
+          "historyScanComplete": true,
+          "historyScanIssues": [],
           "malformedByteRangeCount": 0,
           "byteRangeCount": 1,
           "byteRangesCoverWholeFile": true,
@@ -145,13 +169,34 @@
         },
         "expectedPdfRewriteError": "PDF_XFA_UNSUPPORTED"
       },
+      "xfaExperiment": {
+        "exactSomMatchCount": 48,
+        "speakFieldCount": 0,
+        "captionFieldCount": 38
+      },
+      "semanticLabelGoldens": [
+        {
+          "fieldName": "topmostSubform[0].Page1[0].f1_05[0]",
+          "finalLabel": "(b) Social security number",
+          "labelSource": "xfa_caption",
+          "query": "social security number",
+          "expectedMatchCount": 1
+        }
+      ],
       "queryExperiment": {
-        "queries": ["Step1a"],
+        "queries": ["f1_01"],
         "expectedFirstPageFieldNames": [
           "topmostSubform[0].Page1[0].Step1a[0].f1_01[0]"
         ],
-        "expectedMatchCounts": [4],
-        "expectedTotalMatchedFields": 4
+        "expectedMatchCounts": [1],
+        "expectedTotalMatchedFields": 1,
+        "naturalLanguageCoverageLoss": {
+          "queries": ["first name and middle initial"],
+          "expectedFirstPageFieldNames": [],
+          "expectedMatchCounts": [0],
+          "expectedTotalMatchedFields": 0,
+          "reason": "All 48 W-4 XFA speak entries are disabled (disable=1), and f1_01 has no usable XFA caption. Disabled assist text is not trusted as field evidence."
+        }
       },
       "fillPackageExperiment": {
         "createdAt": "2026-08-29T00:00:00.000Z",
@@ -199,6 +244,11 @@
           "permsKeys": [],
           "usageRightsKeys": [],
           "byteRangeEntryCount": 0,
+          "rawByteRangeNameCount": 0,
+          "historicalByteRangeNameCount": 0,
+          "revisionMarkerCount": 1,
+          "historyScanComplete": true,
+          "historyScanIssues": [],
           "malformedByteRangeCount": 0,
           "byteRangeCount": 0,
           "byteRangesCoverWholeFile": null,
@@ -277,6 +327,11 @@
           "permsKeys": [],
           "usageRightsKeys": [],
           "byteRangeEntryCount": 0,
+          "rawByteRangeNameCount": 0,
+          "historicalByteRangeNameCount": 0,
+          "revisionMarkerCount": 1,
+          "historyScanComplete": true,
+          "historyScanIssues": [],
           "malformedByteRangeCount": 0,
           "byteRangeCount": 0,
           "byteRangesCoverWholeFile": null,
@@ -306,7 +361,14 @@
           "Gender"
         ],
         "expectedMatchCounts": [13, 3, 0],
-        "expectedTotalMatchedFields": 16
+        "expectedTotalMatchedFields": 16,
+        "naturalLanguageCoverageLoss": {
+          "queries": ["social security"],
+          "expectedFirstPageFieldNames": [],
+          "expectedMatchCounts": [0],
+          "expectedTotalMatchedFields": 0,
+          "reason": "The visible page says Social Security Number, but page text is not indexed and the AcroForm exposes only SSN-named fields with no tooltip. Lexical WebMCP search does not infer that synonym."
+        }
       },
       "writeExperiment": {
         "values": {
@@ -354,6 +416,11 @@
           "permsKeys": ["UR3"],
           "usageRightsKeys": ["UR3"],
           "byteRangeEntryCount": 1,
+          "rawByteRangeNameCount": 1,
+          "historicalByteRangeNameCount": 0,
+          "revisionMarkerCount": 1,
+          "historyScanComplete": true,
+          "historyScanIssues": [],
           "malformedByteRangeCount": 0,
           "byteRangeCount": 1,
           "byteRangesCoverWholeFile": true,
@@ -380,6 +447,32 @@
         },
         "expectedPdfRewriteError": "PDF_XFA_UNSUPPORTED"
       },
+      "xfaExperiment": {
+        "exactSomMatchCount": 122,
+        "speakFieldCount": 100,
+        "captionFieldCount": 36,
+        "acroFormChoiceLabelGoldens": [
+          {
+            "fieldName": "F[0].P4[0].CurrentMaritalStatus[0]",
+            "choices": [
+              { "value": "1", "label": "1" },
+              { "value": "2", "label": "2" },
+              { "value": "3", "label": "3" },
+              { "value": "4", "label": "4" },
+              { "value": "5", "label": "5" }
+            ]
+          }
+        ]
+      },
+      "semanticLabelGoldens": [
+        {
+          "fieldName": "F[0].P4[0].SSN[0]",
+          "finalLabel": "5. SOCIAL SECURITY NUMBER. Enter 9 digit social security number.",
+          "labelSource": "acroform_tooltip",
+          "query": "5 social security number",
+          "expectedMatchCount": 1
+        }
+      ],
       "queryExperiment": {
         "queries": ["social security"],
         "expectedFirstPageFieldNames": ["F[0].P4[0].SSN[0]"],

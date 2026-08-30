@@ -30,7 +30,7 @@
           },
           "queries": {
             "type": "array",
-            "description": "One to three unique lexical queries over normalized field names, labels, and tooltips; ranked exact, phrase, then all-token. Not semantic search.",
+            "description": "One to three lexical queries over names, labels, tooltips, and bounded untrusted XFA text after exact-SOM and tooltip gating; not semantic search.",
             "minItems": 1,
             "maxItems": 3,
             "uniqueItems": true,
@@ -52,7 +52,7 @@
     },
     {
       "name": "get_field_evidence",
-      "description": "Read source values, staged provenance, geometry, and byte-paginated value/label choices for up to three fields at one document version.",
+      "description": "Read source values, staged provenance, geometry, and byte-paginated value/label choices for up to three fields at one document version. An omitted choice label is exactly equal to its value.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -220,7 +220,7 @@
     },
     {
       "name": "validate_fill_plan",
-      "description": "Validate a staged plan and report which human-reviewed artifacts remain available. PDF-specific blockers do not suppress an original-untouched fill package. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit.",
+      "description": "Validate a staged plan and report which human-reviewed artifacts remain available when the protection report offers them; unknown protection does not. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit.",
       "inputSchema": {
         "type": "object",
         "properties": {
