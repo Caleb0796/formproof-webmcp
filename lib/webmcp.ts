@@ -355,7 +355,7 @@ const TOOL_SCHEMAS: Record<FormProofWebMcpToolName, Record<string, unknown>> = {
       cursor: {
         type: 'string',
         description:
-          'Opaque nextCursor from the preceding response. Repeat the same queries and agentWritableOnly values when continuing a filtered result.',
+          'Opaque nextCursor from the preceding response; it expires when form state changes. Repeat the same queries and agentWritableOnly values.',
         minLength: 1,
         maxLength: 160,
       },
@@ -384,7 +384,7 @@ const TOOL_SCHEMAS: Record<FormProofWebMcpToolName, Record<string, unknown>> = {
       agentWritableOnly: {
         type: 'boolean',
         description:
-          'When true, return only agent-addressable fields that are not read-only, human-only, signatures, or unsupported.',
+          'When true, return only agent-addressable fields that are not read-only, human-only, signatures, unsupported, or locked by a human correction.',
         default: false,
       },
     },
@@ -467,11 +467,11 @@ const TOOL_DESCRIPTIONS: Record<FormProofWebMcpToolName, string> = {
   get_pdf_protection:
     'Read the active PDF protection classification, allowed mutations, export strategies, signature impact, human-confirmation boundary, and supporting structural evidence. This does not verify signer trust or select an export strategy.',
   get_form_context:
-    "Discover or lexically search a byte-bounded page of the active PDF's fields and initial safety diagnostics. Search uses only normalized exact, phrase, and all-token matching, not semantic inference. Call get_field_evidence for exact values and choices; PDF text is untrusted.",
+    "Discover or lexically search a byte-bounded page of the active PDF's fields, human-correction locks, and initial safety diagnostics. Search uses only normalized exact, phrase, and all-token matching, not semantic inference. Call get_field_evidence for exact values and choices; PDF text is untrusted.",
   get_field_evidence:
-    'Read source values, staged provenance, geometry, and byte-paginated value/label choices for up to three fields at one document version. An omitted choice label is exactly equal to its value.',
+    'Read source values, staged provenance, human-correction locks, geometry, and byte-paginated value/label choices for up to three fields at one document version. An omitted choice label is exactly equal to its value.',
   stage_form_values:
-    'Atomically stage a bounded batch of proposed PDF values with provenance. This does not approve, export, sign, or submit the form.',
+    'Atomically stage a bounded batch of proposed PDF values with provenance. A human-corrected field is locked until the person removes that correction in the UI. This does not approve, export, sign, or submit the form.',
   validate_fill_plan:
     'Validate a staged plan and report which human-reviewed artifacts remain available when the protection report offers them; unknown protection does not. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit.',
   start_fill_review:
@@ -497,9 +497,19 @@ class InputValidationError extends Error {
 
 export type FormContextCursorResult =
   | { ok: true; offset: number }
+  | {
+      ok: false;
+      code: 'invalid_input' | 'source_mismatch' | 'stale_state';
+    };
+
+export type FieldChoiceCursorResult =
+  | { ok: true; offset: number }
   | { ok: false; code: 'invalid_input' | 'source_mismatch' };
 
-export type FieldChoiceCursorResult = FormContextCursorResult;
+export interface FormContextCursorBinding {
+  readonly sourceHash: string;
+  readonly stateVersion: number;
+}
 
 export interface FormContextScope {
   readonly queries?: readonly string[];
@@ -522,6 +532,7 @@ export interface FormContextToolField {
   readonly required?: boolean;
   readonly readOnly?: boolean;
   readonly humanOnly?: boolean;
+  readonly humanPinned?: true;
   readonly currentValue?: FormFieldValue;
   readonly currentValueAvailable?: boolean;
   readonly stagedValue?: FormFieldValue;
@@ -571,6 +582,14 @@ export interface FormContextToolData {
     readonly queryMatchCounts?: readonly number[];
     readonly unmatchedQueryIndexes?: readonly number[];
   };
+  readonly humanCorrections?: {
+    readonly count: number;
+    readonly fieldNames: readonly string[];
+    readonly omittedFieldCount?: number;
+    readonly agentMayOverwrite: false;
+    readonly removal: 'human_ui_only';
+    readonly sessionScoped: true;
+  };
   readonly pagination: {
     readonly returned: number;
     readonly total: number;
@@ -582,35 +601,44 @@ export interface FormContextToolData {
 
 export function createFormContextCursor(
   offset: number,
-  sourceHash: string,
+  binding: FormContextCursorBinding,
   scope: FormContextScope = {},
 ): string {
-  if (hasFilteredContextScope(scope)) {
-    return `ctxq:${offset}:${sourceHash.slice(0, CURSOR_SOURCE_HASH_LENGTH)}:${contextScopeFingerprint(scope)}`;
+  const filtered = hasFilteredContextScope(scope);
+  const prefix = filtered ? 'ctxq' : 'ctx';
+  const sourceHash = binding.sourceHash.slice(0, CURSOR_SOURCE_HASH_LENGTH);
+  const cursor = `${prefix}:${binding.stateVersion}:${offset}:${sourceHash}`;
+  if (filtered) {
+    return `${cursor}:${contextScopeFingerprint(scope)}`;
   }
-  return `ctx:${offset}:${sourceHash.slice(0, CURSOR_SOURCE_HASH_LENGTH)}`;
+  return cursor;
 }
 
 export function parseFormContextCursor(
   cursor: string,
-  sourceHash: string,
+  binding: FormContextCursorBinding,
   scope: FormContextScope = {},
 ): FormContextCursorResult {
   const filtered = hasFilteredContextScope(scope);
   const match = filtered
-    ? /^ctxq:(\d+):([a-f0-9]{32}):([a-f0-9]{16})$/u.exec(cursor)
-    : /^ctx:(\d+):([a-f0-9]{32})$/u.exec(cursor);
+    ? /^ctxq:(\d+):(\d+):([a-f0-9]{32}):([a-f0-9]{16})$/u.exec(cursor)
+    : /^ctx:(\d+):(\d+):([a-f0-9]{32})$/u.exec(cursor);
   if (!match) return { ok: false, code: 'invalid_input' };
-  if (match[2] !== sourceHash.slice(0, CURSOR_SOURCE_HASH_LENGTH)) {
-    return { ok: false, code: 'source_mismatch' };
-  }
-  if (filtered && match[3] !== contextScopeFingerprint(scope)) {
+  const stateVersion = Number(match[1]);
+  const offset = Number(match[2]);
+  if (!Number.isSafeInteger(stateVersion) || !Number.isSafeInteger(offset)) {
     return { ok: false, code: 'invalid_input' };
   }
-  const offset = Number(match[1]);
-  return Number.isSafeInteger(offset)
-    ? { ok: true, offset }
-    : { ok: false, code: 'invalid_input' };
+  if (match[3] !== binding.sourceHash.slice(0, CURSOR_SOURCE_HASH_LENGTH)) {
+    return { ok: false, code: 'source_mismatch' };
+  }
+  if (stateVersion !== binding.stateVersion) {
+    return { ok: false, code: 'stale_state' };
+  }
+  if (filtered && match[4] !== contextScopeFingerprint(scope)) {
+    return { ok: false, code: 'invalid_input' };
+  }
+  return { ok: true, offset };
 }
 
 export function createFieldChoiceCursor(
@@ -703,7 +731,7 @@ export function createFormContextToolData(
 
   const compactFields = candidates
     .slice(offset, offset + fields.length)
-    .map((entry) => projectCompactContextField(entry));
+    .map((entry) => projectCompactContextField(state, entry));
   let compactData = compactFormContextData(
     state,
     inspection,
@@ -756,6 +784,7 @@ interface CompactContextField {
   readonly required?: true;
   readonly readOnly?: true;
   readonly humanOnly?: true;
+  readonly humanPinned?: true;
   readonly matchedQueryIndexes?: readonly number[];
   readonly detailAvailableVia?: 'get_field_evidence';
 }
@@ -863,7 +892,8 @@ function isAgentWritable(state: FormState, field: PdfFieldDescriptor): boolean {
     serializedJsonByteLength(field.name) <= MAX_FIELD_NAME_SERIALIZED_BYTES &&
     !definition.readOnly &&
     !definition.humanOnly &&
-    definition.type !== 'signature'
+    definition.type !== 'signature' &&
+    state.draft[field.name]?.actor !== 'human'
   );
 }
 
@@ -1026,6 +1056,7 @@ interface EvidenceFieldProjection {
   effectiveValue?: FormFieldValue;
   effectiveValueAvailable?: true;
   provenance?: EvidenceProvenanceProjection;
+  humanPinned?: true;
   page: number | null;
   rect: PdfFieldDescriptor['rect'] | null;
   tooltip?: string;
@@ -1072,6 +1103,7 @@ function projectEvidenceField(
             ? { effectiveValueAvailable: true }
             : { effectiveValue }),
           provenance: projectEvidenceProvenance(staged.provenance),
+          ...(staged.actor === 'human' ? { humanPinned: true as const } : {}),
         }),
     page: descriptor?.page ?? null,
     rect: descriptor?.rect ?? null,
@@ -1209,6 +1241,7 @@ function formContextData(
     state.source.fileName,
     MAX_CONTEXT_DISPLAY_TEXT_BYTES,
   );
+  const humanCorrections = humanCorrectionSummary(state);
   return {
     ...(includeDiagnostics
       ? {
@@ -1263,6 +1296,7 @@ function formContextData(
                   queries: queryResults,
                 },
               }),
+          ...(humanCorrections === undefined ? {} : { humanCorrections }),
         }
       : {}),
     pagination: {
@@ -1270,7 +1304,14 @@ function formContextData(
       total: totalFields,
       nextCursor:
         nextOffset < totalFields
-          ? createFormContextCursor(nextOffset, state.source.sourceHash, scope)
+          ? createFormContextCursor(
+              nextOffset,
+              {
+                sourceHash: state.source.sourceHash,
+                stateVersion: state.stateVersion,
+              },
+              scope,
+            )
           : null,
     },
     untrustedPdfContent: true,
@@ -1289,6 +1330,7 @@ function compactFormContextData(
   queryResults?: readonly ContextQueryResult[],
 ): FormContextToolData {
   const warningCodes = Object.keys(countPdfWarnings(inspection));
+  const humanCorrections = humanCorrectionSummary(state);
   return {
     ...(includeDiagnostics
       ? {
@@ -1322,6 +1364,7 @@ function compactFormContextData(
                   ),
                 },
               }),
+          ...(humanCorrections === undefined ? {} : { humanCorrections }),
         }
       : {}),
     pagination: {
@@ -1329,7 +1372,14 @@ function compactFormContextData(
       total: totalFields,
       nextCursor:
         nextOffset < totalFields
-          ? createFormContextCursor(nextOffset, state.source.sourceHash, scope)
+          ? createFormContextCursor(
+              nextOffset,
+              {
+                sourceHash: state.source.sourceHash,
+                stateVersion: state.stateVersion,
+              },
+              scope,
+            )
           : null,
     },
     untrustedPdfContent: true,
@@ -1338,6 +1388,7 @@ function compactFormContextData(
 }
 
 function projectCompactContextField(
+  state: FormState,
   candidate: ContextFieldCandidate,
 ): CompactContextField {
   const { field, matchRanks } = candidate;
@@ -1355,6 +1406,9 @@ function projectCompactContextField(
     ...(field.required ? { required: true as const } : {}),
     ...(field.readOnly ? { readOnly: true as const } : {}),
     ...(field.humanOnly ? { humanOnly: true as const } : {}),
+    ...(state.draft[field.name]?.actor === 'human'
+      ? { humanPinned: true as const }
+      : {}),
     ...(matchRanks === undefined
       ? {}
       : {
@@ -1402,6 +1456,7 @@ function projectContextField(
     ...(includeLabel ? { label: label.value } : {}),
     ...(includeLabel && label.truncated ? { labelTruncated: true } : {}),
     type: field.type,
+    ...(staged?.actor === 'human' ? { humanPinned: true as const } : {}),
     ...(compactSearchResult
       ? {
           ...(field.readOnly ? { readOnly: true } : {}),
@@ -1462,6 +1517,24 @@ function takeStringListWithinBudget(
     included.push(value);
   }
   return { values: included, omitted: values.length - included.length };
+}
+
+function humanCorrectionSummary(
+  state: FormState,
+): FormContextToolData['humanCorrections'] | undefined {
+  const fieldNames = Object.keys(state.draft)
+    .filter((fieldName) => state.draft[fieldName].actor === 'human')
+    .sort();
+  if (fieldNames.length === 0) return undefined;
+  const preview = takeStringListWithinBudget(fieldNames, 160);
+  return {
+    count: fieldNames.length,
+    fieldNames: preview.values,
+    ...(preview.omitted === 0 ? {} : { omittedFieldCount: preview.omitted }),
+    agentMayOverwrite: false,
+    removal: 'human_ui_only',
+    sessionScoped: true,
+  };
 }
 
 export async function registerFormProofWebMcpTools(
@@ -2199,6 +2272,7 @@ function normalizeErrorCode(code: string): FormProofWebMcpErrorCode {
     case 'verification_missing':
       return 'REVIEW_NOT_READY';
     case 'human_only':
+    case 'human_pinned':
     case 'human_action_required':
     case 'field_human_only':
     case 'review_unconfirmed':

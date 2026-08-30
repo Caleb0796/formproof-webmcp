@@ -29,10 +29,14 @@ const {
   new URL('../lib/webmcp.ts', import.meta.url).href
 )) as typeof import('../lib/webmcp');
 
-const { createFormState, resolvePdfFieldLabel, stageFieldUpdates } =
-  (await import(
-    new URL('../lib/form-state.ts', import.meta.url).href
-  )) as typeof import('../lib/form-state');
+const {
+  correctDraftFieldFromUi,
+  createFormState,
+  resolvePdfFieldLabel,
+  stageFieldUpdates,
+} = (await import(
+  new URL('../lib/form-state.ts', import.meta.url).href
+)) as typeof import('../lib/form-state');
 
 const SOURCE_HASH = 'a'.repeat(64);
 
@@ -355,6 +359,10 @@ void test('registers the exact safe tool catalog sequentially', async () => {
     assert.doesNotMatch(tool.name, prohibited);
     assertEveryObjectSchemaIsClosed(tool.inputSchema, tool.name);
     assert.equal(tool.annotations.untrustedContentHint, true);
+    assert.doesNotMatch(
+      JSON.stringify(tool.inputSchema),
+      /actor|human_entry|unlock/iu,
+    );
   }
 
   assert.deepEqual(
@@ -377,15 +385,20 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   );
   const contextSchema = byName(tools, 'get_form_context').inputSchema as {
     properties: {
-      cursor: { description: string };
+      cursor: { description: string; maxLength: number };
       queries: { description: string; maxItems: number };
     };
   };
   assert.match(
     contextSchema.properties.cursor.description,
-    /Repeat the same queries and agentWritableOnly values/u,
+    /expires when form state changes/u,
+  );
+  assert.match(
+    contextSchema.properties.cursor.description,
+    /same queries and agentWritableOnly values/u,
   );
   assert.ok(contextSchema.properties.cursor.description.length <= 150);
+  assert.equal(contextSchema.properties.cursor.maxLength, 160);
   assert.ok(contextSchema.properties.queries.description.length <= 150);
   assert.match(
     contextSchema.properties.queries.description,
@@ -612,60 +625,97 @@ void test('rejects ambiguous or unusable context search inputs', async () => {
   assert.equal(contextCalls, 0);
 });
 
-void test('binds pagination cursors to the source PDF', () => {
-  const cursor = createFormContextCursor(6, SOURCE_HASH);
+void test('binds context cursors to source, state version, and filtered scope', () => {
+  const binding = { sourceHash: SOURCE_HASH, stateVersion: 7 } as const;
+  const cursor = createFormContextCursor(6, binding);
   const sameShortPrefixHash = `${SOURCE_HASH.slice(0, 16)}${'b'.repeat(48)}`;
 
-  assert.deepEqual(parseFormContextCursor(cursor, SOURCE_HASH), {
+  assert.equal(cursor, `ctx:7:6:${SOURCE_HASH.slice(0, 32)}`);
+  assert.deepEqual(parseFormContextCursor(cursor, binding), {
     ok: true,
     offset: 6,
   });
-  assert.deepEqual(parseFormContextCursor(cursor, 'b'.repeat(64)), {
-    ok: false,
-    code: 'source_mismatch',
-  });
-  assert.deepEqual(parseFormContextCursor(cursor, sameShortPrefixHash), {
-    ok: false,
-    code: 'source_mismatch',
-  });
-  assert.deepEqual(parseFormContextCursor('field:6', SOURCE_HASH), {
+  assert.deepEqual(
+    parseFormContextCursor(cursor, {
+      sourceHash: 'b'.repeat(64),
+      stateVersion: 8,
+    }),
+    { ok: false, code: 'source_mismatch' },
+  );
+  assert.deepEqual(
+    parseFormContextCursor(cursor, {
+      sourceHash: sameShortPrefixHash,
+      stateVersion: binding.stateVersion,
+    }),
+    { ok: false, code: 'source_mismatch' },
+  );
+  assert.deepEqual(
+    parseFormContextCursor(cursor, { ...binding, stateVersion: 8 }),
+    { ok: false, code: 'stale_state' },
+  );
+  assert.deepEqual(parseFormContextCursor('field:6', binding), {
     ok: false,
     code: 'invalid_input',
   });
+  assert.deepEqual(
+    parseFormContextCursor(
+      `ctx:${'9'.repeat(40)}:6:${SOURCE_HASH.slice(0, 32)}`,
+      binding,
+    ),
+    { ok: false, code: 'invalid_input' },
+  );
+  assert.deepEqual(
+    parseFormContextCursor(`ctx:6:${SOURCE_HASH.slice(0, 32)}`, binding),
+    { ok: false, code: 'invalid_input' },
+  );
 
   const searchScope = {
     queries: ['Employee State', 'signature'],
     agentWritableOnly: true,
   } as const;
-  const filteredCursor = createFormContextCursor(2, SOURCE_HASH, searchScope);
+  const filteredCursor = createFormContextCursor(2, binding, searchScope);
+  assert.match(filteredCursor, /^ctxq:7:2:[a-f0-9]{32}:[a-f0-9]{16}$/u);
+  const maximumLengthCursor = createFormContextCursor(
+    Number.MAX_SAFE_INTEGER,
+    {
+      sourceHash: SOURCE_HASH,
+      stateVersion: Number.MAX_SAFE_INTEGER,
+    },
+    searchScope,
+  );
+  assert.ok(maximumLengthCursor.length <= 160);
   assert.deepEqual(
-    parseFormContextCursor(filteredCursor, SOURCE_HASH, searchScope),
+    parseFormContextCursor(filteredCursor, binding, searchScope),
     { ok: true, offset: 2 },
   );
   assert.deepEqual(
-    parseFormContextCursor(filteredCursor, SOURCE_HASH, {
+    parseFormContextCursor(filteredCursor, binding, {
       ...searchScope,
       queries: ['signature', 'Employee State'],
     }),
     { ok: false, code: 'invalid_input' },
   );
   assert.deepEqual(
-    parseFormContextCursor(filteredCursor, SOURCE_HASH, {
+    parseFormContextCursor(filteredCursor, binding, {
       ...searchScope,
       agentWritableOnly: false,
     }),
     { ok: false, code: 'invalid_input' },
   );
-  assert.deepEqual(parseFormContextCursor(filteredCursor, SOURCE_HASH), {
+  assert.deepEqual(parseFormContextCursor(filteredCursor, binding), {
     ok: false,
     code: 'invalid_input',
   });
-  assert.deepEqual(parseFormContextCursor(cursor, SOURCE_HASH, searchScope), {
+  assert.deepEqual(parseFormContextCursor(cursor, binding, searchScope), {
     ok: false,
     code: 'invalid_input',
   });
   assert.deepEqual(
-    parseFormContextCursor(filteredCursor, 'b'.repeat(64), searchScope),
+    parseFormContextCursor(
+      filteredCursor,
+      { sourceHash: 'b'.repeat(64), stateVersion: 8 },
+      searchScope,
+    ),
     { ok: false, code: 'source_mismatch' },
   );
 
@@ -733,7 +783,10 @@ void test('ranks batched lexical search deterministically and indexes bounded ra
       if (nextCursor === null) continue;
       const parsed = parseFormContextCursor(
         nextCursor,
-        SOURCE_HASH,
+        {
+          sourceHash: state.source.sourceHash,
+          stateVersion: state.stateVersion,
+        },
         rankingScope,
       );
       assert.equal(parsed.ok, true);
@@ -945,6 +998,268 @@ void test('filters context to fields an agent can actually stage', async () => {
   assert.equal(data.pagination.total, 1);
 });
 
+void test('rejects an agent-writable continuation after a human correction changes the candidate set', async () => {
+  const { state: initial, inspection } = await createContextFixture([
+    { name: 'a' },
+    { name: 'b' },
+    { name: 'c' },
+  ]);
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'a',
+        value: 'agent proposal',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('version-bound cursor fixture failed');
+  assert.equal(staged.state.stateVersion, 1);
+
+  const scope = { agentWritableOnly: true } as const;
+  const v1FirstPage = createFormContextToolData(
+    staged.state,
+    inspection,
+    0,
+    1,
+    scope,
+  );
+  assert.deepEqual(
+    v1FirstPage.fields.map((field) =>
+      'name' in field ? field.name : undefined,
+    ),
+    ['a'],
+  );
+  assert.equal(v1FirstPage.pagination.total, 3);
+  const v1Cursor = v1FirstPage.pagination.nextCursor;
+  if (v1Cursor === null) throw new Error('version 1 should have another page');
+  assert.deepEqual(
+    parseFormContextCursor(
+      v1Cursor,
+      {
+        sourceHash: staged.state.source.sourceHash,
+        stateVersion: staged.state.stateVersion,
+      },
+      scope,
+    ),
+    { ok: true, offset: 1 },
+  );
+
+  const corrected = await correctDraftFieldFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    fieldName: 'a',
+    value: 'human correction',
+  });
+  assert.equal(corrected.ok, true);
+  if (!corrected.ok) throw new Error('human correction failed');
+  assert.equal(corrected.state.stateVersion, 2);
+  assert.deepEqual(
+    parseFormContextCursor(
+      v1Cursor,
+      {
+        sourceHash: corrected.state.source.sourceHash,
+        stateVersion: corrected.state.stateVersion,
+      },
+      scope,
+    ),
+    { ok: false, code: 'stale_state' },
+  );
+
+  const v2FirstPage = createFormContextToolData(
+    corrected.state,
+    inspection,
+    0,
+    1,
+    scope,
+  );
+  assert.deepEqual(
+    v2FirstPage.fields.map((field) =>
+      'name' in field ? field.name : undefined,
+    ),
+    ['b'],
+  );
+  assert.equal(v2FirstPage.pagination.total, 2);
+  const v2Cursor = v2FirstPage.pagination.nextCursor;
+  if (v2Cursor === null) throw new Error('version 2 should have another page');
+  const parsedV2Cursor = parseFormContextCursor(
+    v2Cursor,
+    {
+      sourceHash: corrected.state.source.sourceHash,
+      stateVersion: corrected.state.stateVersion,
+    },
+    scope,
+  );
+  assert.deepEqual(parsedV2Cursor, { ok: true, offset: 1 });
+  if (!parsedV2Cursor.ok) throw new Error('version 2 cursor should be valid');
+  const v2SecondPage = createFormContextToolData(
+    corrected.state,
+    inspection,
+    parsedV2Cursor.offset,
+    1,
+    scope,
+  );
+  assert.deepEqual(
+    [...v2FirstPage.fields, ...v2SecondPage.fields].map((field) =>
+      'name' in field ? field.name : undefined,
+    ),
+    ['b', 'c'],
+  );
+  assert.equal(v2SecondPage.pagination.nextCursor, null);
+});
+
+void test('reports human-pinned corrections in context and evidence while excluding them from agent-writable results', async () => {
+  const { state: initial, inspection } = await createContextFixture([
+    { name: 'corrected_name', label: 'Corrected name' },
+    { name: 'agent_note', label: 'Agent note' },
+  ]);
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'corrected_name',
+        value: 'Ada Lovelace',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+      {
+        fieldName: 'agent_note',
+        value: 'Keep this proposal',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('human-pinned context fixture failed');
+  const corrected = await correctDraftFieldFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    fieldName: 'corrected_name',
+    value: 'Grace Hopper',
+  });
+  assert.equal(corrected.ok, true);
+  if (!corrected.ok) throw new Error('human-pinned correction failed');
+
+  const context = createFormContextToolData(corrected.state, inspection, 0, 6);
+  const correctedContext = context.fields.find(
+    (field) => 'name' in field && field.name === 'corrected_name',
+  );
+  const agentContext = context.fields.find(
+    (field) => 'name' in field && field.name === 'agent_note',
+  );
+  assert.equal(correctedContext?.humanPinned, true);
+  assert.equal(Object.hasOwn(agentContext ?? {}, 'humanPinned'), false);
+  assert.deepEqual(context.humanCorrections, {
+    count: 1,
+    fieldNames: ['corrected_name'],
+    agentMayOverwrite: false,
+    removal: 'human_ui_only',
+    sessionScoped: true,
+  });
+
+  const continuation = createFormContextToolData(
+    corrected.state,
+    inspection,
+    1,
+    1,
+  );
+  assert.equal(Object.hasOwn(continuation, 'humanCorrections'), false);
+
+  const evidence = createFieldEvidenceToolData(corrected.state, inspection, [
+    'corrected_name',
+    'agent_note',
+  ]);
+  const correctedEvidence = evidence.fields.find(
+    ({ name }) => name === 'corrected_name',
+  );
+  const agentEvidence = evidence.fields.find(
+    ({ name }) => name === 'agent_note',
+  );
+  assert.equal(correctedEvidence?.humanPinned, true);
+  assert.deepEqual(correctedEvidence?.provenance, {
+    kind: 'human_entry',
+    confidence: 1,
+  });
+  assert.equal(Object.hasOwn(agentEvidence ?? {}, 'humanPinned'), false);
+
+  const writable = createFormContextToolData(
+    corrected.state,
+    inspection,
+    0,
+    6,
+    { agentWritableOnly: true },
+  );
+  assert.deepEqual(
+    writable.fields.map((field) => ('name' in field ? field.name : undefined)),
+    ['agent_note'],
+  );
+  assert.equal(writable.pagination.total, 1);
+});
+
+void test('bounds the first-page human-correction diagnostic without hiding its total', async () => {
+  const names = Array.from(
+    { length: 8 },
+    (_, index) => `corrected_${index}_${'x'.repeat(48)}`,
+  );
+  const { state: initial, inspection } = await createContextFixture(
+    names.map((name) => ({ name, label: name })),
+  );
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: names.map((fieldName) => ({
+      fieldName,
+      value: `agent:${fieldName}`,
+      provenance: { kind: 'user_instruction', confidence: 1 },
+    })),
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('bounded human correction fixture failed');
+
+  let state = staged.state;
+  for (const fieldName of names) {
+    const corrected = await correctDraftFieldFromUi(state, {
+      expectedStateVersion: state.stateVersion,
+      expectedSourceHash: state.source.sourceHash,
+      expectedPlanHash: state.planHash,
+      fieldName,
+      value: `human:${fieldName}`,
+    });
+    assert.equal(corrected.ok, true, fieldName);
+    if (!corrected.ok) throw new Error('bounded human correction failed');
+    state = corrected.state;
+  }
+
+  const initialPage = createFormContextToolData(state, inspection, 0, 1);
+  assert.equal(initialPage.humanCorrections?.count, names.length);
+  assert.ok((initialPage.humanCorrections?.fieldNames.length ?? 0) > 0);
+  assert.ok(
+    (initialPage.humanCorrections?.fieldNames.length ?? names.length) <
+      names.length,
+  );
+  assert.equal(
+    initialPage.humanCorrections?.omittedFieldCount,
+    names.length - (initialPage.humanCorrections?.fieldNames.length ?? 0),
+  );
+  assert.equal(initialPage.humanCorrections?.agentMayOverwrite, false);
+  assert.equal(initialPage.humanCorrections?.removal, 'human_ui_only');
+  assert.equal(initialPage.humanCorrections?.sessionScoped, true);
+  assert.ok(
+    serializedBytes(initialPage) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+  );
+
+  const continuation = createFormContextToolData(state, inspection, 1, 1);
+  assert.equal(Object.hasOwn(continuation, 'humanCorrections'), false);
+});
+
 void test('reports zero scoped pagination total for an empty search', async () => {
   const { state, inspection } = await createContextFixture([
     { name: 'employee_name', label: 'Employee name' },
@@ -996,7 +1311,10 @@ void test('emits compact safety and validation diagnostics only on the initial c
   assert.deepEqual(initial.pagination, {
     returned: 1,
     total: 2,
-    nextCursor: createFormContextCursor(1, SOURCE_HASH),
+    nextCursor: createFormContextCursor(1, {
+      sourceHash: state.source.sourceHash,
+      stateVersion: state.stateVersion,
+    }),
   });
   assert.deepEqual(continuation.pagination, {
     returned: 1,
@@ -1224,7 +1542,10 @@ void test('paginates three maximum-size query representatives without starvation
         if (input.cursor !== undefined) {
           const parsed = parseFormContextCursor(
             input.cursor,
-            SOURCE_HASH,
+            {
+              sourceHash: state.source.sourceHash,
+              stateVersion: state.stateVersion,
+            },
             input,
           );
           if (!parsed.ok) {
@@ -1334,6 +1655,24 @@ void test('runtime parsing rejects extra properties and human authority claims',
   });
   assert.equal(humanProvenance.ok, false);
   assert.equal(humanProvenance.error.code, 'INVALID_INPUT');
+
+  const unlockClaim = await stage.execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    unlock: true,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+  assert.equal(unlockClaim.ok, false);
+  assert.equal(unlockClaim.error.code, 'INVALID_INPUT');
+  assert.deepEqual(unlockClaim.error.issues, [
+    { code: 'INVALID_INPUT', path: 'input.unlock' },
+  ]);
 
   const nestedAuthorityClaim = await stage.execute({
     expectedStateVersion: 4,
@@ -1508,6 +1847,7 @@ void test('maps state and PDF errors without exposing adapter details', async ()
     ['invalid_request', 'INVALID_INPUT', 'fix_tool_input'],
     ['plan_mismatch', 'STATE_VERSION_CONFLICT', 'refresh_form_context'],
     ['review_unconfirmed', 'HUMAN_ACTION_REQUIRED', 'human_review_required'],
+    ['human_pinned', 'HUMAN_ACTION_REQUIRED', 'human_review_required'],
     ['approval_missing', 'HUMAN_ACTION_REQUIRED', 'human_review_required'],
     ['approval_stale', 'STATE_VERSION_CONFLICT', 'refresh_form_context'],
     ['output_missing', 'HUMAN_ACTION_REQUIRED', 'human_review_required'],

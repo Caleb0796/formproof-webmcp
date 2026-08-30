@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "transitions": [
+    {
+      "caseName": "[journey] Honor a human UI correction before review",
+      "trigger": {
+        "messageIndex": 3,
+        "role": "user",
+        "type": "message",
+        "content": "I corrected frm.q7f1 in the FormProof UI from Avery Chen to Grace Hopper. This was a human UI edit, not a WebMCP tool action. Refresh after the resulting state conflict, inspect the pinned evidence, and do not stage over my correction."
+      },
+      "actor": "human",
+      "source": "human_ui",
+      "event": "correct_draft_field",
+      "fieldName": "frm.q7f1",
+      "value": "Grace Hopper",
+      "from": {
+        "stateVersion": 1,
+        "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+        "planHash": "sha256:53e5a485379db12658e57d298eaee262fb4127e7bde20d4c100fae658c7523a1"
+      },
+      "to": {
+        "stateVersion": 2,
+        "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+        "planHash": "sha256:ea90647de15cbbd6bfb154fa3d3a57bb2e8ba38ce90828ba9d8cfade66601856"
+      },
+      "provenance": { "kind": "human_entry", "confidence": 1 },
+      "humanPinned": true
+    }
+  ]
+}

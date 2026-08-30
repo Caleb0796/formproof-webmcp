@@ -11,6 +11,7 @@ import {
   Fingerprint,
   LoaderCircle,
   LockKeyhole,
+  Pencil,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -36,8 +37,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from '@/components/ui/native-select';
 import {
   approveDraftFromUi,
+  correctDraftFieldFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
   discardDraftFields,
@@ -49,6 +56,7 @@ import {
   stageFieldUpdates,
   validateDraft,
   type FieldUpdate,
+  type FormFieldDefinition,
   type FormFieldValue,
   type FormState,
   type FillPackageResult,
@@ -308,6 +316,132 @@ function exportStrategyCopy(strategy: PdfExportStrategy): {
   }
 }
 
+interface HumanCorrectionEditorProps {
+  field: Readonly<FormFieldDefinition>;
+  choices: readonly { value: string; label: string }[];
+  initialValue: FormFieldValue;
+  disabled: boolean;
+  onCancel: () => void;
+  onSave: (value: FormFieldValue) => void;
+}
+
+function HumanCorrectionEditor({
+  field,
+  choices,
+  initialValue,
+  disabled,
+  onCancel,
+  onSave,
+}: HumanCorrectionEditorProps) {
+  const [value, setValue] = useState<FormFieldValue>(() =>
+    Array.isArray(initialValue) ? [...initialValue] : initialValue,
+  );
+  const labels = new Map(choices.map((choice) => [choice.value, choice.label]));
+  const inputId = 'human-correction-value';
+  const allowsMultiple =
+    (field.type === 'dropdown' || field.type === 'option-list') &&
+    (field.multiSelect ?? field.type === 'option-list');
+
+  return (
+    <div className="grid gap-2 rounded-lg border border-emerald-200 bg-white p-3">
+      <label className="text-xs font-medium" htmlFor={inputId}>
+        Corrected value
+      </label>
+      {field.type === 'text' ? (
+        <Input
+          id={inputId}
+          value={typeof value === 'string' ? value : ''}
+          maxLength={field.maxLength}
+          onChange={(event) => setValue(event.target.value)}
+          disabled={disabled}
+        />
+      ) : field.type === 'checkbox' ? (
+        <NativeSelect
+          id={inputId}
+          className="w-full"
+          value={value === true ? 'true' : 'false'}
+          onChange={(event) => setValue(event.target.value === 'true')}
+          disabled={disabled}
+        >
+          <NativeSelectOption value="true">Yes</NativeSelectOption>
+          <NativeSelectOption value="false">No</NativeSelectOption>
+        </NativeSelect>
+      ) : allowsMultiple ? (
+        <>
+          <select
+            id={inputId}
+            className="border-input focus-visible:border-ring focus-visible:ring-ring/50 min-h-24 w-full rounded-lg border bg-transparent p-2 text-sm outline-none focus-visible:ring-3"
+            multiple
+            value={Array.isArray(value) ? [...value] : []}
+            onChange={(event) =>
+              setValue(
+                Array.from(event.target.selectedOptions, ({ value }) => value),
+              )
+            }
+            disabled={disabled}
+          >
+            {(field.options ?? []).map((option) => (
+              <option key={option} value={option}>
+                {labels.get(option) ?? option}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="button"
+            className="justify-self-start"
+            variant="ghost"
+            size="xs"
+            onClick={() => setValue([])}
+            disabled={disabled}
+          >
+            Clear selection
+          </Button>
+        </>
+      ) : (
+        <NativeSelect
+          id={inputId}
+          className="w-full"
+          value={typeof value === 'string' ? value : ''}
+          onChange={(event) =>
+            setValue(event.target.value === '' ? null : event.target.value)
+          }
+          disabled={disabled}
+        >
+          <NativeSelectOption value="">Blank</NativeSelectOption>
+          {(field.options ?? []).map((option) => (
+            <NativeSelectOption key={option} value={option}>
+              {labels.get(option) ?? option}
+            </NativeSelectOption>
+          ))}
+        </NativeSelect>
+      )}
+      <p className="text-muted-foreground text-[10px] leading-relaxed">
+        Saving makes this a session-scoped human correction. Agent tools cannot
+        replace it unless you later remove the correction in this UI.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size="xs"
+          onClick={() => onSave(value)}
+          disabled={disabled}
+        >
+          Save human correction
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          onClick={onCancel}
+          disabled={disabled}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function FormProofWorkbench() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stateRef = useRef<FormState | null>(null);
@@ -349,6 +483,9 @@ export function FormProofWorkbench() {
   const [exporting, setExporting] = useState(false);
   const [reviewMutating, setReviewMutating] = useState(false);
   const [discardAllArmed, setDiscardAllArmed] = useState(false);
+  const [correctionFieldName, setCorrectionFieldName] = useState<string | null>(
+    null,
+  );
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toolState, setToolState] = useState<ToolState>({
@@ -374,6 +511,7 @@ export function FormProofWorkbench() {
       setProtectionLossAcknowledged(false);
       setSelectedExportStrategy(null);
       setDiscardAllArmed(false);
+      setCorrectionFieldName(null);
     }
     stateRef.current = next;
     setFormState(next);
@@ -389,6 +527,7 @@ export function FormProofWorkbench() {
     setProtectionLossAcknowledged(false);
     setSelectedExportStrategy(null);
     setDiscardAllArmed(false);
+    setCorrectionFieldName(null);
   }, []);
 
   const openReview = useCallback(() => {
@@ -431,6 +570,7 @@ export function FormProofWorkbench() {
     setProtectionLossAcknowledged(false);
     setSelectedExportStrategy(strategy);
     setDiscardAllArmed(false);
+    setCorrectionFieldName(null);
     setError(null);
     setReviewOpen(true);
     return true;
@@ -461,6 +601,7 @@ export function FormProofWorkbench() {
     setProtectionLossAcknowledged(false);
     setSelectedExportStrategy(null);
     setDiscardAllArmed(false);
+    setCorrectionFieldName(null);
     setError(null);
     setNotice(null);
     return generation;
@@ -627,7 +768,10 @@ export function FormProofWorkbench() {
         if (input.cursor !== undefined) {
           const cursor = parseFormContextCursor(
             input.cursor,
-            current.source.sourceHash,
+            {
+              sourceHash: current.source.sourceHash,
+              stateVersion: current.stateVersion,
+            },
             input,
           );
           if (!cursor.ok) {
@@ -636,7 +780,9 @@ export function FormProofWorkbench() {
               cursor.code,
               cursor.code === 'source_mismatch'
                 ? 'The field cursor belongs to a different PDF.'
-                : 'The field cursor is invalid.',
+                : cursor.code === 'stale_state'
+                  ? 'The field cursor expired because the form state changed. Refresh context from the first page.'
+                  : 'The field cursor is invalid.',
             );
           }
           offset = cursor.offset;
@@ -1129,8 +1275,78 @@ export function FormProofWorkbench() {
     (!requiresActiveContentAcknowledgment || activeContentAcknowledged) &&
     (!requiresProtectionLossAcknowledgment || protectionLossAcknowledged);
 
+  const correctProposal = useCallback(
+    async (fieldName: string, value: FormFieldValue) => {
+      if (exportingRef.current || reviewMutationRef.current) return;
+      const current = stateRef.current;
+      const binding = reviewBindingRef.current;
+      if (
+        !current ||
+        !binding ||
+        !reviewLockRef.current ||
+        binding.sourceHash !== current.source.sourceHash ||
+        binding.planHash !== current.planHash ||
+        binding.stateVersion !== current.stateVersion
+      ) {
+        setError(
+          'The fill plan changed. Reopen review before correcting a proposal.',
+        );
+        return;
+      }
+
+      reviewMutationRef.current = true;
+      pendingPlanMutationsRef.current += 1;
+      setReviewMutating(true);
+      setError(null);
+      try {
+        const result = await correctDraftFieldFromUi(current, {
+          expectedStateVersion: current.stateVersion,
+          expectedSourceHash: current.source.sourceHash,
+          expectedPlanHash: current.planHash,
+          fieldName,
+          value,
+        });
+        if (
+          !mountedRef.current ||
+          stateRef.current !== current ||
+          !reviewLockRef.current ||
+          reviewBindingRef.current !== binding ||
+          loadingRef.current
+        ) {
+          return;
+        }
+        if (!result.ok) {
+          setError(result.errors.map((item) => item.message).join(' '));
+          return;
+        }
+
+        const fieldLabel = current.fields[fieldName]?.label ?? fieldName;
+        commitState(result.state);
+        resetOutput();
+        setNotice(
+          `${fieldLabel} was corrected by you and is locked against agent changes for this loaded document session. The plan changed, review closed, and every confirmation was cleared. The source PDF remains untouched.`,
+        );
+      } catch (caught) {
+        if (!mountedRef.current) return;
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : 'The staged proposal could not be corrected.',
+        );
+      } finally {
+        pendingPlanMutationsRef.current -= 1;
+        reviewMutationRef.current = false;
+        if (mountedRef.current) setReviewMutating(false);
+      }
+    },
+    [commitState, resetOutput],
+  );
+
   const rejectProposals = useCallback(
-    async (fieldNames: readonly string[]) => {
+    async (
+      fieldNames: readonly string[],
+      intent: 'reject' | 'unlock' | 'discard_all' = 'reject',
+    ) => {
       if (exportingRef.current || reviewMutationRef.current) return;
       const current = stateRef.current;
       const binding = reviewBindingRef.current;
@@ -1146,6 +1362,15 @@ export function FormProofWorkbench() {
         setError(
           'The fill plan changed. Reopen review before rejecting a proposal.',
         );
+        return;
+      }
+      if (
+        intent === 'unlock' &&
+        fieldNames.some(
+          (fieldName) => current.draft[fieldName]?.actor !== 'human',
+        )
+      ) {
+        setError('Only a human correction can be unlocked in this UI.');
         return;
       }
 
@@ -1180,7 +1405,7 @@ export function FormProofWorkbench() {
         commitState(result.state);
         resetOutput();
         setNotice(
-          `${discardedAll ? `All ${fieldNames.length} proposals discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared.`,
+          `${intent === 'unlock' ? `${fieldLabel} human correction removed; its original PDF value is restored and the agent may propose it again.` : discardedAll || intent === 'discard_all' ? `All ${fieldNames.length} staged values discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared.`,
         );
       } catch (caught) {
         if (!mountedRef.current) return;
@@ -1200,6 +1425,10 @@ export function FormProofWorkbench() {
 
   const completeReview = useCallback(async () => {
     if (exportingRef.current || reviewMutationRef.current) return;
+    if (correctionFieldName !== null) {
+      setError('Save or cancel the open field correction before approval.');
+      return;
+    }
     const current = stateRef.current;
     const source = sourceBytesRef.current;
     const inspection = inspectionRef.current;
@@ -1225,6 +1454,7 @@ export function FormProofWorkbench() {
       setActiveContentAcknowledged(false);
       setProtectionLossAcknowledged(false);
       setSelectedExportStrategy(null);
+      setCorrectionFieldName(null);
       return;
     }
 
@@ -1334,6 +1564,7 @@ export function FormProofWorkbench() {
       setActiveContentAcknowledged(false);
       setProtectionLossAcknowledged(false);
       setSelectedExportStrategy(null);
+      setCorrectionFieldName(null);
     } catch (caught) {
       if (!mountedRef.current) return;
       setError(
@@ -1348,6 +1579,7 @@ export function FormProofWorkbench() {
   }, [
     allReviewFieldsConfirmed,
     commitState,
+    correctionFieldName,
     protectionLossAcknowledged,
     reviewNames,
     selectedExportStrategy,
@@ -1833,7 +2065,9 @@ export function FormProofWorkbench() {
                     <div className="draft-card-heading">
                       <strong>{field?.label ?? entry.fieldName}</strong>
                       <Badge variant="outline">
-                        {Math.round(entry.provenance.confidence * 100)}%
+                        {entry.actor === 'human'
+                          ? 'Human locked'
+                          : `${Math.round(entry.provenance.confidence * 100)}%`}
                       </Badge>
                     </div>
                     <div className="mini-diff">
@@ -1846,7 +2080,11 @@ export function FormProofWorkbench() {
                       <ArrowRight aria-hidden="true" />
                       <b>{formatValue(entry.value, descriptor?.choices)}</b>
                     </div>
-                    <small>{entry.provenance.kind.replaceAll('_', ' ')}</small>
+                    <small>
+                      {entry.actor === 'human'
+                        ? 'human correction · agent locked for this session'
+                        : entry.provenance.kind.replaceAll('_', ' ')}
+                    </small>
                     {entry.provenance.evidence && (
                       <ul className="evidence-list compact-evidence">
                         {entry.provenance.evidence.slice(0, 2).map((item) => (
@@ -2081,8 +2319,8 @@ export function FormProofWorkbench() {
             <p className="section-kicker">UI approval and export gate</p>
             <DialogTitle>Review the exact plan</DialogTitle>
             <DialogDescription>
-              Confirm or reject every proposed change, then confirm any
-              human-only field. Approval is bound to this source hash, plan
+              Confirm, correct, or reject every proposed change, then confirm
+              any human-only field. Approval is bound to this source hash, plan
               hash, and revision; any later change invalidates it.
             </DialogDescription>
           </DialogHeader>
@@ -2163,6 +2401,13 @@ export function FormProofWorkbench() {
               const descriptor = descriptorByName.get(fieldName);
               const checkboxId = `review-field-${index}`;
               const isHumanCompletion = !staged;
+              const isHumanPinned = staged?.actor === 'human';
+              const canCorrect =
+                staged?.actor === 'agent' &&
+                field !== undefined &&
+                !field.readOnly &&
+                !field.humanOnly &&
+                field.type !== 'signature';
               const sourceIsBlank = isBlankValue(field?.sourceValue ?? null);
               const requiresHumanCompletion =
                 formState?.validation.issues.some(
@@ -2198,13 +2443,15 @@ export function FormProofWorkbench() {
                         <strong>{field?.label ?? fieldName}</strong>
                       </label>
                       <Badge variant="outline">
-                        {isRequiredMissing
-                          ? 'Required field is blank'
-                          : isHumanCompletion
-                            ? requiresHumanCompletion
-                              ? 'Complete after export'
-                              : 'Preserved unchanged'
-                            : staged.provenance.kind.replaceAll('_', ' ')}
+                        {isHumanPinned
+                          ? 'Human correction · agent locked'
+                          : isRequiredMissing
+                            ? 'Required field is blank'
+                            : isHumanCompletion
+                              ? requiresHumanCompletion
+                                ? 'Complete after export'
+                                : 'Preserved unchanged'
+                              : staged.provenance.kind.replaceAll('_', ' ')}
                       </Badge>
                     </span>
                     {isHumanCompletion ? (
@@ -2255,18 +2502,63 @@ export function FormProofWorkbench() {
                         </ul>
                       </div>
                     )}
-                    {staged && (
+                    {correctionFieldName === fieldName &&
+                    canCorrect &&
+                    field ? (
+                      <HumanCorrectionEditor
+                        field={field}
+                        choices={descriptor?.choices ?? []}
+                        initialValue={staged.value}
+                        disabled={exporting || reviewMutating}
+                        onCancel={() => setCorrectionFieldName(null)}
+                        onSave={(value) =>
+                          void correctProposal(fieldName, value)
+                        }
+                      />
+                    ) : staged?.actor === 'human' ? (
                       <Button
                         type="button"
                         className="self-start"
                         variant="destructive"
                         size="xs"
-                        onClick={() => void rejectProposals([fieldName])}
+                        onClick={() =>
+                          void rejectProposals([fieldName], 'unlock')
+                        }
                         disabled={exporting || reviewMutating}
                       >
-                        Reject proposal
+                        Remove correction &amp; let agent suggest
                       </Button>
-                    )}
+                    ) : staged ? (
+                      <div className="flex flex-wrap gap-2">
+                        {canCorrect && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="xs"
+                            onClick={() => {
+                              setCorrectionFieldName(fieldName);
+                              setConfirmedFields((current) => {
+                                const next = new Set(current);
+                                next.delete(fieldName);
+                                return next;
+                              });
+                            }}
+                            disabled={exporting || reviewMutating}
+                          >
+                            <Pencil aria-hidden="true" /> Correct value
+                          </Button>
+                        )}
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="xs"
+                          onClick={() => void rejectProposals([fieldName])}
+                          disabled={exporting || reviewMutating}
+                        >
+                          Reject proposal
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -2350,7 +2642,7 @@ export function FormProofWorkbench() {
               onClick={() => {
                 const fieldNames = Object.keys(formState?.draft ?? {});
                 if (discardAllArmed) {
-                  void rejectProposals(fieldNames);
+                  void rejectProposals(fieldNames, 'discard_all');
                 } else {
                   setDiscardAllArmed(true);
                 }
@@ -2363,8 +2655,8 @@ export function FormProofWorkbench() {
             >
               <Trash2 aria-hidden="true" />{' '}
               {discardAllArmed
-                ? `Confirm discard ${Object.keys(formState?.draft ?? {}).length} proposals`
-                : 'Discard all proposals'}
+                ? `Confirm discard ${Object.keys(formState?.draft ?? {}).length} staged values`
+                : 'Discard all staged values'}
             </Button>
             <Button
               variant="outline"
@@ -2379,6 +2671,7 @@ export function FormProofWorkbench() {
                 !allReviewFieldsConfirmed ||
                 exporting ||
                 reviewMutating ||
+                correctionFieldName !== null ||
                 selectedExportStrategy === null ||
                 (selectedCreatesPdf &&
                   (!validation?.canApprove || hasBlockedHighRiskActions))

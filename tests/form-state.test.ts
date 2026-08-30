@@ -13,6 +13,7 @@ import {
 
 import {
   approveDraftFromUi,
+  correctDraftFieldFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
   discardDraft,
@@ -805,6 +806,276 @@ void test('discarding a staged proposal invalidates approval and released output
   assert.equal(discarded.state.output, null);
   assert.equal(discarded.state.verification, null);
   assert.equal(getReleaseGate(discarded.state).open, false);
+});
+
+void test('pins UI corrections as exact human-authored proposals and clears released workflow state', async () => {
+  const source = await createTextFormPdf('legal_name');
+  const inspection = await inspectPdf(source);
+  const initial = await createFormState(
+    {
+      fileName: 'corrected-identity.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    [
+      {
+        name: 'legal_name',
+        label: 'Legal name',
+        type: 'text',
+        required: true,
+        readOnly: false,
+        humanOnly: false,
+        sourceValue: '',
+      },
+    ],
+  );
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'legal_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('correction fixture failed to stage');
+  const approved = approveDraftFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    approvedBy: 'local user',
+    confirmedFieldNames: ['legal_name'],
+  });
+  assert.equal(approved.ok, true);
+  if (!approved.ok) throw new Error('correction fixture approval failed');
+  const released = await exportApprovedPdfFromUi(approved.state, source);
+  assert.equal(released.ok, true);
+  if (!released.ok) throw new Error('correction fixture export failed');
+  assert.notEqual(released.state.approval, null);
+  assert.notEqual(released.state.output, null);
+  assert.notEqual(released.state.verification, null);
+
+  const corrected = await correctDraftFieldFromUi(released.state, {
+    expectedStateVersion: released.state.stateVersion,
+    expectedSourceHash: released.state.source.sourceHash,
+    expectedPlanHash: released.state.planHash,
+    fieldName: 'legal_name',
+    value: 'Grace Hopper',
+  });
+  assert.equal(corrected.ok, true);
+  if (!corrected.ok) throw new Error('human correction failed');
+  assert.equal(corrected.state.stateVersion, released.state.stateVersion + 1);
+  assert.notEqual(corrected.state.planHash, released.state.planHash);
+  assert.deepEqual(corrected.changedFields, ['legal_name']);
+  assert.deepEqual(corrected.state.draft.legal_name, {
+    fieldName: 'legal_name',
+    value: 'Grace Hopper',
+    actor: 'human',
+    provenance: { kind: 'human_entry', confidence: 1 },
+  });
+  assert.equal(corrected.state.approval, null);
+  assert.equal(corrected.state.output, null);
+  assert.equal(corrected.state.verification, null);
+  assert.equal(Object.isFrozen(corrected.state.draft.legal_name), true);
+});
+
+void test('rejects stale or ineligible UI corrections without changing the draft', async () => {
+  const initial = await initialState();
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'full_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('correction rejection fixture failed');
+  const state = staged.state;
+
+  const cases = [
+    {
+      request: {
+        expectedStateVersion: state.stateVersion - 1,
+        expectedSourceHash: 'sha256:other',
+        expectedPlanHash: 'sha256:other-plan',
+        fieldName: 'full_name',
+        value: 'Grace Hopper',
+      },
+      codes: ['stale_state', 'source_mismatch', 'plan_mismatch'],
+    },
+    {
+      request: {
+        expectedStateVersion: state.stateVersion,
+        expectedSourceHash: state.source.sourceHash,
+        expectedPlanHash: state.planHash,
+        fieldName: 'missing',
+        value: 'Grace Hopper',
+      },
+      codes: ['unknown_field', 'invalid_request'],
+    },
+    {
+      request: {
+        expectedStateVersion: state.stateVersion,
+        expectedSourceHash: state.source.sourceHash,
+        expectedPlanHash: state.planHash,
+        fieldName: 'region',
+        value: 'NY',
+      },
+      codes: ['invalid_request'],
+    },
+    {
+      request: {
+        expectedStateVersion: state.stateVersion,
+        expectedSourceHash: state.source.sourceHash,
+        expectedPlanHash: state.planHash,
+        fieldName: 'case_id',
+        value: 'B-200',
+      },
+      codes: ['read_only', 'invalid_request'],
+    },
+    {
+      request: {
+        expectedStateVersion: state.stateVersion,
+        expectedSourceHash: state.source.sourceHash,
+        expectedPlanHash: state.planHash,
+        fieldName: 'attestation',
+        value: true,
+      },
+      codes: ['human_only', 'invalid_request'],
+    },
+    {
+      request: {
+        expectedStateVersion: state.stateVersion,
+        expectedSourceHash: state.source.sourceHash,
+        expectedPlanHash: state.planHash,
+        fieldName: 'signature',
+        value: null,
+      },
+      codes: ['human_only', 'signature_locked', 'invalid_request'],
+    },
+  ] as const;
+
+  for (const { request, codes } of cases) {
+    const result = await correctDraftFieldFromUi(state, request);
+    assert.equal(result.ok, false, request.fieldName);
+    if (result.ok) throw new Error('ineligible correction succeeded');
+    assert.equal(result.state, state, request.fieldName);
+    const actualCodes = new Set(result.errors.map(({ code }) => code));
+    for (const code of codes) {
+      assert.equal(
+        actualCodes.has(code),
+        true,
+        `${request.fieldName}: ${code}`,
+      );
+    }
+  }
+});
+
+void test('atomically blocks every agent batch that touches a human pin until discard', async () => {
+  const initial = await initialState();
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'full_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('human pin fixture failed to stage');
+  const corrected = await correctDraftFieldFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    fieldName: 'full_name',
+    value: 'Ada Lovelace',
+  });
+  assert.equal(corrected.ok, true);
+  if (!corrected.ok) throw new Error('same-value human correction failed');
+  assert.equal(corrected.state.draft.full_name.actor, 'human');
+  assert.equal(corrected.state.stateVersion, staged.state.stateVersion + 1);
+
+  const recorrection = await correctDraftFieldFromUi(corrected.state, {
+    expectedStateVersion: corrected.state.stateVersion,
+    expectedSourceHash: corrected.state.source.sourceHash,
+    expectedPlanHash: corrected.state.planHash,
+    fieldName: 'full_name',
+    value: 'Grace Hopper',
+  });
+  assert.equal(recorrection.ok, false);
+  if (recorrection.ok) throw new Error('human pin was corrected in place');
+  assert.equal(recorrection.state, corrected.state);
+  assert.deepEqual(
+    recorrection.errors.map(({ code }) => code),
+    ['invalid_request'],
+  );
+
+  const blocked = await stageFieldUpdates(corrected.state, {
+    expectedStateVersion: corrected.state.stateVersion,
+    expectedSourceHash: corrected.state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'region',
+        value: 'NY',
+        provenance: USER_PROVENANCE,
+      },
+      {
+        fieldName: 'full_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(blocked.ok, false);
+  if (blocked.ok) throw new Error('agent overwrote a human pin');
+  assert.equal(blocked.state, corrected.state);
+  assert.deepEqual(
+    blocked.errors.map(({ code, fieldName }) => ({ code, fieldName })),
+    [{ code: 'human_pinned', fieldName: 'full_name' }],
+  );
+  assert.equal(blocked.state.draft.region, undefined);
+
+  const discarded = await discardDraftFields(corrected.state, {
+    expectedStateVersion: corrected.state.stateVersion,
+    expectedSourceHash: corrected.state.source.sourceHash,
+    fieldNames: ['full_name'],
+  });
+  assert.equal(discarded.ok, true);
+  if (!discarded.ok) throw new Error('human pin discard failed');
+  assert.equal(discarded.state.draft.full_name, undefined);
+
+  const reproposed = await stageFieldUpdates(discarded.state, {
+    expectedStateVersion: discarded.state.stateVersion,
+    expectedSourceHash: discarded.state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'full_name',
+        value: 'Grace Hopper',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(reproposed.ok, true);
+  if (!reproposed.ok)
+    throw new Error('agent could not repropose after discard');
+  assert.equal(reproposed.state.draft.full_name.actor, 'agent');
+  assert.equal(reproposed.state.draft.full_name.value, 'Grace Hopper');
 });
 
 void test('rejects duplicate, unknown, read-only, human-only, signature, type, and provenance violations', async () => {

@@ -4,12 +4,14 @@ import test from 'node:test';
 
 import {
   approveDraftFromUi,
+  correctDraftFieldFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
   exportApprovedPdfFromUi,
   getReleaseGate,
   stageFieldUpdates,
   validateDraft,
+  type FieldUpdate,
   type FormFieldValue,
   type FormState,
   // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
@@ -84,7 +86,136 @@ interface AuthoredEvalCall {
 
 interface AuthoredEvalCase {
   name: string;
+  messages: AuthoredEvalMessage[];
   expectedCall: AuthoredEvalCall[];
+}
+
+interface AuthoredEvalMessage {
+  role?: string;
+  type: string;
+  name?: string;
+  content?: string;
+  arguments?: {
+    expectedStateVersion?: number;
+    expectedSourceHash?: string;
+    updates?: FieldUpdate[];
+  };
+  response?: Record<string, unknown>;
+}
+
+interface AuthoredLocalTransition {
+  caseName: string;
+  trigger: {
+    messageIndex: number;
+    role: 'user';
+    type: 'message';
+    content: string;
+  };
+  actor: 'human';
+  source: 'human_ui';
+  event: 'correct_draft_field';
+  fieldName: string;
+  value: FormFieldValue;
+  from: { stateVersion: number; sourceHash: string; planHash: string };
+  to: { stateVersion: number; sourceHash: string; planHash: string };
+  provenance: { kind: 'human_entry'; confidence: 1 };
+  humanPinned: true;
+}
+
+interface AuthoredLocalTransitionFile {
+  schemaVersion: 1;
+  transitions: AuthoredLocalTransition[];
+}
+
+async function replayAuthoredJourneyHistory(
+  initialState: FormState,
+  evaluation: AuthoredEvalCase,
+  localTransition?: AuthoredLocalTransition,
+): Promise<FormState> {
+  let current = initialState;
+  let transitionApplied = false;
+  for (const [index, message] of evaluation.messages.entries()) {
+    const response = evaluation.messages[index + 1];
+    if (
+      message.type === 'functioncall' &&
+      message.name === 'stage_form_values' &&
+      response?.type === 'functionresponse' &&
+      response.name === message.name &&
+      response.response?.ok === true
+    ) {
+      const arguments_ = message.arguments;
+      if (
+        arguments_?.expectedStateVersion === undefined ||
+        arguments_.expectedSourceHash === undefined ||
+        arguments_.updates === undefined
+      ) {
+        assert.fail(`${evaluation.name} has an incomplete historical stage.`);
+      }
+      const staged = await stageFieldUpdates(current, {
+        expectedStateVersion: arguments_.expectedStateVersion,
+        expectedSourceHash: arguments_.expectedSourceHash,
+        actor: 'agent',
+        updates: arguments_.updates,
+      });
+      assert.equal(staged.ok, true, evaluation.name);
+      if (!staged.ok) throw new Error('Authored historical staging failed.');
+      current = staged.state;
+      assert.equal(response.response.stateVersion, current.stateVersion);
+      assert.equal(response.response.sourceHash, current.source.sourceHash);
+    }
+
+    if (localTransition?.trigger.messageIndex !== index) continue;
+    assert.equal(localTransition.caseName, evaluation.name);
+    assert.equal(localTransition.actor, 'human');
+    assert.equal(localTransition.source, 'human_ui');
+    assert.equal(localTransition.event, 'correct_draft_field');
+    assert.equal(localTransition.humanPinned, true);
+    assert.deepEqual(
+      {
+        role: message.role,
+        type: message.type,
+        content: message.content,
+      },
+      {
+        role: localTransition.trigger.role,
+        type: localTransition.trigger.type,
+        content: localTransition.trigger.content,
+      },
+    );
+    assert.deepEqual(localTransition.from, {
+      stateVersion: current.stateVersion,
+      sourceHash: current.source.sourceHash,
+      planHash: current.planHash,
+    });
+    const corrected = await correctDraftFieldFromUi(current, {
+      expectedStateVersion: current.stateVersion,
+      expectedSourceHash: current.source.sourceHash,
+      expectedPlanHash: current.planHash,
+      fieldName: localTransition.fieldName,
+      value: localTransition.value,
+    });
+    assert.equal(corrected.ok, true, evaluation.name);
+    if (!corrected.ok) throw new Error('Authored UI correction failed.');
+    current = corrected.state;
+    assert.deepEqual(localTransition.to, {
+      stateVersion: current.stateVersion,
+      sourceHash: current.source.sourceHash,
+      planHash: current.planHash,
+    });
+    assert.deepEqual(current.draft[localTransition.fieldName], {
+      fieldName: localTransition.fieldName,
+      value: localTransition.value,
+      actor: localTransition.actor,
+      provenance: localTransition.provenance,
+    });
+    transitionApplied = true;
+  }
+  assert.equal(
+    transitionApplied,
+    localTransition !== undefined,
+    evaluation.name,
+  );
+  return current;
 }
 
 function draftValues(state: FormState): Record<string, PdfFieldValue> {
@@ -289,7 +420,7 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   );
 });
 
-void test('gives the UI reviewer a way to reject staged proposals', async () => {
+void test('gives the UI reviewer scoped discard and correction controls', async () => {
   const workbench = await readFile(
     new URL('../components/formproof-workbench.tsx', import.meta.url),
     'utf8',
@@ -297,13 +428,60 @@ void test('gives the UI reviewer a way to reject staged proposals', async () => 
 
   assert.match(workbench, /discardDraftFields/);
   assert.match(workbench, /Reject proposal/u);
-  assert.match(workbench, /Discard all proposals/u);
-  assert.match(workbench, /Confirm discard.*proposals/u);
+  assert.match(workbench, /Discard all staged values/u);
+  assert.match(workbench, /Confirm discard.*staged values/u);
   assert.match(workbench, /if \(discardAllArmed\)/u);
   assert.match(
     workbench,
     /The plan changed, so review closed and every confirmation was cleared/u,
   );
+
+  const correctionStart = workbench.indexOf(
+    'const correctProposal = useCallback(',
+  );
+  const correctionEnd = workbench.indexOf(
+    'const rejectProposals = useCallback(',
+    correctionStart,
+  );
+  assert.ok(correctionStart >= 0 && correctionEnd > correctionStart);
+  const correctionHandler = workbench.slice(correctionStart, correctionEnd);
+  assert.match(
+    correctionHandler,
+    /await correctDraftFieldFromUi\(current, \{/u,
+  );
+  assert.match(correctionHandler, /expectedPlanHash:\s*current\.planHash/u);
+  assert.doesNotMatch(
+    correctionHandler,
+    /\b(?:stageFieldUpdates|discardDraftFields)\(/u,
+  );
+  assert.equal(workbench.match(/\bcorrectDraftFieldFromUi\(/gu)?.length, 1);
+  assert.match(
+    workbench,
+    /onSave=\{\(value\) =>\s*void correctProposal\(fieldName, value\)/u,
+  );
+  assert.match(workbench, /Correct value/u);
+  assert.match(workbench, /Save human correction/u);
+  assert.match(workbench, /Remove correction &amp; let agent suggest/u);
+  assert.match(workbench, /session-scoped human correction/u);
+  assert.match(
+    correctionHandler,
+    /The plan changed, review closed, and every confirmation was cleared\. The source PDF remains untouched\./u,
+  );
+
+  const commitStateStart = workbench.indexOf(
+    'const commitState = useCallback(',
+  );
+  const commitStateEnd = workbench.indexOf(
+    'const closeReview = useCallback(',
+    commitStateStart,
+  );
+  assert.ok(commitStateStart >= 0 && commitStateEnd > commitStateStart);
+  const commitState = workbench.slice(commitStateStart, commitStateEnd);
+  assert.match(correctionHandler, /commitState\(result\.state\)/u);
+  assert.match(commitState, /binding\.planHash !== next\.planHash/u);
+  assert.match(commitState, /setReviewOpen\(false\)/u);
+  assert.match(commitState, /setConfirmedFields\(new Set\(\)\)/u);
+
   assert.deepEqual(FORMPROOF_WEBMCP_TOOL_NAMES, [
     'get_pdf_protection',
     'get_form_context',
@@ -312,6 +490,12 @@ void test('gives the UI reviewer a way to reject staged proposals', async () => 
     'validate_fill_plan',
     'start_fill_review',
   ]);
+  assert.equal(
+    FORMPROOF_WEBMCP_TOOL_NAMES.some((name) =>
+      /unlock|correct|correction/iu.test(name),
+    ),
+    false,
+  );
 });
 
 void test('wires scoped context and artifact-specific review boundaries through the workbench adapter', async () => {
@@ -326,8 +510,10 @@ void test('wires scoped context and artifact-specific review boundaries through 
   const contextAdapter = workbench.slice(contextStart, contextEnd);
   assert.match(
     contextAdapter,
-    /parseFormContextCursor\(\s*input\.cursor,\s*current\.source\.sourceHash,\s*input,\s*\)/u,
+    /parseFormContextCursor\(\s*input\.cursor,\s*\{\s*sourceHash:\s*current\.source\.sourceHash,\s*stateVersion:\s*current\.stateVersion,\s*\},\s*input,\s*\)/u,
   );
+  assert.match(contextAdapter, /cursor\.code === 'stale_state'/u);
+  assert.match(contextAdapter, /form state changed.*first page/u);
   assert.match(
     contextAdapter,
     /createFormContextToolData\(\s*current,\s*inspection,\s*offset,\s*input\.limit,\s*input,\s*\)/u,
@@ -401,7 +587,10 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
           ? ({ ok: true, offset: 0 } as const)
           : parseFormContextCursor(
               input.cursor,
-              initialState.source.sourceHash,
+              {
+                sourceHash: initialState.source.sourceHash,
+                stateVersion: initialState.stateVersion,
+              },
               input,
             );
       if (!parsed.ok) {
@@ -713,16 +902,42 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
 
 void test('keeps journey read mocks aligned with the real demo projector', async () => {
   const { inspection, initialState } = await loadStagedDemo();
-  const evaluations = JSON.parse(
-    await readFile(
-      new URL('../evals/formproof-evals.json', import.meta.url),
-      'utf8',
-    ),
-  ) as AuthoredEvalCase[];
+  const [officialEvaluations, localEvaluations, localTransitionFile] =
+    await Promise.all([
+      readFile(
+        new URL('../evals/formproof-evals.json', import.meta.url),
+        'utf8',
+      ).then((value) => JSON.parse(value) as AuthoredEvalCase[]),
+      readFile(
+        new URL('../evals/formproof-local-evals.json', import.meta.url),
+        'utf8',
+      ).then((value) => JSON.parse(value) as AuthoredEvalCase[]),
+      readFile(
+        new URL('../evals/formproof-local-transitions.json', import.meta.url),
+        'utf8',
+      ).then((value) => JSON.parse(value) as AuthoredLocalTransitionFile),
+    ]);
+  const evaluations = [...officialEvaluations, ...localEvaluations];
+  const localTransitions = new Map(
+    localTransitionFile.transitions.map((transition) => [
+      transition.caseName,
+      transition,
+    ]),
+  );
+  const appliedLocalTransitions = new Set<string>();
 
   for (const evaluation of evaluations.filter(({ name }) =>
     name.startsWith('[journey]'),
   )) {
+    const localTransition = localTransitions.get(evaluation.name);
+    const journeyState = await replayAuthoredJourneyHistory(
+      initialState,
+      evaluation,
+      localTransition,
+    );
+    if (localTransition !== undefined) {
+      appliedLocalTransitions.add(evaluation.name);
+    }
     const contextCalls = evaluation.expectedCall.filter(
       ({ functionName }) => functionName === 'get_form_context',
     );
@@ -734,13 +949,16 @@ void test('keeps journey read mocks aligned with the real demo projector', async
           ? ({ ok: true, offset: 0 } as const)
           : parseFormContextCursor(
               cursor,
-              initialState.source.sourceHash,
+              {
+                sourceHash: journeyState.source.sourceHash,
+                stateVersion: journeyState.stateVersion,
+              },
               call.arguments,
             );
       assert.equal(parsed.ok, true, `${evaluation.name} has an invalid cursor`);
       if (!parsed.ok) throw new Error('Authored context cursor was invalid.');
       const actual = createFormContextToolData(
-        initialState,
+        journeyState,
         inspection,
         parsed.offset,
         call.arguments.limit ?? 6,
@@ -759,7 +977,7 @@ void test('keeps journey read mocks aligned with the real demo projector', async
       assert.deepEqual(
         call.mockOutput.data,
         createFieldEvidenceToolData(
-          initialState,
+          journeyState,
           inspection,
           call.arguments.fieldNames,
         ),
@@ -767,6 +985,10 @@ void test('keeps journey read mocks aligned with the real demo projector', async
       );
     }
   }
+  assert.deepEqual(
+    [...appliedLocalTransitions].sort(),
+    [...localTransitions.keys()].sort(),
+  );
 });
 
 void test('paginates long choice evidence without losing exact values', async () => {

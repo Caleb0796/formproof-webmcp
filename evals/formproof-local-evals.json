@@ -1,0 +1,342 @@
+[
+  {
+    "name": "[journey] Honor a human UI correction before review",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "At state 0 for source a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474, stage the values I supplied: Avery Chen in frm.q7f1, avery@example.test in frm.p0x4, true in frm.c8v3, and rent in frm.r4d6. Then validate and open review. If I correct a proposal in the UI while you are working, refresh the changed state, inspect the human-pinned evidence, and preserve my correction without staging over it."
+      },
+      {
+        "role": "model",
+        "type": "functioncall",
+        "name": "stage_form_values",
+        "arguments": {
+          "expectedStateVersion": 0,
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "updates": [
+            {
+              "fieldName": "frm.q7f1",
+              "value": "Avery Chen",
+              "provenance": {
+                "kind": "user_instruction",
+                "confidence": 1,
+                "evidence": [
+                  "The user explicitly gave the legal name Avery Chen."
+                ]
+              }
+            },
+            {
+              "fieldName": "frm.p0x4",
+              "value": "avery@example.test",
+              "provenance": {
+                "kind": "user_instruction",
+                "confidence": 1,
+                "evidence": [
+                  "The user explicitly gave avery@example.test as their email."
+                ]
+              }
+            },
+            {
+              "fieldName": "frm.c8v3",
+              "value": true,
+              "provenance": {
+                "kind": "user_instruction",
+                "confidence": 1,
+                "evidence": ["The user explicitly consented to contact."]
+              }
+            },
+            {
+              "fieldName": "frm.r4d6",
+              "value": "rent",
+              "provenance": {
+                "kind": "user_instruction",
+                "confidence": 1,
+                "evidence": [
+                  "The user explicitly said their housing arrangement is rent."
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "role": "user",
+        "type": "functionresponse",
+        "name": "stage_form_values",
+        "response": {
+          "ok": true,
+          "stateVersion": 1,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "validate_fill_plan",
+          "data": {
+            "changedFields": ["frm.c8v3", "frm.p0x4", "frm.q7f1", "frm.r4d6"],
+            "planHash": "sha256:53e5a485379db12658e57d298eaee262fb4127e7bde20d4c100fae658c7523a1",
+            "validation": {
+              "stateVersion": 1,
+              "issues": [
+                {
+                  "code": "human_completion_required",
+                  "severity": "review",
+                  "fieldName": "frm.z5a7",
+                  "message": "Applicant signature must be completed by a human after export."
+                }
+              ],
+              "blockerCount": 0,
+              "reviewCount": 1,
+              "reviewFieldNames": ["frm.z5a7"],
+              "structurallyValid": true,
+              "completionStatus": "incomplete",
+              "ruleCoverage": "pdf_required_flags_only",
+              "formCompletenessAssessed": false,
+              "canApprove": true
+            },
+            "pdfModified": false
+          },
+          "outputTruncated": false
+        }
+      },
+      {
+        "role": "user",
+        "type": "message",
+        "content": "I corrected frm.q7f1 in the FormProof UI from Avery Chen to Grace Hopper. This was a human UI edit, not a WebMCP tool action. Refresh after the resulting state conflict, inspect the pinned evidence, and do not stage over my correction."
+      },
+      {
+        "role": "model",
+        "type": "functioncall",
+        "name": "validate_fill_plan",
+        "arguments": {
+          "expectedStateVersion": 1,
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+        }
+      },
+      {
+        "role": "user",
+        "type": "functionresponse",
+        "name": "validate_fill_plan",
+        "response": {
+          "ok": false,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "refresh_form_context",
+          "error": {
+            "code": "STATE_VERSION_CONFLICT",
+            "message": "The form changed after the referenced state version."
+          },
+          "outputTruncated": false
+        }
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "get_form_context",
+        "arguments": { "queries": ["legal name"], "limit": 1 },
+        "result": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "get_field_evidence",
+          "data": {
+            "humanCorrections": {
+              "count": 1,
+              "fieldNames": ["frm.q7f1"],
+              "agentMayOverwrite": false,
+              "removal": "human_ui_only",
+              "sessionScoped": true
+            },
+            "fields": [{ "name": "frm.q7f1", "humanPinned": true }]
+          }
+        },
+        "mockOutput": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "get_field_evidence",
+          "data": {
+            "document": {
+              "fileName": "residential-support-intake.pdf",
+              "pageCount": 2,
+              "fieldCount": 11
+            },
+            "validation": {
+              "blockerCount": 0,
+              "reviewCount": 1,
+              "structurallyValid": true,
+              "completionStatus": "incomplete",
+              "ruleCoverage": "pdf_required_flags_only",
+              "formCompletenessAssessed": false
+            },
+            "safety": {
+              "approvalBoundary": "ui_approval_only",
+              "pdfJavaScriptExecuted": false,
+              "activeContent": {
+                "javascriptActionCount": 0,
+                "additionalActionDictionaryCount": 0,
+                "openActionCount": 0,
+                "externalActionCount": 0,
+                "highRiskActionCount": 0,
+                "otherActionCount": 0
+              },
+              "warningCount": 2,
+              "warningCounts": {
+                "APPEARANCE_UNAVAILABLE": 1,
+                "SIGNATURE_FIELD_HUMAN_ONLY": 1
+              }
+            },
+            "search": {
+              "matchMethod": "lexical",
+              "queries": [{ "query": "legal name", "matchCount": 1 }]
+            },
+            "humanCorrections": {
+              "count": 1,
+              "fieldNames": ["frm.q7f1"],
+              "agentMayOverwrite": false,
+              "removal": "human_ui_only",
+              "sessionScoped": true
+            },
+            "pagination": { "returned": 1, "total": 1, "nextCursor": null },
+            "untrustedPdfContent": true,
+            "fields": [
+              {
+                "name": "frm.q7f1",
+                "label": "Legal name",
+                "type": "text",
+                "humanPinned": true,
+                "matchedQueries": ["legal name"]
+              }
+            ]
+          },
+          "outputTruncated": false
+        }
+      },
+      {
+        "functionName": "get_field_evidence",
+        "arguments": {
+          "expectedStateVersion": 2,
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "fieldNames": ["frm.q7f1"]
+        },
+        "result": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "stage_form_values",
+          "data": {
+            "fields": [
+              {
+                "name": "frm.q7f1",
+                "effectiveValue": "Grace Hopper",
+                "provenance": { "kind": "human_entry", "confidence": 1 },
+                "humanPinned": true
+              }
+            ]
+          }
+        },
+        "mockOutput": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "stage_form_values",
+          "data": {
+            "untrustedPdfContent": true,
+            "fields": [
+              {
+                "name": "frm.q7f1",
+                "label": "Legal name",
+                "labelSource": "acroform_tooltip",
+                "effectiveValue": "Grace Hopper",
+                "provenance": { "kind": "human_entry", "confidence": 1 },
+                "humanPinned": true,
+                "page": 1,
+                "rect": { "x": 52, "y": 560, "width": 508, "height": 30 },
+                "constraints": {
+                  "type": "text",
+                  "required": true,
+                  "readOnly": false,
+                  "humanOnly": false,
+                  "maxLength": 64,
+                  "choices": [],
+                  "multiSelect": false
+                },
+                "untrustedPdfContent": true
+              }
+            ]
+          },
+          "outputTruncated": false
+        }
+      },
+      {
+        "functionName": "validate_fill_plan",
+        "arguments": {
+          "expectedStateVersion": 2,
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+        },
+        "result": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "start_fill_review",
+          "data": { "readyForReview": true, "stagedFieldCount": 4 }
+        },
+        "mockOutput": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "start_fill_review",
+          "data": {
+            "readyForReview": true,
+            "reviewArtifacts": ["filled_pdf", "fill_package"],
+            "exportStrategySelection": "human_ui_only",
+            "stagedFieldCount": 4,
+            "stateVersion": 2,
+            "blockerCount": 0,
+            "reviewCount": 1,
+            "reviewFieldNames": ["frm.z5a7"],
+            "structurallyValid": true,
+            "completionStatus": "incomplete",
+            "ruleCoverage": "pdf_required_flags_only",
+            "formCompletenessAssessed": false,
+            "canApprove": true,
+            "issues": [
+              {
+                "code": "human_completion_required",
+                "severity": "review",
+                "fieldName": "frm.z5a7",
+                "message": "Applicant signature must be completed by a human after export."
+              }
+            ]
+          },
+          "outputTruncated": false
+        }
+      },
+      {
+        "functionName": "start_fill_review",
+        "arguments": {
+          "expectedStateVersion": 2,
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+        },
+        "result": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "human_review_required",
+          "data": { "reviewOpened": true, "humanActionRequired": true }
+        },
+        "mockOutput": {
+          "ok": true,
+          "stateVersion": 2,
+          "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "nextAction": "human_review_required",
+          "data": {
+            "reviewOpened": true,
+            "planHash": "sha256:ea90647de15cbbd6bfb154fa3d3a57bb2e8ba38ce90828ba9d8cfade66601856",
+            "humanActionRequired": true,
+            "reviewArtifacts": ["filled_pdf", "fill_package"],
+            "exportStrategySelection": "human_ui_only"
+          },
+          "outputTruncated": false
+        }
+      }
+    ]
+  }
+]

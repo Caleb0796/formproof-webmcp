@@ -233,6 +233,7 @@ export type StateErrorCode =
   | 'unknown_field'
   | 'read_only'
   | 'human_only'
+  | 'human_pinned'
   | 'signature_locked'
   | 'invalid_type'
   | 'invalid_option'
@@ -260,6 +261,14 @@ export interface StageFieldUpdatesRequest {
   readonly expectedSourceHash: string;
   readonly actor: UpdateActor;
   readonly updates: readonly FieldUpdate[];
+}
+
+export interface CorrectDraftFieldRequest {
+  readonly expectedStateVersion: number;
+  readonly expectedSourceHash: string;
+  readonly expectedPlanHash: string;
+  readonly fieldName: string;
+  readonly value: FormFieldValue;
 }
 
 export type StageResult =
@@ -1142,6 +1151,16 @@ export async function stageFieldUpdates(
         message: `${update.fieldName} may only be changed through the human UI.`,
       });
     }
+    if (
+      request.actor === 'agent' &&
+      ownValue(state.draft, update.fieldName)?.actor === 'human'
+    ) {
+      errors.push({
+        code: 'human_pinned',
+        fieldName: update.fieldName,
+        message: `${update.fieldName} contains a human correction. Only the review UI can remove it before an agent proposes another value.`,
+      });
+    }
 
     const valueError = validateValue(field, update.value);
     if (valueError !== null) errors.push(valueError);
@@ -1211,6 +1230,80 @@ export async function stageFieldUpdates(
     ok: true,
     state: nextState,
     changedFields: deepFreeze(changedFields.sort()),
+  });
+}
+
+export async function correctDraftFieldFromUi(
+  state: FormState,
+  request: CorrectDraftFieldRequest,
+): Promise<StageResult> {
+  const errors = preconditionErrors(
+    state,
+    request.expectedStateVersion,
+    request.expectedSourceHash,
+    request.expectedPlanHash,
+  );
+  const field = ownValue(state.fields, request.fieldName);
+  const staged = ownValue(state.draft, request.fieldName);
+  if (field === undefined) {
+    errors.push({
+      code: 'unknown_field',
+      fieldName: request.fieldName,
+      message: `Unknown field: ${request.fieldName}.`,
+    });
+  } else {
+    if (field.readOnly) {
+      errors.push({
+        code: 'read_only',
+        fieldName: request.fieldName,
+        message: `${request.fieldName} is read-only.`,
+      });
+    }
+    if (field.humanOnly) {
+      errors.push({
+        code: 'human_only',
+        fieldName: request.fieldName,
+        message: `${request.fieldName} must be completed outside the correction workflow.`,
+      });
+    }
+    if (field.type === 'signature') {
+      errors.push({
+        code: 'signature_locked',
+        fieldName: request.fieldName,
+        message: `${request.fieldName} is a signature field and cannot be staged.`,
+      });
+    }
+    const valueError = validateValue(field, request.value);
+    if (valueError !== null) errors.push(valueError);
+  }
+  if (staged === undefined) {
+    errors.push({
+      code: 'invalid_request',
+      fieldName: request.fieldName,
+      message: `No staged agent proposal exists for ${request.fieldName}.`,
+    });
+  } else if (staged.actor !== 'agent') {
+    errors.push({
+      code: 'invalid_request',
+      fieldName: request.fieldName,
+      message: `${request.fieldName} is already a human correction. Remove it before correcting a new agent proposal.`,
+    });
+  }
+  if (errors.length > 0) {
+    return deepFreeze({ ok: false, state, errors: stateErrors(...errors) });
+  }
+
+  return stageFieldUpdates(state, {
+    expectedStateVersion: request.expectedStateVersion,
+    expectedSourceHash: request.expectedSourceHash,
+    actor: 'human',
+    updates: [
+      {
+        fieldName: request.fieldName,
+        value: request.value,
+        provenance: { kind: 'human_entry', confidence: 1 },
+      },
+    ],
   });
 }
 

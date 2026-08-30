@@ -3,9 +3,10 @@ import { fileURLToPath } from 'node:url';
 
 import { format } from 'oxfmt';
 
-import type { FormState } from '../lib/form-state.ts';
+import type { FormFieldValue, FormState } from '../lib/form-state.ts';
 import type { PdfInspection } from '../lib/pdf-engine.ts';
 import type {
+  FormProofAdapterResult,
   FormProofToolResponse,
   FormProofWebMcpAdapter,
   StageFormValueInput,
@@ -16,6 +17,7 @@ const { inspectPdf } = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
 )) as typeof import('../lib/pdf-engine');
 const {
+  correctDraftFieldFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
   stageFieldUpdates,
@@ -52,11 +54,51 @@ interface EvalCall {
 }
 
 interface EvalMessage {
+  role?: string;
   type: string;
   name?: string;
   content?: string;
   arguments?: Record<string, unknown>;
   response?: Record<string, unknown>;
+}
+
+interface TransitionBinding {
+  stateVersion: number;
+  sourceHash: string;
+  planHash: string;
+}
+
+interface LocalHumanTransition {
+  caseName: string;
+  trigger: {
+    messageIndex: number;
+    role: 'user';
+    type: 'message';
+    content: string;
+  };
+  actor: 'human';
+  source: 'human_ui';
+  event: 'correct_draft_field';
+  fieldName: string;
+  value: StageFormValueInput['value'];
+  from: TransitionBinding;
+  to: TransitionBinding;
+  provenance: { kind: 'human_entry'; confidence: 1 };
+  humanPinned: true;
+}
+
+interface LocalTransitionsFile {
+  schemaVersion: 1;
+  transitions: LocalHumanTransition[];
+}
+
+interface HumanCorrectionOutcome {
+  fieldName: string;
+  value: StageFormValueInput['value'];
+  from: TransitionBinding;
+  to: TransitionBinding;
+  provenance: { kind: 'human_entry'; confidence: 1 };
+  humanPinned: true;
 }
 
 interface EvalCase {
@@ -111,6 +153,19 @@ const NO_PROTECTION = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mutableFieldValue(
+  value: FormFieldValue,
+): StageFormValueInput['value'] {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  return [...value];
 }
 
 function synchronizeSourceBindings(value: unknown, sourceHash: string): void {
@@ -223,16 +278,24 @@ function matchesMatcher(
   return true;
 }
 
-function assertRuntimeBinding(
+function runtimeBindingFailure(
   current: FormState,
   input: VersionBoundInput,
-): void {
-  if (
-    input.expectedStateVersion !== current.stateVersion ||
+): FormProofAdapterResult | null {
+  const code =
     input.expectedSourceHash !== current.source.sourceHash
-  ) {
-    throw new TypeError('The journey call is not bound to the active state.');
-  }
+      ? 'source_mismatch'
+      : input.expectedStateVersion !== current.stateVersion
+        ? 'stale_state'
+        : null;
+  return code === null
+    ? null
+    : {
+        ok: false,
+        stateVersion: current.stateVersion,
+        sourceHash: current.source.sourceHash,
+        error: { code },
+      };
 }
 
 function createJourneyRuntime(initialState: FormState) {
@@ -261,7 +324,10 @@ function createJourneyRuntime(initialState: FormState) {
       if (input.cursor !== undefined) {
         const cursor = parseFormContextCursor(
           input.cursor,
-          current.source.sourceHash,
+          {
+            sourceHash: current.source.sourceHash,
+            stateVersion: current.stateVersion,
+          },
           input,
         );
         if (!cursor.ok) throw new TypeError('Invalid journey context cursor.');
@@ -281,7 +347,8 @@ function createJourneyRuntime(initialState: FormState) {
       };
     },
     getFieldEvidence(input) {
-      assertRuntimeBinding(current, input);
+      const bindingFailure = runtimeBindingFailure(current, input);
+      if (bindingFailure !== null) return bindingFailure;
       let choiceOffset = 0;
       if (input.choiceCursor !== undefined) {
         const cursor = parseFieldChoiceCursor(
@@ -341,7 +408,8 @@ function createJourneyRuntime(initialState: FormState) {
       };
     },
     validateFillPlan(input) {
-      assertRuntimeBinding(current, input);
+      const bindingFailure = runtimeBindingFailure(current, input);
+      if (bindingFailure !== null) return bindingFailure;
       const validation = validateDraft(current);
       const reviewArtifacts = inspection.protection.exportStrategies;
       return {
@@ -359,7 +427,8 @@ function createJourneyRuntime(initialState: FormState) {
       };
     },
     startFillReview(input) {
-      assertRuntimeBinding(current, input);
+      const bindingFailure = runtimeBindingFailure(current, input);
+      if (bindingFailure !== null) return bindingFailure;
       const reviewArtifacts = inspection.protection.exportStrategies;
       if (
         Object.keys(current.draft).length === 0 ||
@@ -392,6 +461,48 @@ function createJourneyRuntime(initialState: FormState) {
 
   return {
     getState: () => current,
+    async applyHumanCorrection(
+      fieldName: string,
+      value: StageFormValueInput['value'],
+    ): Promise<HumanCorrectionOutcome> {
+      const before = current;
+      const corrected = await correctDraftFieldFromUi(before, {
+        expectedStateVersion: before.stateVersion,
+        expectedSourceHash: before.source.sourceHash,
+        expectedPlanHash: before.planHash,
+        fieldName,
+        value,
+      });
+      if (!corrected.ok) {
+        throw new TypeError(
+          `Human journey transition failed with ${corrected.errors[0]?.code ?? 'internal_error'}.`,
+        );
+      }
+      current = corrected.state;
+      const staged = current.draft[fieldName];
+      if (
+        staged?.actor !== 'human' ||
+        staged.provenance.kind !== 'human_entry'
+      ) {
+        throw new TypeError('Human journey transition did not pin the field.');
+      }
+      return {
+        fieldName: staged.fieldName,
+        value: mutableFieldValue(staged.value),
+        from: {
+          stateVersion: before.stateVersion,
+          sourceHash: before.source.sourceHash,
+          planHash: before.planHash,
+        },
+        to: {
+          stateVersion: current.stateVersion,
+          sourceHash: current.source.sourceHash,
+          planHash: current.planHash,
+        },
+        provenance: { kind: 'human_entry', confidence: 1 },
+        humanPinned: true,
+      };
+    },
     async execute(call: EvalCall): Promise<FormProofToolResponse> {
       const tool = tools.get(
         call.functionName as Parameters<typeof tools.get>[0],
@@ -419,6 +530,53 @@ const state = await createFormState(
 
 const evalPath = new URL('../evals/formproof-evals.json', import.meta.url);
 const evaluations = JSON.parse(await readFile(evalPath, 'utf8')) as EvalCase[];
+const localEvalPath = new URL(
+  '../evals/formproof-local-evals.json',
+  import.meta.url,
+);
+const localEvaluations = JSON.parse(
+  await readFile(localEvalPath, 'utf8'),
+) as EvalCase[];
+const allEvaluations = [...evaluations, ...localEvaluations];
+const localTransitionsPath = new URL(
+  '../evals/formproof-local-transitions.json',
+  import.meta.url,
+);
+const localTransitions = JSON.parse(
+  await readFile(localTransitionsPath, 'utf8'),
+) as LocalTransitionsFile;
+if (
+  localTransitions.schemaVersion !== 1 ||
+  !Array.isArray(localTransitions.transitions)
+) {
+  throw new TypeError('The local transition fixture is invalid.');
+}
+const transitionsByTrigger = new Map<string, LocalHumanTransition>();
+for (const transition of localTransitions.transitions) {
+  if (
+    typeof transition.caseName !== 'string' ||
+    !Number.isSafeInteger(transition.trigger?.messageIndex) ||
+    transition.trigger.messageIndex < 0 ||
+    transition.trigger.role !== 'user' ||
+    transition.trigger.type !== 'message' ||
+    typeof transition.trigger.content !== 'string' ||
+    transition.actor !== 'human' ||
+    transition.source !== 'human_ui' ||
+    transition.event !== 'correct_draft_field' ||
+    typeof transition.fieldName !== 'string'
+  ) {
+    throw new TypeError('The local human-correction transition is invalid.');
+  }
+  const key = JSON.stringify([
+    transition.caseName,
+    transition.trigger.messageIndex,
+  ]);
+  if (transitionsByTrigger.has(key)) {
+    throw new TypeError(`Duplicate local transition trigger: ${key}`);
+  }
+  transitionsByTrigger.set(key, transition);
+}
+const consumedTransitions = new Set<LocalHumanTransition>();
 
 const protectionEvaluation = evaluations.find(
   ({ name }) => name === '[tool] Inspect PDF protection',
@@ -447,14 +605,40 @@ protectionCall.mockOutput = structuredClone(
   protectionResponse,
 ) as unknown as Record<string, unknown>;
 
-for (const evaluation of evaluations) {
+for (const evaluation of allEvaluations) {
   if (!evaluation.name.startsWith('[journey]')) continue;
   const runtime = createJourneyRuntime(state);
-  for (let index = 0; index < evaluation.messages.length - 1; index += 1) {
+  for (let index = 0; index < evaluation.messages.length; index += 1) {
     const callMessage = evaluation.messages[index];
+    const localTransition = transitionsByTrigger.get(
+      JSON.stringify([evaluation.name, index]),
+    );
+    if (localTransition !== undefined) {
+      if (
+        callMessage.role !== localTransition.trigger.role ||
+        callMessage.type !== localTransition.trigger.type ||
+        callMessage.content !== localTransition.trigger.content
+      ) {
+        throw new TypeError(
+          `${evaluation.name}.messages[${index}] does not match its local transition trigger.`,
+        );
+      }
+      const outcome = await runtime.applyHumanCorrection(
+        localTransition.fieldName,
+        localTransition.value,
+      );
+      localTransition.fieldName = outcome.fieldName;
+      localTransition.value = outcome.value;
+      localTransition.from = outcome.from;
+      localTransition.to = outcome.to;
+      localTransition.provenance = outcome.provenance;
+      localTransition.humanPinned = outcome.humanPinned;
+      consumedTransitions.add(localTransition);
+    }
     const responseMessage = evaluation.messages[index + 1];
     if (
       callMessage.type !== 'functioncall' ||
+      responseMessage === undefined ||
       responseMessage.type !== 'functionresponse' ||
       callMessage.name !== responseMessage.name
     ) {
@@ -560,10 +744,23 @@ for (const evaluation of evaluations) {
   }
 }
 
-const contextContinuationCursor = createFormContextCursor(
-  3,
-  state.source.sourceHash,
+if (consumedTransitions.size !== localTransitions.transitions.length) {
+  throw new TypeError('Every local transition must match one journey message.');
+}
+
+const humanCorrectionJourney = localEvaluations.find(
+  ({ name }) => name === '[journey] Honor a human UI correction before review',
 );
+const humanCorrectionPrompt = humanCorrectionJourney?.messages[0];
+if (humanCorrectionPrompt?.type !== 'message') {
+  throw new TypeError('The human-correction journey prompt is missing.');
+}
+humanCorrectionPrompt.content = `At state ${state.stateVersion} for source ${state.source.sourceHash}, stage the values I supplied: Avery Chen in frm.q7f1, avery@example.test in frm.p0x4, true in frm.c8v3, and rent in frm.r4d6. Then validate and open review. If I correct a proposal in the UI while you are working, refresh the changed state, inspect the human-pinned evidence, and preserve my correction without staging over it.`;
+
+const contextContinuationCursor = createFormContextCursor(3, {
+  sourceHash: state.source.sourceHash,
+  stateVersion: state.stateVersion,
+});
 const contextContinuation = evaluations.find(
   ({ name }) => name === '[tool] Continue a context page',
 );
@@ -575,10 +772,10 @@ if (!contextContinuationCall || !contextContinuationMessage) {
 contextContinuationCall.arguments.cursor = contextContinuationCursor;
 contextContinuationMessage.content = `Continue reading the form from cursor ${contextContinuationCursor} and return the next three fields.`;
 
-const selectionContinuationCursor = createFormContextCursor(
-  6,
-  state.source.sourceHash,
-);
+const selectionContinuationCursor = createFormContextCursor(6, {
+  sourceHash: state.source.sourceHash,
+  stateVersion: state.stateVersion,
+});
 const selectionContinuation = evaluations.find(
   ({ name }) => name === '[selection] Continue after a page boundary',
 );
@@ -603,7 +800,10 @@ synchronizeSourceBindings(
   mismatchedCursorCase.messages,
   state.source.sourceHash,
 );
-const mismatchedCursor = createFormContextCursor(6, CHOICE_SOURCE_HASH);
+const mismatchedCursor = createFormContextCursor(6, {
+  sourceHash: CHOICE_SOURCE_HASH,
+  stateVersion: state.stateVersion,
+});
 const mismatchedArguments = mismatchedCursorMessage.arguments;
 if (!mismatchedArguments) {
   throw new TypeError('The mismatched context cursor call is missing args.');
@@ -832,16 +1032,39 @@ synchronizeSourceBindings(
 );
 mismatchedQueryCursorMessage.arguments.cursor = createFormContextCursor(
   1,
-  state.source.sourceHash,
+  {
+    sourceHash: state.source.sourceHash,
+    stateVersion: state.stateVersion,
+  },
   { queries: ['legal name'] },
 );
 
-const formatted = await format(
-  fileURLToPath(evalPath),
-  JSON.stringify(evaluations),
-  { printWidth: 80 },
-);
-if (formatted.errors.length > 0) {
+const [
+  formattedEvaluations,
+  formattedLocalEvaluations,
+  formattedLocalTransitions,
+] = await Promise.all([
+  format(fileURLToPath(evalPath), JSON.stringify(evaluations), {
+    printWidth: 80,
+  }),
+  format(fileURLToPath(localEvalPath), JSON.stringify(localEvaluations), {
+    printWidth: 80,
+  }),
+  format(
+    fileURLToPath(localTransitionsPath),
+    JSON.stringify(localTransitions),
+    { printWidth: 80 },
+  ),
+]);
+if (
+  formattedEvaluations.errors.length > 0 ||
+  formattedLocalEvaluations.errors.length > 0 ||
+  formattedLocalTransitions.errors.length > 0
+) {
   throw new TypeError('The synchronized eval fixtures could not be formatted.');
 }
-await writeFile(evalPath, formatted.code, 'utf8');
+await Promise.all([
+  writeFile(evalPath, formattedEvaluations.code, 'utf8'),
+  writeFile(localEvalPath, formattedLocalEvaluations.code, 'utf8'),
+  writeFile(localTransitionsPath, formattedLocalTransitions.code, 'utf8'),
+]);

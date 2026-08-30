@@ -15,7 +15,7 @@
     "eval:verify": "node --test --experimental-strip-types tests/evals.test.ts",
     "typecheck": "tsc --noEmit --incremental false",
     "lint:project": "oxlint app/page.tsx components/formproof-workbench.tsx lib/*.ts scripts/*.ts tests/*.test.ts vite.config.ts",
-    "format:check": "oxfmt --check app/page.tsx components/formproof-workbench.tsx app/globals.css evals/formproof-evals.json lib/*.ts scripts/*.ts tests/*.test.ts package.json vite.config.ts",
+    "format:check": "oxfmt --check app/page.tsx components/formproof-workbench.tsx app/globals.css evals/formproof-evals.json evals/formproof-local-evals.json evals/formproof-local-transitions.json lib/*.ts scripts/*.ts tests/*.test.ts package.json vite.config.ts",
     "lint": "oxlint",
     "format": "oxfmt"
   },

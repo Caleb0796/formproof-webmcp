@@ -219,7 +219,10 @@ function createContextTool(
           ? ({ ok: true, offset: 0 } as const)
           : parseFormContextCursor(
               input.cursor,
-              state.source.sourceHash,
+              {
+                sourceHash: state.source.sourceHash,
+                stateVersion: state.stateVersion,
+              },
               input,
             );
       if (!parsed.ok) {
