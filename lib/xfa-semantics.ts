@@ -18,6 +18,10 @@ const MAX_SPEAK_TEXT = 2_000;
 const MAX_CAPTION_TEXT = 512;
 const MAX_DISCOVERY_SPEAK_TEXT = 180;
 const MAX_DISCOVERY_SPEAK_CHARACTERS = 256 * 1024;
+const MAX_STATIC_CHOICE_VALUE_TEXT = 512;
+const MAX_STATIC_CHOICES_PER_GROUP = 256;
+const MAX_STATIC_CHOICE_GROUP_CHARACTERS = 64 * 1024;
+const MAX_STATIC_CHOICE_CHARACTERS = 256 * 1024;
 const XFA_TEMPLATE_NAMESPACES = new Set([
   'http://www.xfa.org/schema/xfa-template/3.3/',
   'http://www.xfa.org/schema/xfa-template/3.6/',
@@ -30,6 +34,12 @@ export interface XfaFieldSemantics {
   readonly speak: string | null;
   readonly caption: string | null;
   readonly discoverySpeak?: string;
+  readonly staticChoices?: readonly XfaStaticChoice[];
+}
+
+export interface XfaStaticChoice {
+  readonly value: string;
+  readonly label: string;
 }
 
 export type XfaSemanticsUnavailableReason =
@@ -80,6 +90,65 @@ interface TextCollector {
   readonly limit: number;
 }
 
+interface RawTextCollector {
+  value: string;
+  overflowed: boolean;
+  readonly limit: number;
+}
+
+interface StaticChoiceGroupState {
+  readonly terminal: TerminalState;
+  readonly choices: XfaStaticChoice[];
+  directFieldCount: number;
+  characterCount: number;
+  valid: boolean;
+}
+
+interface StaticChoiceFieldState {
+  readonly group: StaticChoiceGroupState;
+  uiCount: number;
+  checkButtonCount: number;
+  captionCount: number;
+  captionValueCount: number;
+  captionTextCount: number;
+  itemsCount: number;
+  itemScalarCount: number;
+  label: string | null;
+  value: string | null;
+  valid: boolean;
+}
+
+type StaticChoiceRole =
+  | 'group'
+  | 'field'
+  | 'ui'
+  | 'checkButton'
+  | 'checkButtonBorder'
+  | 'caption'
+  | 'captionValue'
+  | 'captionText'
+  | 'items'
+  | 'itemScalar'
+  | 'assist'
+  | 'assistText'
+  | 'traversal'
+  | 'leaf'
+  | 'invalid';
+
+type StaticChoiceCaptureState =
+  | {
+      readonly kind: 'label';
+      readonly field: StaticChoiceFieldState;
+      readonly collector: TextCollector;
+      hasNestedElement: boolean;
+    }
+  | {
+      readonly kind: 'value';
+      readonly field: StaticChoiceFieldState;
+      readonly collector: RawTextCollector;
+      hasNestedElement: boolean;
+    };
+
 interface TerminalState {
   readonly somName: string;
   customSpeak: string | null;
@@ -93,6 +162,7 @@ interface TerminalState {
   captionCaptured: boolean;
   humanOnly: boolean;
   readOnly: boolean;
+  staticChoices: readonly XfaStaticChoice[] | null;
 }
 
 interface CaptureState {
@@ -120,7 +190,12 @@ interface ElementFrame {
   allowsFormChildren: boolean;
   enteredIgnoredBranch: boolean;
   inVariablesBranch: boolean;
+  enteredConditionalParticipation: boolean;
   previousAccessRestricted: boolean | null;
+  staticChoiceRole: StaticChoiceRole | null;
+  staticChoiceCapture: StaticChoiceCaptureState | null;
+  enteredStaticChoiceGroup: StaticChoiceGroupState | null;
+  enteredStaticChoiceField: StaticChoiceFieldState | null;
 }
 
 class XfaUnavailableError extends Error {
@@ -711,6 +786,285 @@ function appendText(collector: TextCollector, text: string): void {
   }
 }
 
+function createRawCollector(limit: number): RawTextCollector {
+  return { value: '', overflowed: false, limit };
+}
+
+function appendRawText(collector: RawTextCollector, text: string): void {
+  if (collector.overflowed || text.length === 0) return;
+  if (collector.value.length + text.length > collector.limit) {
+    collector.overflowed = true;
+    return;
+  }
+  collector.value += text;
+}
+
+function createStaticChoiceField(
+  group: StaticChoiceGroupState,
+): StaticChoiceFieldState {
+  group.directFieldCount += 1;
+  if (group.directFieldCount > MAX_STATIC_CHOICES_PER_GROUP) {
+    group.valid = false;
+  }
+  return {
+    group,
+    uiCount: 0,
+    checkButtonCount: 0,
+    captionCount: 0,
+    captionValueCount: 0,
+    captionTextCount: 0,
+    itemsCount: 0,
+    itemScalarCount: 0,
+    label: null,
+    value: null,
+    valid: true,
+  };
+}
+
+function invalidateStaticChoiceField(field: StaticChoiceFieldState): void {
+  field.valid = false;
+  field.group.valid = false;
+}
+
+function staticChoiceParticipationIsUnconditional(tag: SaxesTagNS): boolean {
+  const presence = attribute(tag, 'presence');
+  const relevant = attribute(tag, 'relevant');
+  return (
+    (presence === null || presence === 'visible') &&
+    (relevant === null || relevant.length === 0)
+  );
+}
+
+function staticChoiceItemsAreStatic(tag: SaxesTagNS): boolean {
+  const reference = attribute(tag, 'ref');
+  const save = attribute(tag, 'save');
+  return (
+    staticChoiceParticipationIsUnconditional(tag) &&
+    (reference === null || reference.length === 0) &&
+    (save === null || save === '1')
+  );
+}
+
+function staticChoiceLabelKey(label: string): string {
+  return label.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
+}
+
+function allowedStaticChoiceLabel(label: string): boolean {
+  return !/\p{C}/u.test(label) && /[\p{L}\p{N}\p{P}\p{S}]/u.test(label);
+}
+
+function finishStaticChoiceField(field: StaticChoiceFieldState): void {
+  const { label, value } = field;
+  if (
+    !field.group.valid ||
+    !field.valid ||
+    field.uiCount !== 1 ||
+    field.checkButtonCount !== 1 ||
+    field.captionCount !== 1 ||
+    field.captionValueCount !== 1 ||
+    field.captionTextCount !== 1 ||
+    field.itemsCount !== 1 ||
+    field.itemScalarCount !== 1 ||
+    label === null ||
+    value === null ||
+    !allowedStaticChoiceLabel(label) ||
+    value.trim().length === 0 ||
+    field.group.choices.some(
+      (choice) =>
+        choice.value === value ||
+        staticChoiceLabelKey(choice.label) === staticChoiceLabelKey(label),
+    )
+  ) {
+    field.group.valid = false;
+    return;
+  }
+
+  const characterCount = label.length + value.length;
+  if (
+    field.group.characterCount + characterCount >
+    MAX_STATIC_CHOICE_GROUP_CHARACTERS
+  ) {
+    field.group.valid = false;
+    return;
+  }
+  field.group.characterCount += characterCount;
+  field.group.choices.push({ value, label });
+}
+
+function enterStaticChoiceElement(
+  tag: SaxesTagNS,
+  isTemplateElement: boolean,
+  parent: ElementFrame | undefined,
+  group: StaticChoiceGroupState,
+  activeField: StaticChoiceFieldState | undefined,
+  frame: ElementFrame,
+  fieldStack: StaticChoiceFieldState[],
+  captureStack: StaticChoiceCaptureState[],
+): void {
+  const invalidate = (): void => {
+    frame.staticChoiceRole = 'invalid';
+    if (activeField) invalidateStaticChoiceField(activeField);
+    else group.valid = false;
+  };
+
+  if (!isTemplateElement) {
+    invalidate();
+    return;
+  }
+
+  const parentRole = parent?.staticChoiceRole;
+  if (parentRole === 'group') {
+    if (tag.local === 'field') {
+      const field = createStaticChoiceField(group);
+      if (!staticChoiceParticipationIsUnconditional(tag)) {
+        invalidateStaticChoiceField(field);
+      }
+      frame.staticChoiceRole = 'field';
+      frame.enteredStaticChoiceField = field;
+      fieldStack.push(field);
+    } else if (tag.local === 'traversal') {
+      frame.staticChoiceRole = 'traversal';
+    } else {
+      invalidate();
+    }
+    return;
+  }
+
+  if (!activeField) {
+    if (parentRole === 'traversal' && tag.local === 'traverse') {
+      frame.staticChoiceRole = 'leaf';
+    } else invalidate();
+    return;
+  }
+
+  if (parentRole === 'field') {
+    if (tag.local === 'ui') {
+      activeField.uiCount += 1;
+      if (activeField.uiCount !== 1) invalidateStaticChoiceField(activeField);
+      frame.staticChoiceRole = 'ui';
+    } else if (tag.local === 'caption') {
+      activeField.captionCount += 1;
+      if (
+        activeField.captionCount !== 1 ||
+        !staticChoiceParticipationIsUnconditional(tag)
+      ) {
+        invalidateStaticChoiceField(activeField);
+      }
+      frame.staticChoiceRole = 'caption';
+    } else if (tag.local === 'items') {
+      activeField.itemsCount += 1;
+      if (activeField.itemsCount !== 1 || !staticChoiceItemsAreStatic(tag)) {
+        invalidateStaticChoiceField(activeField);
+      }
+      frame.staticChoiceRole = 'items';
+    } else if (tag.local === 'assist') {
+      frame.staticChoiceRole = 'assist';
+    } else if (
+      tag.local === 'font' ||
+      tag.local === 'margin' ||
+      tag.local === 'para'
+    ) {
+      frame.staticChoiceRole = 'leaf';
+    } else {
+      invalidate();
+    }
+    return;
+  }
+
+  if (parentRole === 'ui') {
+    if (tag.local !== 'checkButton') {
+      invalidate();
+      return;
+    }
+    activeField.checkButtonCount += 1;
+    if (activeField.checkButtonCount !== 1) {
+      invalidateStaticChoiceField(activeField);
+    }
+    frame.staticChoiceRole = 'checkButton';
+    return;
+  }
+
+  if (parentRole === 'checkButton') {
+    if (tag.local === 'border') {
+      frame.staticChoiceRole = 'checkButtonBorder';
+    } else invalidate();
+    return;
+  }
+
+  if (parentRole === 'checkButtonBorder') {
+    if (tag.local === 'edge' || tag.local === 'fill') {
+      frame.staticChoiceRole = 'leaf';
+    } else invalidate();
+    return;
+  }
+
+  if (parentRole === 'caption') {
+    if (tag.local === 'value') {
+      activeField.captionValueCount += 1;
+      if (activeField.captionValueCount !== 1) {
+        invalidateStaticChoiceField(activeField);
+      }
+      frame.staticChoiceRole = 'captionValue';
+    } else if (tag.local === 'font' || tag.local === 'para') {
+      frame.staticChoiceRole = 'leaf';
+    } else {
+      invalidate();
+    }
+    return;
+  }
+
+  if (parentRole === 'captionValue') {
+    if (tag.local !== 'text') {
+      invalidate();
+      return;
+    }
+    activeField.captionTextCount += 1;
+    if (activeField.captionTextCount !== 1) {
+      invalidateStaticChoiceField(activeField);
+    }
+    const capture: StaticChoiceCaptureState = {
+      kind: 'label',
+      field: activeField,
+      collector: createCollector(MAX_CAPTION_TEXT),
+      hasNestedElement: false,
+    };
+    frame.staticChoiceRole = 'captionText';
+    frame.staticChoiceCapture = capture;
+    captureStack.push(capture);
+    return;
+  }
+
+  if (parentRole === 'items') {
+    if (tag.local !== 'text' && tag.local !== 'integer') {
+      invalidate();
+      return;
+    }
+    activeField.itemScalarCount += 1;
+    if (activeField.itemScalarCount !== 1) {
+      invalidateStaticChoiceField(activeField);
+    }
+    const capture: StaticChoiceCaptureState = {
+      kind: 'value',
+      field: activeField,
+      collector: createRawCollector(MAX_STATIC_CHOICE_VALUE_TEXT),
+      hasNestedElement: false,
+    };
+    frame.staticChoiceRole = 'itemScalar';
+    frame.staticChoiceCapture = capture;
+    captureStack.push(capture);
+    return;
+  }
+
+  if (parentRole === 'assist') {
+    if (tag.local === 'speak' || tag.local === 'toolTip') {
+      frame.staticChoiceRole = 'assistText';
+    } else invalidate();
+    return;
+  }
+
+  invalidate();
+}
+
 function parseTemplate(xml: string): XfaSemanticsResult {
   if (UNSAFE_XML_DECLARATION.test(xml)) {
     throw new XfaUnavailableError('template_unsafe_xml');
@@ -723,6 +1077,9 @@ function parseTemplate(xml: string): XfaSemanticsResult {
   const frames: ElementFrame[] = [];
   const path: string[] = [];
   const captureStack: CaptureState[] = [];
+  const staticChoiceGroups: StaticChoiceGroupState[] = [];
+  const staticChoiceFields: StaticChoiceFieldState[] = [];
+  const staticChoiceCaptureStack: StaticChoiceCaptureState[] = [];
   let currentScope: OccurrenceScope = { counts: new Map() };
   let currentSomContainer: SomContainer = { subformCount: 0 };
   let templateNamespace: string | null = null;
@@ -730,11 +1087,13 @@ function parseTemplate(xml: string): XfaSemanticsResult {
   const namedExclGroupTerminals: TerminalState[] = [];
   let ignoredBranchDepth = 0;
   let variablesDepth = 0;
+  let conditionalParticipationDepth = 0;
   let accessRestricted = false;
   let nodeCount = 0;
   let candidateCount = 0;
   let generatedSomCharacterCount = 0;
   let discoverySpeakCharacterCount = 0;
+  let staticChoiceCharacterCount = 0;
   let duplicateCount = 0;
 
   const parser = new SaxesParser({ xmlns: true });
@@ -763,6 +1122,10 @@ function parseTemplate(xml: string): XfaSemanticsResult {
     const parent = frames.at(-1);
     const activeCapture = captureStack.at(-1);
     if (activeCapture) activeCapture.hasNestedElement = true;
+    const activeStaticChoiceCapture = staticChoiceCaptureStack.at(-1);
+    if (activeStaticChoiceCapture) {
+      activeStaticChoiceCapture.hasNestedElement = true;
+    }
     const isTemplateElement = tag.uri === templateNamespace;
     if (
       isTemplateElement &&
@@ -788,7 +1151,12 @@ function parseTemplate(xml: string): XfaSemanticsResult {
       allowsFormChildren: false,
       enteredIgnoredBranch: false,
       inVariablesBranch: false,
+      enteredConditionalParticipation: false,
       previousAccessRestricted: null,
+      staticChoiceRole: null,
+      staticChoiceCapture: null,
+      enteredStaticChoiceGroup: null,
+      enteredStaticChoiceField: null,
     };
 
     const parentAllowsFormChildren = parent?.allowsFormChildren === true;
@@ -902,6 +1270,10 @@ function parseTemplate(xml: string): XfaSemanticsResult {
       !insideVariablesBranch &&
       !frame.enteredIgnoredBranch &&
       tag.local !== 'template';
+    if (isSemanticElement && !staticChoiceParticipationIsUnconditional(tag)) {
+      conditionalParticipationDepth += 1;
+      frame.enteredConditionalParticipation = true;
+    }
     const isAccessControlledFormNode =
       isSemanticElement &&
       (tag.local === 'subform' ||
@@ -1014,6 +1386,7 @@ function parseTemplate(xml: string): XfaSemanticsResult {
         captionCaptured: false,
         humanOnly: false,
         readOnly: accessRestricted,
+        staticChoices: null,
       };
       frame.occurrenceAffectsSom = true;
     }
@@ -1025,6 +1398,30 @@ function parseTemplate(xml: string): XfaSemanticsResult {
       frame.enteredNamedExclGroup = true;
       namedExclGroupDepth += 1;
       namedExclGroupTerminals.push(frame.terminal);
+      const staticChoiceGroup: StaticChoiceGroupState = {
+        terminal: frame.terminal,
+        choices: [],
+        directFieldCount: 0,
+        characterCount: 0,
+        valid: conditionalParticipationDepth === 0,
+      };
+      frame.staticChoiceRole = 'group';
+      frame.enteredStaticChoiceGroup = staticChoiceGroup;
+      staticChoiceGroups.push(staticChoiceGroup);
+    }
+
+    const activeStaticChoiceGroup = staticChoiceGroups.at(-1);
+    if (activeStaticChoiceGroup && frame.enteredStaticChoiceGroup === null) {
+      enterStaticChoiceElement(
+        tag,
+        isTemplateElement,
+        parent,
+        activeStaticChoiceGroup,
+        staticChoiceFields.at(-1),
+        frame,
+        staticChoiceFields,
+        staticChoiceCaptureStack,
+      );
     }
 
     if (isSemanticElement && tag.local === 'ui' && parent?.terminal) {
@@ -1102,6 +1499,25 @@ function parseTemplate(xml: string): XfaSemanticsResult {
     if (capture && frames.at(-1)?.capture === capture) {
       appendText(capture.collector, text);
     }
+    const frame = frames.at(-1);
+    const staticChoiceCapture = staticChoiceCaptureStack.at(-1);
+    const capturesStaticChoice =
+      staticChoiceCapture && frame?.staticChoiceCapture === staticChoiceCapture;
+    if (capturesStaticChoice) {
+      if (staticChoiceCapture.kind === 'label') {
+        appendText(staticChoiceCapture.collector, text);
+      } else {
+        appendRawText(staticChoiceCapture.collector, text);
+      }
+    } else if (
+      staticChoiceGroups.length > 0 &&
+      frame?.staticChoiceRole !== 'assistText' &&
+      text.trim().length > 0
+    ) {
+      const field = staticChoiceFields.at(-1);
+      if (field) invalidateStaticChoiceField(field);
+      else staticChoiceGroups.at(-1)!.valid = false;
+    }
   };
   parser.on('text', collectText);
   parser.on('cdata', collectText);
@@ -1139,6 +1555,46 @@ function parseTemplate(xml: string): XfaSemanticsResult {
       }
     }
 
+    if (frame.staticChoiceCapture) {
+      const capture = staticChoiceCaptureStack.pop();
+      if (capture !== frame.staticChoiceCapture) {
+        throw new XfaUnavailableError('template_malformed_xml');
+      }
+      if (capture.collector.overflowed || capture.hasNestedElement) {
+        invalidateStaticChoiceField(capture.field);
+      } else if (capture.kind === 'label') {
+        capture.field.label = capture.collector.value || null;
+      } else {
+        capture.field.value = capture.collector.value;
+      }
+    }
+
+    if (frame.enteredStaticChoiceField) {
+      if (staticChoiceFields.pop() !== frame.enteredStaticChoiceField) {
+        throw new XfaUnavailableError('template_malformed_xml');
+      }
+      finishStaticChoiceField(frame.enteredStaticChoiceField);
+    }
+
+    if (frame.enteredStaticChoiceGroup) {
+      const group = staticChoiceGroups.pop();
+      if (group !== frame.enteredStaticChoiceGroup) {
+        throw new XfaUnavailableError('template_malformed_xml');
+      }
+      if (
+        group.valid &&
+        group.directFieldCount > 0 &&
+        group.choices.length === group.directFieldCount &&
+        staticChoiceCharacterCount + group.characterCount <=
+          MAX_STATIC_CHOICE_CHARACTERS
+      ) {
+        group.terminal.staticChoices = group.choices.map((choice) => ({
+          ...choice,
+        }));
+        staticChoiceCharacterCount += group.characterCount;
+      }
+    }
+
     if (frame.terminal) {
       const discoveryOnlySpeak = discoverySpeak(frame.terminal);
       if (discoveryOnlySpeak !== null) {
@@ -1153,6 +1609,9 @@ function parseTemplate(xml: string): XfaSemanticsResult {
         ...(discoveryOnlySpeak === null
           ? {}
           : { discoverySpeak: discoveryOnlySpeak }),
+        ...(frame.terminal.staticChoices === null
+          ? {}
+          : { staticChoices: frame.terminal.staticChoices }),
       };
       if (frame.terminal.humanOnly) {
         humanOnlyExactSomNames.add(frame.terminal.somName);
@@ -1179,6 +1638,9 @@ function parseTemplate(xml: string): XfaSemanticsResult {
     }
     if (frame.inVariablesBranch) variablesDepth -= 1;
     if (frame.enteredIgnoredBranch) ignoredBranchDepth -= 1;
+    if (frame.enteredConditionalParticipation) {
+      conditionalParticipationDepth -= 1;
+    }
     if (frame.pathPushed) path.pop();
     if (frame.previousScope) currentScope = frame.previousScope;
     if (frame.previousSomContainer) {

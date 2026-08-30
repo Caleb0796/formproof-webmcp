@@ -383,9 +383,19 @@ export interface FillPackageHumanStep {
     | 'required_missing';
 }
 
+export function getChoiceLabelReviewNotice(
+  choices: PdfFieldDescriptor['choices'],
+): string | null {
+  return choices.some(
+    ({ labelSource }) => labelSource === 'xfa_static_exact_som',
+  )
+    ? 'These option labels come from static XFA captions matched by the full SOM field name and complete AcroForm value set. FormProof did not execute XFA scripts, calculations, validation, dynamic choices, or layout. Compare the options with the original form before confirming.'
+    : null;
+}
+
 export interface FillPackageManifest {
   readonly artifactType: 'original_untouched_fill_package';
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 4;
   readonly createdAt: string;
   readonly source: {
     readonly fileName: string;
@@ -1855,11 +1865,11 @@ export async function exportFillPackageFromUi(
   const limitations = [
     'The source PDF is not included or modified; match sourceHash before using this plan.',
     'This package records staged field data and provenance, not a completed or submitted form.',
-    'Choice labels, choice-to-widget mappings, and appearance states come from the AcroForm structure; verify coded or ambiguous options against the original PDF.',
+    'Choice values, choice-to-widget mappings, and appearance states come from the AcroForm structure. Only a bounded static XFA exclGroup caption may replace a choice label when the full SOM field name and complete AcroForm value set match exactly; verify every option against the original PDF.',
     'Whole-form completeness is not assessed beyond PDF required flags.',
     ...(inspection.protection.evidence.xfaPresent
       ? [
-          'AcroForm fallback field names and geometry remain authoritative. Bounded XFA field text is used only when its full SOM name matches exactly; XFA choices, scripts, calculations, validation, and layout are not evaluated. Verify every field meaning in the original PDF.',
+          'AcroForm fallback field names, choice values, choice-to-widget mappings, appearance states, and geometry remain authoritative. A bounded static XFA exclGroup caption is used only when its full SOM name and complete choice value set match exactly. XFA scripts, calculations, validation, dynamic choices, and layout are not executed. Verify every field and option meaning in the original PDF.',
         ]
       : []),
     ...(stagedFields.some((field) => !field.semanticLabelAvailable)
@@ -1877,7 +1887,7 @@ export async function exportFillPackageFromUi(
   ];
   const manifest = deepFreeze<FillPackageManifest>({
     artifactType: 'original_untouched_fill_package',
-    schemaVersion: 3,
+    schemaVersion: 4,
     createdAt: request.createdAt ?? new Date().toISOString(),
     source: {
       fileName: state.source.fileName,

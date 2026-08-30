@@ -137,9 +137,15 @@ interface XfaExperiment {
   exactSomMatchCount: number;
   speakFieldCount: number;
   captionFieldCount: number;
-  acroFormChoiceLabelGoldens?: {
+  staticChoiceMappedGroupCount: number;
+  staticChoiceLabelGainCount: number;
+  staticChoiceGoldens?: {
     fieldName: string;
-    choices: { value: string; label: string }[];
+    choices: {
+      value: string;
+      label: string;
+      labelSource: 'xfa_static_exact_som';
+    }[];
   }[];
 }
 
@@ -500,6 +506,14 @@ async function measureContext(
       );
     }
     const data = requireRecord(response.data, 'Context data is not an object.');
+    if (hasKeyDeep(data, new Set(['currentValue', 'stagedValue']))) {
+      throw new TypeError('Context exposed a raw current or staged value.');
+    }
+    assertEqual(
+      data.valuesAvailableVia,
+      'get_field_evidence',
+      'Context lost the exact-value retrieval protocol',
+    );
     if (!Array.isArray(data.fields)) {
       throw new TypeError('Context data does not contain fields.');
     }
@@ -1015,6 +1029,18 @@ function semanticCoverage(state: FormState, inspection: PdfInspection) {
     xfaCaptionFieldCount: inspection.fields.filter(
       ({ xfaCaption }) => xfaCaption !== null && xfaCaption !== undefined,
     ).length,
+    staticXfaChoiceMappedGroupCount: inspection.fields.filter(({ choices }) =>
+      choices.some(({ labelSource }) => labelSource === 'xfa_static_exact_som'),
+    ).length,
+    staticXfaChoiceLabelGainCount: inspection.fields.reduce(
+      (count, { choices }) =>
+        count +
+        choices.filter(
+          ({ value, label, labelSource }) =>
+            labelSource === 'xfa_static_exact_som' && label !== value,
+        ).length,
+      0,
+    ),
     discoveryAliasFieldCount: inspection.fields.filter(
       ({ discoveryAliases: aliases }) => (aliases?.length ?? 0) > 0,
     ).length,
@@ -1041,7 +1067,7 @@ function semanticCoverage(state: FormState, inspection: PdfInspection) {
         : 'Discovery aliases can recover candidates only when no trusted field metadata matches the same query. They never become labels or evidence, and affected fields require human identity verification before export.',
     xfaFallbackOnly: inspection.protection.evidence.xfaPresent,
     xfaSemanticLimitation: inspection.protection.evidence.xfaPresent
-      ? 'AcroForm /TU remains authoritative. Bounded XFA speak/caption text is used only after an exact full-SOM-name match; XFA choices, scripts, calculations, validation, and layout were not evaluated, and PDF rewriting remains disabled.'
+      ? 'AcroForm /TU remains authoritative for field labels, and AcroForm values, widget mappings, and appearance states remain authoritative for choices. Only bounded static exclGroup captions matched by exact full SOM name and a complete byte-for-byte AcroForm value set may label choices. XFA scripts, calculations, validation, dynamic choices, and dynamic layout were not executed, and PDF rewriting remains disabled.'
       : null,
   };
 }
@@ -1385,6 +1411,7 @@ async function measureFillPackage(
     'Fill-package confirmations changed',
   );
   let multiWidgetChoiceMappingsVerified = 0;
+  let staticXfaChoiceLabelSourceFieldCount = 0;
   for (const [fieldName, proposedValue] of Object.entries(experiment.values)) {
     const descriptor = inspection.fields.find(({ name }) => name === fieldName);
     const definition = initialState.fields[fieldName];
@@ -1435,6 +1462,21 @@ async function measureFillPackage(
         `Fill-package choice-to-widget mapping is ambiguous: ${fieldName}`,
       );
       multiWidgetChoiceMappingsVerified += 1;
+    }
+    if (
+      descriptor.choices.some(
+        ({ labelSource }) => labelSource === 'xfa_static_exact_som',
+      )
+    ) {
+      const roundTripped = (
+        decoded as typeof exported.result.manifest
+      ).plan.stagedFields.find((field) => field.fieldName === fieldName);
+      assertEqual(
+        roundTripped?.choices,
+        descriptor.choices,
+        `Fill-package static XFA choice provenance changed: ${fieldName}`,
+      );
+      staticXfaChoiceLabelSourceFieldCount += 1;
     }
   }
   assertEqual(
@@ -1502,6 +1544,9 @@ async function measureFillPackage(
     confirmedFieldCount: confirmedFieldNames.length,
     humanStepCount: exported.result.manifest.plan.humanSteps.length,
     multiWidgetChoiceMappingsVerified,
+    staticXfaChoiceLabelSourceFieldCount,
+    staticXfaChoiceLabelSourceRoundTripPreserved:
+      staticXfaChoiceLabelSourceFieldCount > 0 ? true : 'not_applicable',
     semanticLabelUnavailableStagedFieldCount:
       exported.result.manifest.plan.stagedFields.filter(
         ({ semanticLabelAvailable }) => !semanticLabelAvailable,
@@ -1640,6 +1685,18 @@ for (const document of manifest.documents) {
     captionFieldCount: inspection.fields.filter(
       ({ xfaCaption }) => xfaCaption !== null && xfaCaption !== undefined,
     ).length,
+    staticChoiceMappedGroupCount: inspection.fields.filter(({ choices }) =>
+      choices.some(({ labelSource }) => labelSource === 'xfa_static_exact_som'),
+    ).length,
+    staticChoiceLabelGainCount: inspection.fields.reduce(
+      (count, { choices }) =>
+        count +
+        choices.filter(
+          ({ value, label, labelSource }) =>
+            labelSource === 'xfa_static_exact_som' && label !== value,
+        ).length,
+      0,
+    ),
   };
   if (document.xfaExperiment === undefined) {
     assertEqual(
@@ -1647,7 +1704,7 @@ for (const document of manifest.documents) {
         inspection.protection.evidence.xfaPresent,
         ...Object.values(xfaMeasurements),
       ],
-      [false, 0, 0, 0],
+      [false, 0, 0, 0, 0, 0],
       `${document.id} unexpectedly exposed XFA semantics`,
     );
   } else {
@@ -1662,6 +1719,10 @@ for (const document of manifest.documents) {
         exactSomMatchCount: document.xfaExperiment.exactSomMatchCount,
         speakFieldCount: document.xfaExperiment.speakFieldCount,
         captionFieldCount: document.xfaExperiment.captionFieldCount,
+        staticChoiceMappedGroupCount:
+          document.xfaExperiment.staticChoiceMappedGroupCount,
+        staticChoiceLabelGainCount:
+          document.xfaExperiment.staticChoiceLabelGainCount,
       },
       `${document.id} bounded XFA mapping changed`,
     );
@@ -1675,8 +1736,7 @@ for (const document of manifest.documents) {
       ['fill_package'],
       `${document.id} XFA unexpectedly became PDF-rewriteable`,
     );
-    for (const golden of document.xfaExperiment.acroFormChoiceLabelGoldens ??
-      []) {
+    for (const golden of document.xfaExperiment.staticChoiceGoldens ?? []) {
       const field = inspection.fields.find(
         ({ name }) => name === golden.fieldName,
       );
@@ -1688,7 +1748,27 @@ for (const document of manifest.documents) {
       assertEqual(
         field.choices,
         golden.choices,
-        `${document.id} AcroForm choice labels changed after XFA enrichment: ${golden.fieldName}`,
+        `${document.id} bounded static XFA choice labels changed: ${golden.fieldName}`,
+      );
+      const expectedValues = golden.choices.map(({ value }) => value);
+      assertEqual(
+        field.options,
+        expectedValues,
+        `${document.id} static XFA golden no longer matches the complete AcroForm value set: ${golden.fieldName}`,
+      );
+      assertEqual(
+        field.widgets.flatMap(({ choiceValue }) =>
+          choiceValue === null ? [] : [choiceValue],
+        ),
+        expectedValues,
+        `${document.id} static XFA golden no longer matches the complete widget value set: ${golden.fieldName}`,
+      );
+      assertEqual(
+        golden.choices.every(
+          ({ labelSource }) => labelSource === 'xfa_static_exact_som',
+        ),
+        true,
+        `${document.id} static XFA golden lost its label provenance: ${golden.fieldName}`,
       );
     }
   }
@@ -1909,10 +1989,10 @@ for (const document of manifest.documents) {
       ...semanticCoverage(state, inspection),
       semanticLabelGoldenCount: semanticLabelGoldens.length,
       semanticLabelGoldens,
-      xfaChoiceLabelGoldenCount:
-        document.xfaExperiment?.acroFormChoiceLabelGoldens?.length ?? 0,
-      xfaChoiceLabelsPreserved:
-        (document.xfaExperiment?.acroFormChoiceLabelGoldens?.length ?? 0) > 0
+      staticXfaChoiceGoldenCount:
+        document.xfaExperiment?.staticChoiceGoldens?.length ?? 0,
+      staticXfaChoiceGoldensVerified:
+        (document.xfaExperiment?.staticChoiceGoldens?.length ?? 0) > 0
           ? true
           : 'not_measured',
     },

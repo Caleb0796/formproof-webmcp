@@ -144,7 +144,8 @@
               "removal": "human_ui_only",
               "sessionScoped": true
             },
-            "fields": [{ "name": "frm.q7f1", "humanPinned": true }]
+            "fields": [{ "name": "frm.q7f1", "humanPinned": true }],
+            "valuesAvailableVia": "get_field_evidence"
           }
         },
         "mockOutput": {
@@ -195,6 +196,7 @@
               "sessionScoped": true
             },
             "pagination": { "returned": 1, "total": 1, "nextCursor": null },
+            "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
             "fields": [
               {
@@ -202,7 +204,8 @@
                 "label": "Legal name",
                 "type": "text",
                 "humanPinned": true,
-                "matchedQueries": ["legal name"]
+                "matchedQueries": ["legal name"],
+                "stagedValueAvailable": true
               }
             ]
           },

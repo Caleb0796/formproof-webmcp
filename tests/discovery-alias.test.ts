@@ -574,6 +574,7 @@ void test('many selected values stay atomic while choices paginate without losin
   const choices = Array.from({ length: 40 }, (_, index) => ({
     value: `v${index}`,
     label: `v${index}`,
+    labelSource: 'acroform' as const,
   }));
   const { state, inspection } = await fixture([
     textField(name, 0, {

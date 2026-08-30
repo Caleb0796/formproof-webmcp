@@ -2,12 +2,16 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { PDFDocument, PDFName, PDFString } from 'pdf-lib';
+
 import {
   approveDraftFromUi,
   correctDraftFieldFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
   exportApprovedPdfFromUi,
+  exportFillPackageFromUi,
+  getChoiceLabelReviewNotice,
   getReleaseGate,
   stageFieldUpdates,
   validateDraft,
@@ -18,6 +22,7 @@ import {
 } from '../lib/form-state.ts';
 import type {
   ApplyResult,
+  PdfChoiceDescriptor,
   PdfFieldValue,
   PdfInspection,
 } from '../lib/pdf-engine';
@@ -68,6 +73,42 @@ interface CompletedDemo extends StagedDemo {
   values: Record<string, PdfFieldValue>;
   applyResult: ApplyResult;
   releasedState: FormState;
+}
+
+const STATIC_XFA_CHOICE_FIELD = 'Root[0].Choice[0]';
+
+async function createStaticXfaChoicePdf(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([320, 180]);
+  const form = document.getForm();
+  const field = form.createRadioGroup(STATIC_XFA_CHOICE_FIELD);
+  field.addOptionToPage('1', page, {
+    x: 40,
+    y: 100,
+    width: 18,
+    height: 18,
+  });
+  field.addOptionToPage('2', page, {
+    x: 80,
+    y: 100,
+    width: 18,
+    height: 18,
+  });
+  const template = `<template xmlns="http://www.xfa.org/schema/xfa-template/3.6/"><subform name="Root"><exclGroup name="Choice"><field name="Gender"><ui><checkButton/></ui><caption><value><text>FEMALE</text></value></caption><assist><toolTip>Conflicting MALE tooltip</toolTip></assist><items><text>1</text></items></field><field name="Gender"><items><integer>2</integer></items><assist><toolTip>Conflicting FEMALE tooltip</toolTip></assist><caption><value><text>MALE</text></value></caption><ui><checkButton/></ui></field></exclGroup></subform></template>`;
+  const templateRef = document.context.register(
+    document.context.flateStream(template),
+  );
+  form.acroForm.dict.set(
+    PDFName.of('XFA'),
+    document.context.obj([PDFString.of('template'), templateRef]),
+  );
+  return Uint8Array.from(
+    await document.save({
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      useObjectStreams: false,
+    }),
+  );
 }
 
 interface AuthoredEvalCall {
@@ -418,6 +459,109 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
     workbench,
     /exportStrategies\.length === 0[\s\S]*?protectionType === 'unknown'[\s\S]*?Unknown protection remains inspection-only[\s\S]*?no agent-writable addressable fields/u,
   );
+  assert.match(
+    workbench,
+    /getChoiceLabelReviewNotice\(\s*descriptor\?\.choices \?\? \[\],\s*\)/u,
+  );
+  assert.equal(workbench.match(/\{choiceLabelReviewNotice &&/gu)?.length, 2);
+});
+
+void test('preserves exact-SOM static XFA choice label sources in the fill package and reviewer notice', async () => {
+  const source = await createStaticXfaChoicePdf();
+  const inspection = await inspectPdf(source);
+  assert.equal(inspection.protection.evidence.xfaPresent, true);
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+  const descriptor = inspection.fields.find(
+    ({ name }) => name === STATIC_XFA_CHOICE_FIELD,
+  );
+  assert.notEqual(descriptor, undefined);
+  if (descriptor === undefined) {
+    throw new Error('Static XFA choice field was not inspected.');
+  }
+  assert.deepEqual(descriptor.choices, [
+    {
+      value: '1',
+      label: 'FEMALE',
+      labelSource: 'xfa_static_exact_som',
+    },
+    {
+      value: '2',
+      label: 'MALE',
+      labelSource: 'xfa_static_exact_som',
+    },
+  ]);
+
+  const initial = await createFormState(
+    {
+      fileName: 'static-xfa-choice.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: STATIC_XFA_CHOICE_FIELD,
+        value: '1',
+        provenance: {
+          kind: 'agent_inference',
+          confidence: 0.9,
+          rationale: 'The supplied record uses the AcroForm value 1.',
+        },
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('Static XFA choice did not stage.');
+  const exported = await exportFillPackageFromUi(staged.state, source, {
+    confirmedFieldNames: [STATIC_XFA_CHOICE_FIELD],
+    createdAt: '2026-08-30T20:00:00.000Z',
+  });
+  assert.equal(exported.ok, true);
+  if (!exported.ok) throw new Error('Static XFA fill package did not export.');
+  assert.equal(exported.result.manifest.schemaVersion, 4);
+
+  const stagedChoices = exported.result.manifest.plan.stagedFields[0].choices;
+  const reviewChoices = exported.result.manifest.plan.humanSteps[0].choices;
+  assert.deepEqual(stagedChoices, descriptor.choices);
+  assert.deepEqual(reviewChoices, descriptor.choices);
+  assert.notEqual(stagedChoices, descriptor.choices);
+  assert.notEqual(stagedChoices[0], descriptor.choices[0]);
+  assert.equal(
+    stagedChoices.every(
+      ({ labelSource }) => labelSource === 'xfa_static_exact_som',
+    ),
+    true,
+  );
+  assert.equal(
+    getChoiceLabelReviewNotice(stagedChoices),
+    'These option labels come from static XFA captions matched by the full SOM field name and complete AcroForm value set. FormProof did not execute XFA scripts, calculations, validation, dynamic choices, or layout. Compare the options with the original form before confirming.',
+  );
+  assert.equal(
+    getChoiceLabelReviewNotice([
+      { value: '1', label: '1', labelSource: 'acroform' },
+    ]),
+    null,
+  );
+  const limitations = exported.result.manifest.limitations.join('\n');
+  assert.match(
+    limitations,
+    /Choice values, choice-to-widget mappings, and appearance states come from the AcroForm structure/u,
+  );
+  assert.match(
+    limitations,
+    /bounded static XFA exclGroup caption.*full SOM field name and complete AcroForm value set match exactly/u,
+  );
+  assert.match(
+    limitations,
+    /XFA scripts, calculations, validation, dynamic choices, and layout are not executed/u,
+  );
+  assert.doesNotMatch(limitations, /XFA choices/u);
 });
 
 void test('gives the UI reviewer scoped discard and correction controls', async () => {
@@ -737,6 +881,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
       label: 'Preferred contact method',
       type: 'dropdown',
       matchedQueries: ['contact'],
+      currentValueAvailable: true,
     },
   ]);
   assert.deepEqual(firstQueryData.search, {
@@ -887,7 +1032,18 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
   const projectedLongField = longData.fields.find(
     (field) => 'name' in field && field.name === FIELD.legalName,
   );
-  assert.equal(projectedLongField?.labelTruncated, true);
+  assert.notEqual(projectedLongField, undefined);
+  assert.equal(projectedLongField && 'label' in projectedLongField, false);
+  assert.equal(
+    projectedLongField && 'labelTruncated' in projectedLongField,
+    false,
+  );
+  assert.equal(
+    projectedLongField && 'detailAvailableVia' in projectedLongField
+      ? projectedLongField.detailAvailableVia
+      : null,
+    'get_field_evidence',
+  );
   assert.equal(
     projectedLongField && 'currentValueAvailable' in projectedLongField
       ? projectedLongField.currentValueAvailable
@@ -993,10 +1149,14 @@ void test('keeps journey read mocks aligned with the real demo projector', async
 
 void test('paginates long choice evidence without losing exact values', async () => {
   const { inspection, initialState } = await loadStagedDemo();
-  const choices = Array.from({ length: 20 }, (_, index) => ({
-    value: `option-${index}-${'值'.repeat(24)}`,
-    label: `Choice ${index} ${'说明'.repeat(12)}`,
-  }));
+  const choices: PdfChoiceDescriptor[] = Array.from(
+    { length: 20 },
+    (_, index) => ({
+      value: `option-${index}-${'值'.repeat(24)}`,
+      label: `Choice ${index} ${'说明'.repeat(12)}`,
+      labelSource: 'acroform',
+    }),
+  );
   const choiceValues = choices.map(({ value }) => value);
   const state: FormState = {
     ...initialState,
@@ -1099,7 +1259,10 @@ void test('paginates long choice evidence without losing exact values', async ()
     );
   } while (choiceCursor !== null);
 
-  assert.deepEqual(collected, choices);
+  assert.deepEqual(
+    collected,
+    choices.map(({ value, label }) => ({ value, label })),
+  );
 });
 
 void test('reports an overlong field name without silently skipping it', async () => {
@@ -1195,8 +1358,12 @@ void test('never repeats an unreturnable choice cursor', async () => {
   const longName = 'choice-field-'.padEnd(256, 'n');
   const oversizedValue = 'v'.repeat(1_201);
   const choices = [
-    { value: oversizedValue, label: 'L'.repeat(180) },
-    { value: 'safe', label: 'Safe choice' },
+    {
+      value: oversizedValue,
+      label: 'L'.repeat(180),
+      labelSource: 'acroform' as const,
+    },
+    { value: 'safe', label: 'Safe choice', labelSource: 'acroform' as const },
   ];
   const initial = await createFormState(initialState.source, [
     {

@@ -1219,9 +1219,13 @@ void test('inspects canonical AcroForm fields, widgets, geometry, and policies',
     'Text message',
   ]);
   assert.deepEqual(fields.get(FIELD.contact)?.choices, [
-    { value: 'Email', label: 'Email' },
-    { value: 'Phone', label: 'Phone' },
-    { value: 'Text message', label: 'Text message' },
+    { value: 'Email', label: 'Email', labelSource: 'acroform' },
+    { value: 'Phone', label: 'Phone', labelSource: 'acroform' },
+    {
+      value: 'Text message',
+      label: 'Text message',
+      labelSource: 'acroform',
+    },
   ]);
   assert.equal(fields.get(FIELD.contact)?.multiSelect, false);
   assert.deepEqual(fields.get(FIELD.housing)?.options, [
@@ -1230,9 +1234,9 @@ void test('inspects canonical AcroForm fields, widgets, geometry, and policies',
     'other',
   ]);
   assert.deepEqual(fields.get(FIELD.housing)?.choices, [
-    { value: 'rent', label: 'rent' },
-    { value: 'own', label: 'own' },
-    { value: 'other', label: 'other' },
+    { value: 'rent', label: 'rent', labelSource: 'acroform' },
+    { value: 'own', label: 'own', labelSource: 'acroform' },
+    { value: 'other', label: 'other', labelSource: 'acroform' },
   ]);
   assert.equal(fields.get(FIELD.housing)?.multiSelect, false);
   assert.equal(fields.get(FIELD.housing)?.widgetCount, 3);
@@ -1281,9 +1285,21 @@ void test('preserves export values for paired choices and writes multiselect arr
     'west',
   ]);
   assert.deepEqual(initialFields.get(CHOICE_FIELD.multiDropdown)?.choices, [
-    { value: 'north', label: 'North district' },
-    { value: 'south', label: 'South district' },
-    { value: 'west', label: 'West district' },
+    {
+      value: 'north',
+      label: 'North district',
+      labelSource: 'acroform',
+    },
+    {
+      value: 'south',
+      label: 'South district',
+      labelSource: 'acroform',
+    },
+    {
+      value: 'west',
+      label: 'West district',
+      labelSource: 'acroform',
+    },
   ]);
   assert.equal(
     initialFields.get(CHOICE_FIELD.multiDropdown)?.multiSelect,
@@ -1302,9 +1318,13 @@ void test('preserves export values for paired choices and writes multiselect arr
     'blue',
   ]);
   assert.deepEqual(initialFields.get(CHOICE_FIELD.optionList)?.choices, [
-    { value: 'red', label: 'Red priority' },
-    { value: 'green', label: 'Green priority' },
-    { value: 'blue', label: 'Blue priority' },
+    { value: 'red', label: 'Red priority', labelSource: 'acroform' },
+    {
+      value: 'green',
+      label: 'Green priority',
+      labelSource: 'acroform',
+    },
+    { value: 'blue', label: 'Blue priority', labelSource: 'acroform' },
   ]);
   assert.equal(initialFields.get(CHOICE_FIELD.optionList)?.multiSelect, true);
   assert.equal(
@@ -1316,8 +1336,8 @@ void test('preserves export values for paired choices and writes multiselect arr
     false,
   );
   assert.deepEqual(initialFields.get(CHOICE_FIELD.radio)?.choices, [
-    { value: 'ground', label: 'ground' },
-    { value: 'air', label: 'air' },
+    { value: 'ground', label: 'ground', labelSource: 'acroform' },
+    { value: 'air', label: 'air', labelSource: 'acroform' },
   ]);
   assert.equal(initialFields.get(CHOICE_FIELD.radio)?.multiSelect, false);
 
@@ -1445,9 +1465,13 @@ void test('normalizes blank and duplicate choice sentinels at the PDF boundary',
   const inspection = await inspectPdf(source);
   const fields = new Map(inspection.fields.map((field) => [field.name, field]));
   const expectedChoices = [
-    { value: 'CA', label: 'CA' },
-    { value: 'NY', label: 'New York' },
-    { value: ' CA ', label: 'Padded but nonblank' },
+    { value: 'CA', label: 'CA', labelSource: 'acroform' },
+    { value: 'NY', label: 'New York', labelSource: 'acroform' },
+    {
+      value: ' CA ',
+      label: 'Padded but nonblank',
+      labelSource: 'acroform',
+    },
   ];
 
   assert.equal(fields.get('normalization.dropdown')?.current, null);
@@ -2053,9 +2077,9 @@ void test('recovers multi-state checkbox widgets as exact radio semantics', asyn
       current: 'Card',
       options: ['Book', 'Card', 'Both'],
       choices: [
-        { value: 'Book', label: 'Book' },
-        { value: 'Card', label: 'Card' },
-        { value: 'Both', label: 'Both' },
+        { value: 'Book', label: 'Book', labelSource: 'acroform' },
+        { value: 'Card', label: 'Card', labelSource: 'acroform' },
+        { value: 'Both', label: 'Both', labelSource: 'acroform' },
       ],
       multiSelect: false,
     },

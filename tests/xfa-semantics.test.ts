@@ -1334,3 +1334,250 @@ void test('returns null instead of truncated semantic text after overflow', asyn
   assert.equal(result.byExactSomName.get('Boundary[0]')?.speak?.length, 2_000);
   assert.equal(result.byExactSomName.get('Boundary[0]')?.caption?.length, 512);
 });
+
+void test('collects exact static exclusion-group captions without normalizing item values', async () => {
+  const document = await documentWithTemplate(`
+    <template xmlns="${XFA_NAMESPACE}">
+      <subform name="Root" presence="visible" relevant="">
+        <exclGroup name="Choice" presence="visible" relevant="">
+          <field name="Option" x="18mm" y="2mm" w="50mm" h="5mm" anchorType="topLeft" presence="visible" relevant="">
+            <items presence="visible" relevant="" ref="" save="1"><text> FEMALE</text></items>
+            <assist><toolTip>Conflicting MALE tooltip</toolTip></assist>
+            <caption placement="left" reserve="20mm" presence="visible" relevant=""><para/><value><text>  Female   applicant  </text></value><font/></caption>
+            <ui><checkButton size="10pt"><border><edge/><fill/></border></checkButton></ui>
+          </field>
+          <field name="Option">
+            <ui><checkButton/></ui>
+            <caption><value><text>MALE</text></value></caption>
+            <assist><toolTip>Conflicting FEMALE tooltip</toolTip></assist>
+            <items><integer>2</integer></items>
+          </field>
+          <traversal><traverse ref="Tail[0]"/></traversal>
+        </exclGroup>
+      </subform>
+    </template>
+  `);
+
+  const result = extractXfaSemantics(document);
+
+  assert.equal(result.status, 'available');
+  assert.deepEqual(
+    result.byExactSomName.get('Root[0].Choice[0]')?.staticChoices,
+    [
+      { value: ' FEMALE', label: 'Female applicant' },
+      { value: '2', label: 'MALE' },
+    ],
+  );
+});
+
+void test('rejects each malformed static choice group without contaminating a good group', async () => {
+  const goodGroup = `
+    <exclGroup name="Good">
+      <field name="Option"><ui><checkButton/></ui><caption><value><text>GOOD A</text></value></caption><items><text>A</text></items></field>
+      <field name="Option"><items><integer>2</integer></items><caption><value><text>GOOD B</text></value></caption><ui><checkButton/></ui></field>
+    </exclGroup>`;
+  const malformedGroups: Array<{
+    reason: string;
+    body: string;
+    groupAttributes?: string;
+  }> = [
+    {
+      reason: 'nested caption text',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad <h:span xmlns:h="urn:foreign">nested</h:span></text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'duplicate checkButton',
+      body: '<field name="Option"><ui><checkButton/><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'missing caption',
+      body: '<field name="Option"><ui><checkButton/></ui><assist><toolTip>Must not become the label</toolTip></assist><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'extra item scalar',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text><integer>2</integer></items></field>',
+    },
+    {
+      reason: 'unknown direct property',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items><futureProperty/></field>',
+    },
+    {
+      reason: 'non-visible group presence',
+      groupAttributes: 'presence="invisible"',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'conditional group relevance',
+      groupAttributes: 'relevant="print"',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'hidden field presence',
+      body: '<field name="Option" presence="hidden"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'conditional field relevance',
+      body: '<field name="Option" relevant="print"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'inactive caption presence',
+      body: '<field name="Option"><ui><checkButton/></ui><caption presence="inactive"><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'conditional caption relevance',
+      body: '<field name="Option"><ui><checkButton/></ui><caption relevant="print"><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'invisible items presence',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items presence="invisible"><text>A</text></items></field>',
+    },
+    {
+      reason: 'conditional items relevance',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items relevant="print"><text>A</text></items></field>',
+    },
+    {
+      reason: 'dynamic items reference',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items ref="$record.dynamic"><text>A</text></items></field>',
+    },
+    {
+      reason: 'display-only items value',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><items save="0"><text>A</text></items></field>',
+    },
+    {
+      reason: 'unknown nested checkButton property',
+      body: '<field name="Option"><ui><checkButton><futureProperty/></checkButton></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'non-whitespace text inside checkButton',
+      body: '<field name="Option"><ui><checkButton>future semantics</checkButton></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'non-whitespace CDATA inside checkButton',
+      body: '<field name="Option"><ui><checkButton><![CDATA[future semantics]]></checkButton></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'unknown nested assist property',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad</text></value></caption><assist><futureProperty/></assist><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'foreign nested appearance property',
+      body: '<field name="Option"><ui><checkButton><h:futureProperty xmlns:h="urn:foreign"/></checkButton></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'non-checkButton ui',
+      body: '<field name="Option"><ui><textEdit/></ui><caption><value><text>Bad</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'duplicate item values',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>Bad A</text></value></caption><items><text>A</text></items></field><field name="Option"><ui><checkButton/></ui><caption><value><text>Bad B</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'duplicate normalized captions',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>SAME</text></value></caption><items><text>A</text></items></field><field name="Option"><ui><checkButton/></ui><caption><value><text> SAME </text></value></caption><items><text>B</text></items></field>',
+    },
+    {
+      reason: 'duplicate case-folded captions',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>SAME</text></value></caption><items><text>A</text></items></field><field name="Option"><ui><checkButton/></ui><caption><value><text>same</text></value></caption><items><text>B</text></items></field>',
+    },
+    {
+      reason: 'duplicate compatibility-normalized captions',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>SAME</text></value></caption><items><text>A</text></items></field><field name="Option"><ui><checkButton/></ui><caption><value><text>&#xFF33;&#xFF21;&#xFF2D;&#xFF25;</text></value></caption><items><text>B</text></items></field>',
+    },
+    {
+      reason: 'visually empty format caption',
+      body: '<field name="Option"><ui><checkButton/></ui><caption><value><text>&#x200B;</text></value></caption><items><text>A</text></items></field>',
+    },
+    {
+      reason: 'caption budget overflow',
+      body: `<field name="Option"><ui><checkButton/></ui><caption><value><text>${'x'.repeat(513)}</text></value></caption><items><text>A</text></items></field>`,
+    },
+    {
+      reason: 'choice count budget overflow',
+      body: Array.from(
+        { length: 257 },
+        (_, index) =>
+          `<field name="Option"><ui><checkButton/></ui><caption><value><text>Choice ${index}</text></value></caption><items><integer>${index}</integer></items></field>`,
+      ).join(''),
+    },
+  ];
+
+  for (const malformed of malformedGroups) {
+    const document = await documentWithTemplate(`
+      <template xmlns="${XFA_NAMESPACE}">
+        <subform name="Root">
+          <exclGroup name="Bad" ${malformed.groupAttributes ?? ''}>${malformed.body}</exclGroup>
+          ${goodGroup}
+        </subform>
+      </template>
+    `);
+    const result = extractXfaSemantics(document);
+
+    assert.equal(result.status, 'available', malformed.reason);
+    assert.equal(
+      result.byExactSomName.get('Root[0].Bad[0]')?.staticChoices,
+      undefined,
+      malformed.reason,
+    );
+    assert.deepEqual(
+      result.byExactSomName.get('Root[0].Good[0]')?.staticChoices,
+      [
+        { value: 'A', label: 'GOOD A' },
+        { value: '2', label: 'GOOD B' },
+      ],
+      malformed.reason,
+    );
+  }
+});
+
+void test('inherits conditional participation from semantic ancestors without contaminating siblings', async () => {
+  for (const ancestorAttributes of ['presence="hidden"', 'relevant="print"']) {
+    const document = await documentWithTemplate(`
+      <template xmlns="${XFA_NAMESPACE}">
+        <subform name="Root">
+          <subform name="Conditional" ${ancestorAttributes}>
+            <exclGroup name="Bad">
+              <field name="Option"><ui><checkButton/></ui><caption><value><text>BAD</text></value></caption><items><text>A</text></items></field>
+            </exclGroup>
+          </subform>
+          <exclGroup name="Good">
+            <field name="Option"><ui><checkButton/></ui><caption><value><text>GOOD</text></value></caption><items><text>A</text></items></field>
+          </exclGroup>
+        </subform>
+      </template>
+    `);
+    const result = extractXfaSemantics(document);
+
+    assert.equal(result.status, 'available', ancestorAttributes);
+    assert.equal(
+      result.byExactSomName.get('Root[0].Conditional[0].Bad[0]')?.staticChoices,
+      undefined,
+      ancestorAttributes,
+    );
+    assert.deepEqual(
+      result.byExactSomName.get('Root[0].Good[0]')?.staticChoices,
+      [{ value: 'A', label: 'GOOD' }],
+      ancestorAttributes,
+    );
+  }
+});
+
+void test('keeps the existing whole-template use and usehref rejection inside choice groups', async () => {
+  for (const reference of ['use="#prototype"', 'usehref="#prototype"']) {
+    const document = await documentWithTemplate(`
+      <template xmlns="${XFA_NAMESPACE}">
+        <exclGroup name="Choice">
+          <field name="Option" ${reference}>
+            <ui><checkButton/></ui>
+            <caption><value><text>Option</text></value></caption>
+            <items><text>A</text></items>
+          </field>
+        </exclGroup>
+      </template>
+    `);
+
+    assertUnavailable(
+      extractXfaSemantics(document),
+      'template_structure_unsupported',
+    );
+  }
+});

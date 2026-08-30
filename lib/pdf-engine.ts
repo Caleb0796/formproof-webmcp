@@ -32,6 +32,7 @@ import {
   BoundedZlibDecodeLimitError,
   decodeBoundedZlib,
   extractXfaSemantics,
+  type XfaFieldSemantics,
   type XfaSemanticsResult,
   // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
 } from './xfa-semantics.ts';
@@ -202,6 +203,7 @@ export interface PdfWidgetDescriptor {
 export interface PdfChoiceDescriptor {
   value: string;
   label: string;
+  labelSource: 'acroform' | 'xfa_static_exact_som';
 }
 
 export type PdfFieldIdentityReviewReason =
@@ -3902,18 +3904,71 @@ function fieldChoices(field: PDFField): PdfChoiceDescriptor[] {
         value: decodedValue,
         label:
           decodedDisplay.trim().length === 0 ? decodedValue : decodedDisplay,
+        labelSource: 'acroform',
       });
     }
     return choices;
   }
   const recoveredOptions = recoveredCheckBoxRadioOptions(field);
   if (recoveredOptions) {
-    return recoveredOptions.map((value) => ({ value, label: value }));
+    return recoveredOptions.map((value) => ({
+      value,
+      label: value,
+      labelSource: 'acroform',
+    }));
   }
   if (field instanceof PDFRadioGroup) {
-    return field.getOptions().map((value) => ({ value, label: value }));
+    return field.getOptions().map((value) => ({
+      value,
+      label: value,
+      labelSource: 'acroform',
+    }));
   }
   return [];
+}
+
+function exactXfaStaticChoiceLabels(
+  type: PdfFieldType,
+  choices: readonly PdfChoiceDescriptor[],
+  xfa: XfaFieldSemantics | undefined,
+): PdfChoiceDescriptor[] {
+  if (type !== 'radio' || xfa?.staticChoices === undefined) {
+    return [...choices];
+  }
+
+  const labelsByValue = new Map<string, string>();
+  const labels = new Set<string>();
+  for (const choice of xfa.staticChoices) {
+    const labelKey = choice.label
+      .normalize('NFKC')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .toLowerCase();
+    if (
+      labelsByValue.has(choice.value) ||
+      /\p{C}/u.test(choice.label) ||
+      !/[\p{L}\p{N}\p{P}\p{S}]/u.test(choice.label) ||
+      labels.has(labelKey)
+    ) {
+      return [...choices];
+    }
+    labelsByValue.set(choice.value, choice.label);
+    labels.add(labelKey);
+  }
+  const acroValues = new Set(choices.map(({ value }) => value));
+  if (
+    acroValues.size !== choices.length ||
+    labelsByValue.size !== choices.length ||
+    choices.some(({ value }) => !labelsByValue.has(value))
+  ) {
+    return [...choices];
+  }
+
+  return choices.map((choice) => ({
+    ...choice,
+    label: labelsByValue.get(choice.value)!,
+    labelSource: 'xfa_static_exact_som',
+  }));
 }
 
 function fieldAllowsMultiple(field: PDFField): boolean {
@@ -4021,11 +4076,12 @@ function describeField(
   const type = fieldType(field);
   const tooltip = fieldTooltip(field);
   const widgets = describeWidgets(document, field);
-  const choices = fieldChoices(field);
+  const acroFormChoices = fieldChoices(field);
   const xfa =
     xfaSemantics?.status === 'available'
       ? xfaSemantics.byExactSomName.get(field.getName())
       : undefined;
+  const choices = exactXfaStaticChoiceLabels(type, acroFormChoices, xfa);
   const xfaSignatureWidget =
     xfaSemantics?.status === 'available' &&
     xfaSemantics.humanOnlyExactSomNames.has(field.getName());
@@ -4133,11 +4189,19 @@ function inspectionWarnings(
         ? fields.filter((field) => xfaSemantics.byExactSomName.has(field.name))
             .length
         : 0;
+    const staticChoiceGroupCount = fields.filter(
+      (field) =>
+        field.type === 'radio' &&
+        field.choices.length > 0 &&
+        field.choices.every(
+          ({ labelSource }) => labelSource === 'xfa_static_exact_som',
+        ),
+    ).length;
     warnings.push({
       code: 'XFA_PRESENT_INSPECTION_ONLY',
       message:
         xfaSemantics.status === 'available'
-          ? `The PDF contains XFA. Bounded field text was read for ${exactMatchCount} of ${fields.length} AcroForm fallback fields only when full SOM names matched exactly; XFA choices, scripts, calculations, validation, and layout were not evaluated, and PDF rewriting remains disabled.`
+          ? `The PDF contains XFA. Bounded field text was read for ${exactMatchCount} of ${fields.length} AcroForm fallback fields only when full SOM names matched exactly; bounded static captions were recovered for ${staticChoiceGroupCount} radio groups only after exact export-value matching. XFA choice behavior, scripts, calculations, validation, and layout were not executed, and PDF rewriting remains disabled.`
           : 'The PDF contains XFA. Its AcroForm fallback fields remain inspectable, but agent staging is disabled because XFA field restrictions and meanings could not be resolved; PDF rewriting also remains disabled.',
     });
     if (xfaSemantics.status === 'unavailable') {

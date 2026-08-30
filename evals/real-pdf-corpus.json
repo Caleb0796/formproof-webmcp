@@ -77,7 +77,9 @@
       "xfaExperiment": {
         "exactSomMatchCount": 199,
         "speakFieldCount": 0,
-        "captionFieldCount": 68
+        "captionFieldCount": 68,
+        "staticChoiceMappedGroupCount": 0,
+        "staticChoiceLabelGainCount": 0
       },
       "semanticLabelGoldens": [
         {
@@ -172,7 +174,9 @@
       "xfaExperiment": {
         "exactSomMatchCount": 48,
         "speakFieldCount": 0,
-        "captionFieldCount": 38
+        "captionFieldCount": 38,
+        "staticChoiceMappedGroupCount": 0,
+        "staticChoiceLabelGainCount": 0
       },
       "semanticLabelGoldens": [
         {
@@ -423,7 +427,9 @@
         "queries": ["name", "gender", "social security"],
         "expectedFirstPageFieldNames": [
           "List all other name you have used",
-          "Gender"
+          "Gender",
+          "Applicant SSN 1",
+          "Emergency Contact Name"
         ],
         "expectedMatchCounts": [13, 3, 3],
         "expectedTotalMatchedFields": 19,
@@ -633,15 +639,67 @@
         "exactSomMatchCount": 122,
         "speakFieldCount": 100,
         "captionFieldCount": 36,
-        "acroFormChoiceLabelGoldens": [
+        "staticChoiceMappedGroupCount": 11,
+        "staticChoiceLabelGainCount": 25,
+        "staticChoiceGoldens": [
           {
             "fieldName": "F[0].P4[0].CurrentMaritalStatus[0]",
             "choices": [
-              { "value": "1", "label": "1" },
-              { "value": "2", "label": "2" },
-              { "value": "3", "label": "3" },
-              { "value": "4", "label": "4" },
-              { "value": "5", "label": "5" }
+              {
+                "value": "1",
+                "label": "MARRIED",
+                "labelSource": "xfa_static_exact_som"
+              },
+              {
+                "value": "2",
+                "label": "NEVER MARRIED",
+                "labelSource": "xfa_static_exact_som"
+              },
+              {
+                "value": "3",
+                "label": "SEPARATED",
+                "labelSource": "xfa_static_exact_som"
+              },
+              {
+                "value": "4",
+                "label": "WIDOWED",
+                "labelSource": "xfa_static_exact_som"
+              },
+              {
+                "value": "5",
+                "label": "DIVORCED",
+                "labelSource": "xfa_static_exact_som"
+              }
+            ]
+          },
+          {
+            "fieldName": "F[0].P5[0].EnrolledInMedicareHospitalInsurance[0]",
+            "choices": [
+              {
+                "value": "2",
+                "label": "YES",
+                "labelSource": "xfa_static_exact_som"
+              },
+              {
+                "value": "1",
+                "label": "NO",
+                "labelSource": "xfa_static_exact_som"
+              }
+            ]
+          },
+          {
+            "fieldName": "F[0].P5[0].Sex[0]",
+            "choices": [
+              {
+                "value": "1",
+                "label": "MALE",
+                "labelSource": "xfa_static_exact_som"
+              },
+              {
+                "value": " FEMALE",
+                "label": "FEMALE",
+                "labelSource": "xfa_static_exact_som"
+              }
             ]
           }
         ]

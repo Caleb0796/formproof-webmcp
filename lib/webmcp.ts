@@ -543,10 +543,8 @@ export interface FormContextToolField {
   readonly readOnly?: boolean;
   readonly humanOnly?: boolean;
   readonly humanPinned?: true;
-  readonly currentValue?: FormFieldValue;
-  readonly currentValueAvailable?: boolean;
-  readonly stagedValue?: FormFieldValue;
-  readonly stagedValueAvailable?: boolean;
+  readonly currentValueAvailable?: true;
+  readonly stagedValueAvailable?: true;
   readonly choiceCount?: number;
   readonly multiSelect?: boolean;
   readonly maxLength?: number;
@@ -604,17 +602,18 @@ export interface FormContextToolData {
   };
   readonly humanCorrections?: {
     readonly count: number;
-    readonly fieldNames: readonly string[];
+    readonly fieldNames?: readonly string[];
     readonly omittedFieldCount?: number;
     readonly agentMayOverwrite: false;
-    readonly removal: 'human_ui_only';
-    readonly sessionScoped: true;
+    readonly removal?: 'human_ui_only';
+    readonly sessionScoped?: true;
   };
   readonly pagination: {
     readonly returned: number;
     readonly total: number;
     readonly nextCursor: string | null;
   };
+  readonly valuesAvailableVia: 'get_field_evidence';
   readonly untrustedPdfContent: true;
   readonly fields: readonly FormContextToolField[];
 }
@@ -825,6 +824,8 @@ interface CompactContextField {
   readonly readOnly?: true;
   readonly humanOnly?: true;
   readonly humanPinned?: true;
+  readonly currentValueAvailable?: true;
+  readonly stagedValueAvailable?: true;
   readonly matchedQueryIndexes?: readonly number[];
   readonly matchBasis?: 'discovery_alias' | 'mixed';
   readonly requiresHumanVerification?: true;
@@ -1137,6 +1138,7 @@ export function createFieldEvidenceToolData(
 interface EvidenceChoiceProjection {
   value: string;
   label?: string;
+  labelSource?: 'xfa_static_exact_som';
   labelTruncated?: true;
 }
 
@@ -1303,11 +1305,18 @@ function evidenceValue(
 function projectEvidenceChoice(
   choice: PdfChoiceDescriptor,
 ): EvidenceChoiceProjection {
-  if (choice.label === choice.value) return { value: choice.value };
+  const labelSource =
+    choice.labelSource === 'xfa_static_exact_som'
+      ? { labelSource: 'xfa_static_exact_som' as const }
+      : {};
+  if (choice.label === choice.value) {
+    return { value: choice.value, ...labelSource };
+  }
   const label = takeUtf8Prefix(choice.label, 180);
   return {
     value: choice.value,
     label: label.value,
+    ...labelSource,
     ...(label.truncated ? { labelTruncated: true } : {}),
   };
 }
@@ -1455,6 +1464,7 @@ function formContextData(
             )
           : null,
     },
+    valuesAvailableVia: 'get_field_evidence',
     untrustedPdfContent: true,
     fields,
   };
@@ -1472,7 +1482,7 @@ function compactFormContextData(
 ): FormContextToolData {
   const warningCodes = Object.keys(countPdfWarnings(inspection));
   const humanCorrections = humanCorrectionSummary(state);
-  return {
+  let data: FormContextToolData = {
     ...(includeDiagnostics
       ? {
           contextProjection: 'identity_only' as const,
@@ -1546,9 +1556,88 @@ function compactFormContextData(
             )
           : null,
     },
+    valuesAvailableVia: 'get_field_evidence',
     untrustedPdfContent: true,
     fields,
   };
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.safety?.warningCodes !== undefined
+  ) {
+    const safety = { ...data.safety };
+    delete safety.warningCodes;
+    data = { ...data, safety };
+  }
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.search?.unmatchedQueryIndexes?.length === 0
+  ) {
+    const search = { ...data.search };
+    delete search.unmatchedQueryIndexes;
+    data = { ...data, search };
+  }
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.search?.discoveryFallback !== undefined
+  ) {
+    const search = { ...data.search };
+    delete search.discoveryFallback;
+    data = { ...data, search };
+  }
+  while (serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES) {
+    const humanCorrections = data.humanCorrections;
+    const preview = humanCorrections?.fieldNames;
+    if (
+      humanCorrections === undefined ||
+      preview === undefined ||
+      preview.length === 0
+    ) {
+      break;
+    }
+    const fieldNames = preview.slice(0, -1);
+    data = {
+      ...data,
+      humanCorrections: {
+        ...humanCorrections,
+        fieldNames,
+        omittedFieldCount: humanCorrections.count - fieldNames.length,
+      },
+    };
+  }
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.validation !== undefined
+  ) {
+    const compactData = { ...data };
+    delete compactData.validation;
+    data = compactData;
+  }
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.humanCorrections?.fieldNames?.length === 0
+  ) {
+    const humanCorrections = { ...data.humanCorrections };
+    delete humanCorrections.fieldNames;
+    data = { ...data, humanCorrections };
+  }
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.search?.agentWritableOnly === true
+  ) {
+    const search = { ...data.search };
+    delete search.agentWritableOnly;
+    data = { ...data, search };
+  }
+  if (
+    serializedJsonByteLength(data) > MAX_CONTEXT_DATA_BYTES &&
+    data.humanCorrections !== undefined
+  ) {
+    const humanCorrections = { ...data.humanCorrections };
+    delete humanCorrections.removal;
+    delete humanCorrections.sessionScoped;
+    data = { ...data, humanCorrections };
+  }
+  return data;
 }
 
 function projectCompactContextField(
@@ -1577,6 +1666,12 @@ function projectCompactContextField(
     ...(state.draft[field.name]?.actor === 'human'
       ? { humanPinned: true as const }
       : {}),
+    ...(!isBlankFieldValue(field.current)
+      ? { currentValueAvailable: true as const }
+      : {}),
+    ...(state.draft[field.name] === undefined
+      ? {}
+      : { stagedValueAvailable: true as const }),
     ...(matchRanks === undefined || !includeMatchedQueryIndexes
       ? {}
       : {
@@ -1619,10 +1714,7 @@ function projectContextField(
     definition.label,
     MAX_CONTEXT_DISPLAY_TEXT_BYTES,
   );
-  const currentValue = contextValue(field.current);
   const hasCurrentValue = !isBlankFieldValue(field.current);
-  const stagedValue =
-    staged === undefined ? undefined : contextValue(staged.value, false);
   const includeLabel = !compactSearchResult || label.value !== field.name;
   return {
     ...(agentAddressable
@@ -1650,19 +1742,11 @@ function projectContextField(
           requiresHumanVerification: true as const,
           identityReviewReasons: definition.identityReviewReasons,
         }),
+    ...(hasCurrentValue ? { currentValueAvailable: true as const } : {}),
+    ...(staged === undefined ? {} : { stagedValueAvailable: true as const }),
     ...(compactSearchResult
       ? {}
       : {
-          ...(currentValue === undefined
-            ? hasCurrentValue
-              ? { currentValueAvailable: true }
-              : {}
-            : { currentValue }),
-          ...(staged === undefined
-            ? {}
-            : stagedValue === undefined
-              ? { stagedValueAvailable: true }
-              : { stagedValue }),
           ...(field.choices.length === 0
             ? {}
             : { choiceCount: field.choices.length }),
@@ -1670,17 +1754,6 @@ function projectContextField(
           ...(field.maxLength === null ? {} : { maxLength: field.maxLength }),
         }),
   };
-}
-
-function contextValue(
-  value: FormFieldValue,
-  omitBlank = true,
-): FormFieldValue | undefined {
-  if (omitBlank && isBlankFieldValue(value)) return undefined;
-  if (Array.isArray(value) && value.length > MAX_OUTPUT_ARRAY_ITEMS) {
-    return undefined;
-  }
-  return serializedJsonByteLength(value) <= 200 ? value : undefined;
 }
 
 function isBlankFieldValue(value: FormFieldValue): boolean {

@@ -52,6 +52,7 @@ import {
   exportApprovedPdfFromUi,
   exportFillPackageFromUi,
   getArtifactReviewFieldNames,
+  getChoiceLabelReviewNotice,
   getReleaseGate,
   stageFieldUpdates,
   validateDraft,
@@ -2071,6 +2072,9 @@ export function FormProofWorkbench() {
                 const descriptor = descriptorByName.get(entry.fieldName);
                 const requiresIdentityReview =
                   (entry.identityReviewReasons?.length ?? 0) > 0;
+                const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
+                  descriptor?.choices ?? [],
+                );
                 return (
                   <div className="draft-card" key={entry.fieldName}>
                     <div className="draft-card-heading">
@@ -2104,6 +2108,11 @@ export function FormProofWorkbench() {
                         candidate, but it is not a label or evidence. Verify the
                         field in the untouched original PDF at{' '}
                         {formatFieldLocation(descriptor)} before export.
+                      </small>
+                    )}
+                    {choiceLabelReviewNotice && (
+                      <small className="human-only-note">
+                        {choiceLabelReviewNotice}
                       </small>
                     )}
                     {entry.provenance.evidence && (
@@ -2422,6 +2431,9 @@ export function FormProofWorkbench() {
               const field = formState?.fields[fieldName];
               const staged = formState?.draft[fieldName];
               const descriptor = descriptorByName.get(fieldName);
+              const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
+                descriptor?.choices ?? [],
+              );
               const checkboxId = `review-field-${index}`;
               const isHumanCompletion = !staged;
               const isHumanPinned = staged?.actor === 'human';
@@ -2520,6 +2532,11 @@ export function FormProofWorkbench() {
                         not evidence. Open the untouched original PDF and verify
                         the displayed field at {formatFieldLocation(descriptor)}
                         before checking this box.
+                      </span>
+                    )}
+                    {choiceLabelReviewNotice && (
+                      <span className="human-only-note">
+                        {choiceLabelReviewNotice}
                       </span>
                     )}
                     {!isHumanCompletion && isRequiredMissing && (

@@ -129,8 +129,16 @@ void test('maps inspected PDF fields through the shared UI and eval contract', (
     current: ['Housing'],
     options: ['Housing', 'Utilities'],
     choices: [
-      { value: 'Housing', label: 'Housing support' },
-      { value: 'Utilities', label: 'Utility support' },
+      {
+        value: 'Housing',
+        label: 'Housing support',
+        labelSource: 'acroform',
+      },
+      {
+        value: 'Utilities',
+        label: 'Utility support',
+        labelSource: 'acroform',
+      },
     ],
     multiSelect: true,
     required: true,
@@ -1492,7 +1500,7 @@ void test('exports a deterministic source-bound fill package for protected hybri
     new TextDecoder().decode(first.result.bytes),
   ) as typeof manifest;
   assert.deepEqual(parsed, manifest);
-  assert.equal(manifest.schemaVersion, 3);
+  assert.equal(manifest.schemaVersion, 4);
   assert.equal(manifest.createdAt, request.createdAt);
   assert.equal(manifest.sourcePdfModified, false);
   assert.deepEqual(manifest.source, {
@@ -1595,9 +1603,31 @@ void test('exports a deterministic source-bound fill package for protected hybri
   );
   assert.equal(
     manifest.limitations.some((item) =>
-      item.includes('Bounded XFA field text'),
+      item.includes(
+        'AcroForm fallback field names, choice values, choice-to-widget mappings, appearance states, and geometry remain authoritative',
+      ),
     ),
     true,
+  );
+  assert.equal(
+    manifest.limitations.some((item) =>
+      item.includes(
+        'bounded static XFA exclGroup caption is used only when its full SOM name and complete choice value set match exactly',
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    manifest.limitations.some((item) =>
+      item.includes(
+        'XFA scripts, calculations, validation, dynamic choices, and layout are not executed',
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    manifest.limitations.some((item) => item.includes('XFA choices')),
+    false,
   );
 
   const serializedManifest = JSON.stringify(parsed);

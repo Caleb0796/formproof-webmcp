@@ -76,24 +76,50 @@ async function textPdf(
   });
 }
 
-async function xfaRadioPdf(template: string): Promise<Uint8Array> {
+async function xfaRadioPdf(
+  template: string,
+  options: readonly string[] = ['A', 'B'],
+  fieldName = 'Root[0].Choice[0]',
+): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([612, 792]);
   const form = document.getForm();
-  const field = form.createRadioGroup('Root[0].Choice[0]');
-  field.addOptionToPage('A', page, {
+  const field = form.createRadioGroup(fieldName);
+  for (const [index, option] of options.entries()) {
+    field.addOptionToPage(option, page, {
+      x: 40 + index * 30,
+      y: 700,
+      width: 18,
+      height: 18,
+      borderWidth: 1,
+      borderColor: rgb(0, 0, 0),
+    });
+  }
+  const templateRef = document.context.register(
+    document.context.flateStream(template),
+  );
+  form.acroForm.dict.set(
+    PDFName.of('XFA'),
+    document.context.obj([PDFString.of('template'), templateRef]),
+  );
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function xfaDropdownPdf(template: string): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const form = document.getForm();
+  const field = form.createDropdown('Root[0].Choice[0]');
+  field.addOptions(['1', '2']);
+  field.addToPage(page, {
     x: 40,
     y: 700,
-    width: 18,
-    height: 18,
-    borderWidth: 1,
-    borderColor: rgb(0, 0, 0),
-  });
-  field.addOptionToPage('B', page, {
-    x: 70,
-    y: 700,
-    width: 18,
-    height: 18,
+    width: 120,
+    height: 24,
     borderWidth: 1,
     borderColor: rgb(0, 0, 0),
   });
@@ -566,4 +592,229 @@ void test('does not let conflicting XFA signature text override an AcroForm tool
     ),
     false,
   );
+});
+
+const STATIC_CHOICE_TEMPLATE = `<?xml version="1.0" encoding="UTF-8"?>
+<template xmlns="http://www.xfa.org/schema/xfa-template/3.6/">
+  <subform name="Root">
+    <exclGroup name="Choice">
+      <field name="Gender">
+        <ui><checkButton/></ui>
+        <caption><value><text>FEMALE</text></value></caption>
+        <assist><toolTip>Conflicting MALE tooltip</toolTip></assist>
+        <items><text>1</text></items>
+      </field>
+      <field name="Gender">
+        <items><integer>2</integer></items>
+        <assist><toolTip>Conflicting FEMALE tooltip</toolTip></assist>
+        <caption><value><text>MALE</text></value></caption>
+        <ui><checkButton/></ui>
+      </field>
+    </exclGroup>
+  </subform>
+</template>`;
+
+void test('uses static XFA captions only for an exact radio SOM and complete export-value set', async () => {
+  const inspection = await inspectPdf(
+    await xfaRadioPdf(STATIC_CHOICE_TEMPLATE, ['1', '2']),
+  );
+  const field = inspection.fields[0];
+
+  assert.equal(field.name, 'Root[0].Choice[0]');
+  assert.equal(field.type, 'radio');
+  assert.deepEqual(field.choices, [
+    {
+      value: '1',
+      label: 'FEMALE',
+      labelSource: 'xfa_static_exact_som',
+    },
+    {
+      value: '2',
+      label: 'MALE',
+      labelSource: 'xfa_static_exact_som',
+    },
+  ]);
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+  assert.match(
+    inspection.warnings.find(
+      ({ code }) => code === 'XFA_PRESENT_INSPECTION_ONLY',
+    )?.message ?? '',
+    /bounded static captions were recovered for 1 radio groups/u,
+  );
+});
+
+void test('keeps every AcroForm label when static XFA matching is partial or not exact', async () => {
+  const cases = [
+    {
+      name: 'partial AcroForm set',
+      source: () => xfaRadioPdf(STATIC_CHOICE_TEMPLATE, ['1', '3']),
+      expectedValues: ['1', '3'],
+    },
+    {
+      name: 'duplicate normalized captions with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<text>FEMALE</text>',
+            '<text>SAME</text>',
+          ).replace('<text>MALE</text>', '<text> SAME </text>'),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'duplicate case-folded captions with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<text>FEMALE</text>',
+            '<text>SAME</text>',
+          ).replace('<text>MALE</text>', '<text>same</text>'),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'visually empty caption with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<text>FEMALE</text>',
+            '<text>&#x200B;</text>',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'hidden field with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<field name="Gender">',
+            '<field name="Gender" presence="hidden">',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'inactive caption with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<caption><value><text>FEMALE</text>',
+            '<caption presence="inactive"><value><text>FEMALE</text>',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'invisible items with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<items><text>1</text>',
+            '<items presence="invisible"><text>1</text>',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'conditional group with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<exclGroup name="Choice">',
+            '<exclGroup name="Choice" relevant="print">',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'hidden ancestor with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<subform name="Root">',
+            '<subform name="Root" presence="hidden">',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'conditional ancestor with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<subform name="Root">',
+            '<subform name="Root" relevant="print">',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'dynamic items reference with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<items><text>1</text>',
+            '<items ref="$record.dynamic"><text>1</text>',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'display-only items value with exact SOM and complete values',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace(
+            '<items><text>1</text>',
+            '<items save="0"><text>1</text>',
+          ),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'non-exact SOM',
+      source: () =>
+        xfaRadioPdf(
+          STATIC_CHOICE_TEMPLATE.replace('name="Choice"', 'name="Other"'),
+          ['1', '2'],
+        ),
+      expectedValues: ['1', '2'],
+    },
+    {
+      name: 'non-radio AcroForm field',
+      source: () => xfaDropdownPdf(STATIC_CHOICE_TEMPLATE),
+      expectedValues: ['1', '2'],
+    },
+  ];
+
+  for (const candidate of cases) {
+    const inspection = await inspectPdf(await candidate.source());
+    assert.deepEqual(
+      inspection.fields[0].choices,
+      candidate.expectedValues.map((value) => ({
+        value,
+        label: value,
+        labelSource: 'acroform',
+      })),
+      candidate.name,
+    );
+    assert.match(
+      inspection.warnings.find(
+        ({ code }) => code === 'XFA_PRESENT_INSPECTION_ONLY',
+      )?.message ?? '',
+      /bounded static captions were recovered for 0 radio groups/u,
+      candidate.name,
+    );
+  }
 });
