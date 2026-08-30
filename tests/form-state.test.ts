@@ -146,6 +146,28 @@ void test('maps inspected PDF fields through the shared UI and eval contract', (
   assert.notEqual(mapped.options, optionList.options);
   assert.notEqual(mapped.sourceValue, optionList.current);
 
+  for (const tooltip of ['undefined', ' NULL ']) {
+    const fieldName = `sentinel:${tooltip.trim().toLowerCase()}`;
+    assert.equal(
+      createFormFieldDefinitionFromPdf({
+        ...optionList,
+        name: fieldName,
+        tooltip,
+      }).label,
+      fieldName,
+    );
+  }
+
+  const longTooltipFieldName = 'DS11.ApplicantName';
+  assert.equal(
+    createFormFieldDefinitionFromPdf({
+      ...optionList,
+      name: longTooltipFieldName,
+      tooltip: 'Detailed PDF instruction '.repeat(10),
+    }).label,
+    longTooltipFieldName,
+  );
+
   assert.deepEqual(
     createFormFieldDefinitionFromPdf({
       ...optionList,
@@ -282,6 +304,78 @@ void test('creates a deterministic source-bound plan hash and validation report'
       ['required_missing', 'full_name'],
     ],
   );
+});
+
+void test('reports PDF-required coverage without claiming full-form completeness', async () => {
+  const ds11LikeFields: FormFieldDefinition[] = [
+    {
+      name: 'DS11.ApplicantName',
+      label: 'Applicant name',
+      type: 'text',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      sourceValue: '',
+    },
+    {
+      name: 'DS11.MailingAddress',
+      label: 'Mailing address',
+      type: 'text',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      sourceValue: '',
+    },
+  ];
+  const initial = await createFormState(SOURCE, ds11LikeFields);
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'DS11.ApplicantName',
+        value: 'Synthetic Applicant',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('optional DS-11-like field failed to stage');
+
+  const partialReport = validateDraft(staged.state);
+  assert.equal(partialReport.blockerCount, 0);
+  assert.equal(partialReport.structurallyValid, true);
+  assert.equal(partialReport.completionStatus, 'unknown');
+  assert.equal(partialReport.ruleCoverage, 'pdf_required_flags_only');
+  assert.equal(partialReport.formCompletenessAssessed, false);
+  assert.equal(partialReport.canApprove, true);
+
+  const requiredState = await createFormState(SOURCE, [
+    { ...ds11LikeFields[0], required: true },
+  ]);
+  const incompleteReport = validateDraft(requiredState);
+  assert.equal(incompleteReport.blockerCount, 1);
+  assert.equal(incompleteReport.structurallyValid, false);
+  assert.equal(incompleteReport.completionStatus, 'incomplete');
+  assert.equal(incompleteReport.ruleCoverage, 'pdf_required_flags_only');
+  assert.equal(incompleteReport.formCompletenessAssessed, false);
+  assert.equal(incompleteReport.canApprove, false);
+
+  const humanCompletionState = await createFormState(SOURCE, [
+    {
+      ...ds11LikeFields[0],
+      name: 'DS11.Signature',
+      label: 'Signature',
+      required: true,
+      humanOnly: true,
+    },
+  ]);
+  const humanCompletionReport = validateDraft(humanCompletionState);
+  assert.equal(humanCompletionReport.blockerCount, 0);
+  assert.equal(humanCompletionReport.structurallyValid, true);
+  assert.equal(humanCompletionReport.completionStatus, 'incomplete');
+  assert.equal(humanCompletionReport.canApprove, true);
 });
 
 void test('stages a batch atomically with CAS and document-hash checks', async () => {

@@ -44,12 +44,22 @@ export interface FormFieldDefinition {
 }
 
 const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/gi;
+// Long PDF help text is instruction content, not a concise field label.
+const MAX_TOOLTIP_LABEL_LENGTH = 180;
 
 export function createFormFieldDefinitionFromPdf(
   field: PdfFieldDescriptor,
 ): FormFieldDefinition {
   const tooltip = field.tooltip?.replace(HUMAN_ONLY_MARKER, '').trim();
-  const label = tooltip?.split(/\s+[–—-]\s+/u)[0]?.trim() || field.name;
+  const normalizedTooltip =
+    tooltip !== undefined &&
+    tooltip.length <= MAX_TOOLTIP_LABEL_LENGTH &&
+    tooltip.toLowerCase() !== 'undefined' &&
+    tooltip.toLowerCase() !== 'null'
+      ? tooltip
+      : undefined;
+  const label =
+    normalizedTooltip?.split(/\s+[–—-]\s+/u)[0]?.trim() || field.name;
   const unsupported = field.type === 'unsupported';
   return {
     name: field.name,
@@ -108,6 +118,10 @@ export interface ValidationReport {
   readonly blockerCount: number;
   readonly reviewCount: number;
   readonly reviewFieldNames: readonly string[];
+  readonly structurallyValid: boolean;
+  readonly completionStatus: 'incomplete' | 'unknown';
+  readonly ruleCoverage: 'pdf_required_flags_only';
+  readonly formCompletenessAssessed: false;
   readonly canApprove: boolean;
 }
 
@@ -699,6 +713,10 @@ function buildValidationReport(
         .map((issue) => issue.fieldName),
     ),
   ].sort();
+  const hasRequiredMissing = issues.some(
+    ({ code }) =>
+      code === 'required_missing' || code === 'human_completion_required',
+  );
 
   return deepFreeze({
     stateVersion,
@@ -706,6 +724,10 @@ function buildValidationReport(
     blockerCount,
     reviewCount,
     reviewFieldNames,
+    structurallyValid: blockerCount === 0,
+    completionStatus: hasRequiredMissing ? 'incomplete' : 'unknown',
+    ruleCoverage: 'pdf_required_flags_only',
+    formCompletenessAssessed: false,
     canApprove: blockerCount === 0,
   });
 }
