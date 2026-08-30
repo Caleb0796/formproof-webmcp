@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import type { FieldUpdate } from '../lib/form-state';
 import type {
   FormProofAdapterResult,
   FormProofWebMcpAdapter,
   WebMcpToolDefinition,
 } from '../lib/webmcp';
+
+const { createFormFieldDefinitionFromPdf, createFormState, stageFieldUpdates } =
+  (await import(
+    new URL('../lib/form-state.ts', import.meta.url).href
+  )) as typeof import('../lib/form-state');
+const { inspectPdf } = (await import(
+  new URL('../lib/pdf-engine.ts', import.meta.url).href
+)) as typeof import('../lib/pdf-engine');
 
 const {
   FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
@@ -68,8 +78,9 @@ interface ActualCall {
 }
 
 const SOURCE_HASH = 'a'.repeat(64);
-const DEMO_SOURCE_HASH =
-  '9f3ce968181004b8156afc26ae6ad1643b903cdd674000cf41dfcd50c5013fc9';
+const DEMO_SOURCE_HASH = createHash('sha256')
+  .update(await readFile(new URL('../public/demo-form.pdf', import.meta.url)))
+  .digest('hex');
 const CURSOR_SOURCE_HASH_LENGTH = 32;
 const SYNTHETIC_INJECTION_SOURCE_HASH = 'b'.repeat(64);
 const INJECTION_TEXT =
@@ -282,6 +293,15 @@ function isConstraint(value: unknown): value is Record<string, unknown> {
     isRecord(value) &&
     Object.keys(value).length > 0 &&
     Object.keys(value).every((key) => key.startsWith('$'))
+  );
+}
+
+function containsMatcher(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsMatcher);
+  if (!isRecord(value)) return false;
+  return (
+    Object.keys(value).some((key) => key.startsWith('$')) ||
+    Object.values(value).some(containsMatcher)
   );
 }
 
@@ -701,6 +721,7 @@ function assertJourneyBindings(evaluation: EvalCase): void {
     ({ functionName }) => functionName === 'stage_form_values',
   );
   let contextCallCount = 0;
+  let stagedPlanHash: string | null = null;
 
   for (const [index, call] of calls.entries()) {
     const path = `${evaluation.name}.expectedCall[${index}]`;
@@ -722,11 +743,27 @@ function assertJourneyBindings(evaluation: EvalCase): void {
       assertBoundCall(call, 0, 0, path);
     } else if (call.functionName === 'stage_form_values') {
       assertBoundCall(call, 0, 1, path);
+      const mockOutput = requireRecord(call.mockOutput, `${path}.mockOutput`);
+      const data = requireRecord(mockOutput.data, `${path}.mockOutput.data`);
+      assertPlanHash(data.planHash, `${path}.mockOutput.data.planHash`);
+      stagedPlanHash = data.planHash as string;
     } else if (call.functionName === 'validate_fill_plan') {
       const version = hasStage ? 1 : 0;
       assertBoundCall(call, version, version, path);
     } else if (call.functionName === 'start_fill_review') {
       assertBoundCall(call, 1, 1, path);
+      assert.notEqual(
+        stagedPlanHash,
+        null,
+        `${path} must follow a staged plan`,
+      );
+      const mockOutput = requireRecord(call.mockOutput, `${path}.mockOutput`);
+      const data = requireRecord(mockOutput.data, `${path}.mockOutput.data`);
+      assert.equal(
+        data.planHash,
+        stagedPlanHash,
+        `${path} must open the exact staged plan`,
+      );
     } else {
       assert.fail(`${path} uses an unknown journey tool`);
     }
@@ -772,6 +809,15 @@ function assertJourneyReadiness(journeys: EvalCase[]): EvalCase {
 
   for (const evaluation of journeys) {
     const calls = flattenCalls(evaluation.expectedCall);
+    for (const [index, stageCall] of calls
+      .filter(({ functionName }) => functionName === 'stage_form_values')
+      .entries()) {
+      assert.equal(
+        containsMatcher(stageCall.arguments),
+        false,
+        `${evaluation.name}.stage[${index}] must be a concrete replayable input`,
+      );
+    }
     const reviewCalls = calls.filter(
       ({ functionName }) => functionName === 'start_fill_review',
     );
@@ -1177,7 +1223,7 @@ function assertOptionalMockDataTypes(
       validation.reviewFieldNames,
       `${path}.validation.reviewFieldNames`,
     );
-    assert.equal(data.approvalBoundary, 'human_review_only');
+    assert.equal(data.approvalBoundary, 'ui_approval_only');
     if (hasOwn(data, 'binding')) requireRecord(data.binding, `${path}.binding`);
     const pagination = requireRecord(data.pagination, `${path}.pagination`);
     assertOnlyKeys(
@@ -1739,6 +1785,66 @@ void test('keeps journey readiness and source-bound versions coherent', async ()
     'INVALID_INPUT',
     'the happy stage fixture must pass the runtime parser',
   );
+});
+
+void test('replays every concrete journey stage against the demo state', async () => {
+  const parsed = await readJson('../evals/formproof-evals.json');
+  assertEvalCases(parsed);
+  const source = new Uint8Array(
+    await readFile(new URL('../public/demo-form.pdf', import.meta.url)),
+  );
+  const inspection = await inspectPdf(source);
+  const initialState = await createFormState(
+    {
+      fileName: 'residential-support-intake.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  let stageCount = 0;
+
+  for (const evaluation of parsed.filter(({ name }) =>
+    name?.startsWith('[journey]'),
+  )) {
+    for (const [index, call] of flattenCalls(evaluation.expectedCall)
+      .filter(({ functionName }) => functionName === 'stage_form_values')
+      .entries()) {
+      stageCount += 1;
+      const path = `${evaluation.name}.stage[${index}]`;
+      const args = requireRecord(call.arguments, `${path}.arguments`);
+      assert.ok(
+        Array.isArray(args.updates),
+        `${path}.updates must be an array`,
+      );
+      assert.equal(args.expectedStateVersion, initialState.stateVersion);
+      assert.equal(args.expectedSourceHash, initialState.source.sourceHash);
+
+      const staged = await stageFieldUpdates(initialState, {
+        expectedStateVersion: args.expectedStateVersion as number,
+        expectedSourceHash: args.expectedSourceHash as string,
+        actor: 'agent',
+        updates: args.updates as FieldUpdate[],
+      });
+      assert.equal(
+        staged.ok,
+        true,
+        staged.ok ? undefined : JSON.stringify(staged.errors),
+      );
+      if (!staged.ok) throw new Error(`${path} is not replayable`);
+
+      const mockOutput = requireRecord(call.mockOutput, `${path}.mockOutput`);
+      const data = requireRecord(mockOutput.data, `${path}.mockOutput.data`);
+      assert.equal(mockOutput.stateVersion, staged.state.stateVersion);
+      assert.equal(mockOutput.sourceHash, staged.state.source.sourceHash);
+      assert.deepEqual(data.changedFields, staged.changedFields);
+      assert.equal(data.planHash, staged.state.planHash);
+      assert.deepEqual(data.validation, staged.state.validation);
+    }
+  }
+
+  assert.equal(stageCount, 5);
 });
 
 void test('keeps mock data aligned with the real adapter contracts', async () => {

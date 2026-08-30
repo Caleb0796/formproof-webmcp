@@ -71,6 +71,7 @@ type ToolState =
 
 interface LoadedDocument {
   fileName: string;
+  kind: 'demo' | 'upload';
   sourceUrl: string;
   inspection: PdfInspection;
 }
@@ -294,7 +295,12 @@ export function FormProofWorkbench() {
   }, []);
 
   const loadSource = useCallback(
-    async (fileName: string, bytes: Uint8Array, generation: number) => {
+    async (
+      fileName: string,
+      bytes: Uint8Array,
+      generation: number,
+      kind: LoadedDocument['kind'],
+    ) => {
       try {
         if (bytes.byteLength > MAX_PDF_BYTES) {
           throw new Error(
@@ -325,7 +331,7 @@ export function FormProofWorkbench() {
         sourceBytesRef.current = Uint8Array.from(bytes);
         inspectionRef.current = inspection;
         commitState(nextState);
-        setDocumentState({ fileName, sourceUrl, inspection });
+        setDocumentState({ fileName, kind, sourceUrl, inspection });
         resetOutput();
         reviewLockRef.current = false;
         reviewBindingRef.current = null;
@@ -363,6 +369,7 @@ export function FormProofWorkbench() {
         'residential-support-intake.pdf',
         new Uint8Array(await response.arrayBuffer()),
         generation,
+        'demo',
       );
     } catch (caught) {
       if (!mountedRef.current || generation !== loadGenerationRef.current)
@@ -755,6 +762,7 @@ export function FormProofWorkbench() {
           file.name,
           new Uint8Array(await file.arrayBuffer()),
           generation,
+          'upload',
         );
       } catch (caught) {
         if (!mountedRef.current || generation !== loadGenerationRef.current)
@@ -774,6 +782,12 @@ export function FormProofWorkbench() {
   const stageDemoPlan = async () => {
     const current = stateRef.current;
     if (!current || reviewLockRef.current) return;
+    if (documentState?.kind !== 'demo') {
+      setError(
+        'The synthetic plan only matches the built-in demo PDF. Use a WebMCP agent to stage values in your PDF.',
+      );
+      return;
+    }
     pendingPlanMutationsRef.current += 1;
 
     try {
@@ -828,6 +842,12 @@ export function FormProofWorkbench() {
                   evidence: evidenceByField[fieldName],
                 },
         }));
+      if (updates.length !== Object.keys(candidates).length) {
+        setError(
+          'The built-in demo fields no longer match the synthetic plan. Reload the demo before continuing.',
+        );
+        return;
+      }
       const result = await stageFieldUpdates(current, {
         expectedStateVersion: current.stateVersion,
         expectedSourceHash: current.source.sourceHash,
@@ -909,7 +929,7 @@ export function FormProofWorkbench() {
         expectedStateVersion: current.stateVersion,
         expectedSourceHash: current.source.sourceHash,
         expectedPlanHash: current.planHash,
-        approvedBy: 'Local reviewer',
+        approvedBy: 'UI reviewer',
         confirmedFieldNames: reviewNames,
       });
       if (!approval.ok) {
@@ -945,7 +965,7 @@ export function FormProofWorkbench() {
       commitState(exported.state);
       setShowOutput(true);
       setNotice(
-        'Approved values were written to a fresh copy and reopened for verification.',
+        'Approved staged values were written to a fresh copy and reopened for verification. Human-only fields remain unchanged.',
       );
       setReviewOpen(false);
       setConfirmedFields(new Set());
@@ -990,6 +1010,15 @@ export function FormProofWorkbench() {
   const activePreviewUrl =
     showOutput && outputUrl ? outputUrl : documentState?.sourceUrl;
   const validation = formState ? validateDraft(formState) : null;
+  const pendingHumanCompletionNames = formState
+    ? [
+        ...new Set(
+          formState.validation.issues
+            .filter(({ code }) => code === 'human_completion_required')
+            .map(({ fieldName }) => fieldName),
+        ),
+      ]
+    : [];
 
   const steps = [
     {
@@ -1009,7 +1038,7 @@ export function FormProofWorkbench() {
     },
     {
       label: 'Review evidence',
-      detail: formState?.approval ? 'Exact plan approved' : 'Human-only gate',
+      detail: formState?.approval ? 'Exact plan approved' : 'UI review gate',
       state: formState?.approval
         ? 'done'
         : draftEntries.length > 0
@@ -1018,7 +1047,7 @@ export function FormProofWorkbench() {
     },
     {
       label: 'Verify & export',
-      detail: releaseOpen ? 'Verified copy ready' : 'Locked',
+      detail: releaseOpen ? 'Staged values verified' : 'Locked',
       state: releaseOpen ? 'done' : formState?.approval ? 'active' : 'idle',
     },
   ] as const;
@@ -1034,7 +1063,7 @@ export function FormProofWorkbench() {
         </a>
         <div className="topbar-status">
           <span className="privacy-note">
-            <LockKeyhole aria-hidden="true" /> Stays in this browser
+            <LockKeyhole aria-hidden="true" /> PDF bytes stay in this browser
           </span>
           <Badge
             variant="outline"
@@ -1053,8 +1082,8 @@ export function FormProofWorkbench() {
           </p>
           <h1 id="page-title">The agent drafts. You decide.</h1>
           <p>
-            Fill real PDF forms with field-level evidence, a visible diff, and a
-            human approval boundary the agent cannot cross.
+            WebMCP shares requested structured field data with the active agent
+            for drafting. Approval and export stay outside its tool surface.
           </p>
         </div>
         <div className="intro-actions">
@@ -1130,10 +1159,10 @@ export function FormProofWorkbench() {
           <div className="safety-card">
             <ShieldCheck aria-hidden="true" />
             <div>
-              <strong>Approval is not a tool</strong>
+              <strong>Approval is not a WebMCP tool</strong>
               <p>
-                Only a click in this interface can approve the exact reviewed
-                plan.
+                Agent tools can inspect, stage, validate, and open review.
+                Approval and export stay in this interface.
               </p>
             </div>
           </div>
@@ -1143,7 +1172,7 @@ export function FormProofWorkbench() {
           <div className="document-toolbar">
             <div>
               <p className="section-kicker">
-                {showOutput ? 'Verified output' : 'Untouched source'}
+                {showOutput ? 'Verified draft copy' : 'Untouched source'}
               </p>
               <h2 id="document-title">
                 {documentState?.fileName ?? 'No PDF loaded'}
@@ -1176,7 +1205,7 @@ export function FormProofWorkbench() {
                 className={showOutput ? 'selected' : ''}
                 onClick={() => setShowOutput(true)}
               >
-                Verified output
+                Verified draft
               </button>
             </div>
           )}
@@ -1269,21 +1298,41 @@ export function FormProofWorkbench() {
 
           <div className="prompt-card">
             <p className="section-kicker">Try with an agent</p>
-            <blockquote>
-              “Inspect this form, stage my support details, and explain every
-              source.”
-            </blockquote>
+            {toolState.status === 'ready' ? (
+              <blockquote>
+                “Inspect this form, stage my support details, and explain every
+                source.”
+              </blockquote>
+            ) : (
+              <p>
+                This browser can inspect PDFs locally, but agent staging needs a
+                WebMCP host. The built-in synthetic demo still shows the review
+                and export path.
+              </p>
+            )}
           </div>
 
           {draftEntries.length === 0 ? (
-            <Button
-              className="w-full"
-              size="lg"
-              onClick={() => void stageDemoPlan()}
-              disabled={!formState || loading}
-            >
-              Stage synthetic plan <ArrowRight aria-hidden="true" />
-            </Button>
+            documentState?.kind === 'demo' ? (
+              <Button
+                className="w-full"
+                size="lg"
+                onClick={() => void stageDemoPlan()}
+                disabled={!formState || loading}
+              >
+                Stage synthetic demo plan <ArrowRight aria-hidden="true" />
+              </Button>
+            ) : (
+              <Button
+                className="w-full"
+                size="lg"
+                variant="outline"
+                onClick={() => void loadDemo()}
+                disabled={loading}
+              >
+                Load built-in demo <RefreshCw aria-hidden="true" />
+              </Button>
+            )
           ) : (
             <Button
               className="w-full"
@@ -1297,7 +1346,7 @@ export function FormProofWorkbench() {
           <p className="button-note">
             {validation && validation.blockerCount > 0
               ? `${validation.blockerCount} validation blocker(s) remain.`
-              : 'Approval and download exist only in this human interface.'}
+              : 'Approval and export are not WebMCP tools.'}
           </p>
 
           {releaseOpen && formState?.approval && outputResult && (
@@ -1307,8 +1356,8 @@ export function FormProofWorkbench() {
                   <CheckCircle2 aria-hidden="true" />
                 </span>
                 <div>
-                  <p className="section-kicker">Release gate open</p>
-                  <strong>Verified export receipt</strong>
+                  <p className="section-kicker">Staged values verified</p>
+                  <strong>Fresh copy receipt</strong>
                 </div>
               </div>
               <dl>
@@ -1327,15 +1376,35 @@ export function FormProofWorkbench() {
                   <dd>{shortHash(outputResult.outputHash)}</dd>
                 </div>
                 <div>
-                  <dt>Verified</dt>
+                  <dt>Staged fields</dt>
                   <dd>
-                    {outputResult.verifiedFields.length} fields ·{' '}
-                    {outputResult.widgetCount} widgets
+                    {outputResult.verifiedFields.length} values and appearances
+                    verified
+                  </dd>
+                </div>
+                <div>
+                  <dt>Whole form</dt>
+                  <dd>
+                    {outputResult.fieldCount} total fields ·{' '}
+                    {outputResult.widgetCount} total widgets
+                  </dd>
+                </div>
+                <div>
+                  <dt>Still required</dt>
+                  <dd>
+                    {pendingHumanCompletionNames.length > 0
+                      ? pendingHumanCompletionNames
+                          .map((name) => formState.fields[name]?.label ?? name)
+                          .join(', ')
+                      : 'No required human-only fields'}
                   </dd>
                 </div>
               </dl>
               <Button className="w-full" onClick={downloadOutput}>
-                <Download aria-hidden="true" /> Download verified copy
+                <Download aria-hidden="true" />{' '}
+                {pendingHumanCompletionNames.length > 0
+                  ? 'Download copy for completion'
+                  : 'Download verified copy'}
               </Button>
             </div>
           )}
@@ -1348,7 +1417,7 @@ export function FormProofWorkbench() {
       >
         <DialogContent className="review-dialog" showCloseButton={!exporting}>
           <DialogHeader>
-            <p className="section-kicker">Human approval boundary</p>
+            <p className="section-kicker">UI approval and export gate</p>
             <DialogTitle>Review the exact plan</DialogTitle>
             <DialogDescription>
               Confirm every changed or human-only field. Approval is bound to
@@ -1462,8 +1531,8 @@ export function FormProofWorkbench() {
             <ShieldCheck aria-hidden="true" />
             <span>
               The original bytes stay unchanged. Export writes only this
-              approved draft to a fresh copy, reopens it, and verifies values
-              plus appearances.
+              approved draft to a fresh copy, reopens it, and verifies staged
+              values plus appearances. Human-only fields remain untouched.
             </span>
           </div>
 

@@ -414,7 +414,7 @@ const TOOL_TITLES: Record<FormProofWebMcpToolName, string> = {
   get_field_evidence: 'Inspect field evidence',
   stage_form_values: 'Stage PDF field values',
   validate_fill_plan: 'Validate staged fill plan',
-  start_fill_review: 'Open human fill review',
+  start_fill_review: 'Open UI fill review',
 };
 
 const TOOL_DESCRIPTIONS: Record<FormProofWebMcpToolName, string> = {
@@ -427,7 +427,7 @@ const TOOL_DESCRIPTIONS: Record<FormProofWebMcpToolName, string> = {
   validate_fill_plan:
     'Deterministically validate the staged PDF fill plan without approving, exporting, signing, or submitting it.',
   start_fill_review:
-    'Open the visible human review flow for the exact staged version. Only the human UI can approve or export; this tool cannot.',
+    'Open the visible review UI for the exact staged version. This WebMCP tool cannot approve or export; those controls exist only in the UI.',
 };
 
 const READ_ONLY_TOOLS = new Set<FormProofWebMcpToolName>([
@@ -851,7 +851,7 @@ function formContextData(
         ? {}
         : { omittedReviewFieldCount: reviewPreview.omitted }),
     },
-    approvalBoundary: 'human_review_only',
+    approvalBoundary: 'ui_approval_only',
     pagination: {
       returned: fields.length,
       nextCursor:
@@ -1657,7 +1657,7 @@ function safeErrorMessage(
     case 'REVIEW_NOT_READY':
       return 'The staged fill plan is not ready for human review.';
     case 'HUMAN_ACTION_REQUIRED':
-      return 'This action is reserved for the human review UI.';
+      return 'This action is reserved for the review UI.';
     case 'OPERATION_ABORTED':
       return 'The tool operation was aborted.';
     case 'INTERNAL_ERROR':

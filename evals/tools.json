@@ -219,7 +219,7 @@
     },
     {
       "name": "start_fill_review",
-      "description": "Open the visible human review flow for the exact staged version. Only the human UI can approve or export; this tool cannot.",
+      "description": "Open the visible review UI for the exact staged version. This WebMCP tool cannot approve or export; those controls exist only in the UI.",
       "inputSchema": {
         "type": "object",
         "properties": {

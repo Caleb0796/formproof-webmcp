@@ -3,16 +3,31 @@ import { fileURLToPath } from 'node:url';
 
 import { format } from 'oxfmt';
 
+import type { FormState } from '../lib/form-state.ts';
+import type {
+  FormProofToolResponse,
+  FormProofWebMcpAdapter,
+  StageFormValueInput,
+  VersionBoundInput,
+} from '../lib/webmcp.ts';
+
 const { inspectPdf } = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
 )) as typeof import('../lib/pdf-engine');
-const { createFormFieldDefinitionFromPdf, createFormState } = (await import(
+const {
+  createFormFieldDefinitionFromPdf,
+  createFormState,
+  stageFieldUpdates,
+  validateDraft,
+} = (await import(
   new URL('../lib/form-state.ts', import.meta.url).href
 )) as typeof import('../lib/form-state');
 const {
   createFieldEvidenceToolData,
+  createFormProofToolDefinitions,
   createFormContextCursor,
   createFormContextToolData,
+  parseFieldChoiceCursor,
   parseFormContextCursor,
 } = (await import(
   new URL('../lib/webmcp.ts', import.meta.url).href
@@ -25,6 +40,9 @@ interface EvalCall {
     limit?: number;
     fieldNames?: string[];
     choiceCursor?: string;
+    expectedStateVersion?: number;
+    expectedSourceHash?: string;
+    updates?: StageFormValueInput[];
   };
   result?: Record<string, unknown>;
   mockOutput?: Record<string, unknown>;
@@ -49,6 +67,273 @@ const INJECTION_TEXT =
 const CHOICE_SOURCE_HASH = 'a'.repeat(64);
 const SYNTHETIC_SOURCE_HASH = 'b'.repeat(64);
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function synchronizeSourceBindings(value: unknown, sourceHash: string): void {
+  if (Array.isArray(value)) {
+    for (const item of value) synchronizeSourceBindings(item, sourceHash);
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'sourceHash' || key === 'expectedSourceHash') {
+      value[key] = sourceHash;
+    } else {
+      synchronizeSourceBindings(child, sourceHash);
+    }
+  }
+}
+
+function projectExpectedResult(
+  template: unknown,
+  actual: unknown,
+  path: string,
+): unknown {
+  if (Array.isArray(template)) {
+    if (!Array.isArray(actual) || actual.length !== template.length) {
+      throw new TypeError(`${path} no longer matches the runtime result.`);
+    }
+    return template.map((item, index) =>
+      projectExpectedResult(item, actual[index], `${path}[${index}]`),
+    );
+  }
+  if (!isRecord(template)) {
+    if (!Object.is(template, actual)) {
+      throw new TypeError(`${path} no longer matches the runtime result.`);
+    }
+    return structuredClone(template);
+  }
+  if (Object.keys(template).some((key) => key.startsWith('$'))) {
+    if (!matchesMatcher(template, actual)) {
+      throw new TypeError(`${path} no longer matches the runtime result.`);
+    }
+    return structuredClone(template);
+  }
+  if (!isRecord(actual)) {
+    throw new TypeError(`${path} no longer matches the runtime result.`);
+  }
+
+  return Object.fromEntries(
+    Object.keys(template).map((key) => {
+      if (!Object.hasOwn(actual, key)) {
+        throw new TypeError(
+          `${path}.${key} is absent from the runtime result.`,
+        );
+      }
+      if (key === 'sourceHash') return [key, structuredClone(actual[key])];
+      return [
+        key,
+        projectExpectedResult(template[key], actual[key], `${path}.${key}`),
+      ];
+    }),
+  );
+}
+
+function matchesMatcher(
+  matcher: Record<string, unknown>,
+  actual: unknown,
+): boolean {
+  for (const [operator, operand] of Object.entries(matcher)) {
+    if (operator === '$any') continue;
+    if (operator === '$contains') {
+      if (typeof actual !== 'string' || !actual.includes(String(operand))) {
+        return false;
+      }
+    } else if (operator === '$pattern') {
+      if (typeof actual !== 'string' || typeof operand !== 'string') {
+        return false;
+      }
+      const inlineFlags = /^\(\?([a-zA-Z]+)\)/u.exec(operand);
+      const pattern = inlineFlags
+        ? new RegExp(operand.slice(inlineFlags[0].length), inlineFlags[1])
+        : new RegExp(operand);
+      if (!pattern.test(actual)) return false;
+    } else if (operator === '$gt') {
+      if (typeof actual !== 'number' || actual <= Number(operand)) return false;
+    } else if (operator === '$gte') {
+      if (typeof actual !== 'number' || actual < Number(operand)) return false;
+    } else if (operator === '$lt') {
+      if (typeof actual !== 'number' || actual >= Number(operand)) return false;
+    } else if (operator === '$lte') {
+      if (typeof actual !== 'number' || actual > Number(operand)) return false;
+    } else if (operator === '$type') {
+      if (operand === 'array' && !Array.isArray(actual)) return false;
+      if (operand === 'null' && actual !== null) return false;
+      if (
+        operand === 'object' &&
+        (actual === null || typeof actual !== 'object' || Array.isArray(actual))
+      ) {
+        return false;
+      }
+      if (
+        !['array', 'null', 'object'].includes(String(operand)) &&
+        typeof actual !== operand
+      ) {
+        return false;
+      }
+    } else {
+      throw new TypeError(`Unsupported matcher operator: ${operator}`);
+    }
+  }
+  return true;
+}
+
+function assertRuntimeBinding(
+  current: FormState,
+  input: VersionBoundInput,
+): void {
+  if (
+    input.expectedStateVersion !== current.stateVersion ||
+    input.expectedSourceHash !== current.source.sourceHash
+  ) {
+    throw new TypeError('The journey call is not bound to the active state.');
+  }
+}
+
+function createJourneyRuntime(initialState: FormState) {
+  let current = initialState;
+  const adapter: FormProofWebMcpAdapter = {
+    getFormContext(input) {
+      let offset = 0;
+      if (input.cursor !== undefined) {
+        const cursor = parseFormContextCursor(
+          input.cursor,
+          current.source.sourceHash,
+        );
+        if (!cursor.ok) throw new TypeError('Invalid journey context cursor.');
+        offset = cursor.offset;
+      }
+      return {
+        ok: true,
+        stateVersion: current.stateVersion,
+        sourceHash: current.source.sourceHash,
+        data: createFormContextToolData(
+          current,
+          inspection,
+          offset,
+          input.limit,
+        ),
+      };
+    },
+    getFieldEvidence(input) {
+      assertRuntimeBinding(current, input);
+      let choiceOffset = 0;
+      if (input.choiceCursor !== undefined) {
+        const cursor = parseFieldChoiceCursor(
+          input.choiceCursor,
+          current.source.sourceHash,
+          input.fieldNames[0],
+        );
+        if (!cursor.ok) throw new TypeError('Invalid journey choice cursor.');
+        choiceOffset = cursor.offset;
+      }
+      return {
+        ok: true,
+        stateVersion: current.stateVersion,
+        sourceHash: current.source.sourceHash,
+        data: createFieldEvidenceToolData(
+          current,
+          inspection,
+          input.fieldNames,
+          choiceOffset,
+        ),
+      };
+    },
+    async stageFormValues(input) {
+      const staged = await stageFieldUpdates(current, {
+        expectedStateVersion: input.expectedStateVersion,
+        expectedSourceHash: input.expectedSourceHash,
+        actor: 'agent',
+        updates: input.updates,
+      });
+      if (!staged.ok) {
+        const first = staged.errors[0];
+        return {
+          ok: false,
+          stateVersion: current.stateVersion,
+          sourceHash: current.source.sourceHash,
+          error: {
+            code: first?.code ?? 'internal_error',
+            message: first?.message,
+            details: staged.errors.map(({ code, fieldName }) => ({
+              code,
+              ...(fieldName === undefined ? {} : { fieldName }),
+            })),
+          },
+        };
+      }
+      current = staged.state;
+      return {
+        ok: true,
+        stateVersion: current.stateVersion,
+        sourceHash: current.source.sourceHash,
+        data: {
+          changedFields: staged.changedFields,
+          planHash: current.planHash,
+          validation: current.validation,
+          pdfModified: false,
+        },
+      };
+    },
+    validateFillPlan(input) {
+      assertRuntimeBinding(current, input);
+      const validation = validateDraft(current);
+      return {
+        ok: true,
+        stateVersion: current.stateVersion,
+        sourceHash: current.source.sourceHash,
+        data: {
+          valid: validation.canApprove && Object.keys(current.draft).length > 0,
+          stagedFieldCount: Object.keys(current.draft).length,
+          ...validation,
+        },
+      };
+    },
+    startFillReview(input) {
+      assertRuntimeBinding(current, input);
+      if (
+        Object.keys(current.draft).length === 0 ||
+        !validateDraft(current).canApprove
+      ) {
+        throw new TypeError('A journey opens review before it is ready.');
+      }
+      return {
+        ok: true,
+        stateVersion: current.stateVersion,
+        sourceHash: current.source.sourceHash,
+        data: {
+          reviewOpened: true,
+          planHash: current.planHash,
+          humanActionRequired: true,
+        },
+      };
+    },
+  };
+  const controller = new AbortController();
+  const tools = new Map(
+    createFormProofToolDefinitions(
+      adapter,
+      () => undefined,
+      controller.signal,
+    ).map((tool) => [tool.name, tool]),
+  );
+
+  return {
+    getState: () => current,
+    async execute(call: EvalCall): Promise<FormProofToolResponse> {
+      const tool = tools.get(
+        call.functionName as Parameters<typeof tools.get>[0],
+      );
+      if (!tool)
+        throw new TypeError(`Unknown journey tool: ${call.functionName}`);
+      return tool.execute(call.arguments);
+    },
+  };
+}
+
 const pdfBytes = new Uint8Array(
   await readFile(new URL('../public/demo-form.pdf', import.meta.url)),
 );
@@ -68,6 +353,35 @@ const evaluations = JSON.parse(await readFile(evalPath, 'utf8')) as EvalCase[];
 
 for (const evaluation of evaluations) {
   if (!evaluation.name.startsWith('[journey]')) continue;
+  const runtime = createJourneyRuntime(state);
+  for (let index = 0; index < evaluation.messages.length - 1; index += 1) {
+    const callMessage = evaluation.messages[index];
+    const responseMessage = evaluation.messages[index + 1];
+    if (
+      callMessage.type !== 'functioncall' ||
+      responseMessage.type !== 'functionresponse' ||
+      callMessage.name !== responseMessage.name
+    ) {
+      continue;
+    }
+    if (
+      !callMessage.name ||
+      !callMessage.arguments ||
+      !responseMessage.response
+    ) {
+      throw new TypeError(`${evaluation.name} has an incomplete prior call.`);
+    }
+    synchronizeSourceBindings(callMessage.arguments, state.source.sourceHash);
+    const response = await runtime.execute({
+      functionName: callMessage.name,
+      arguments: callMessage.arguments as EvalCall['arguments'],
+    });
+    responseMessage.response = projectExpectedResult(
+      responseMessage.response,
+      response,
+      `${evaluation.name}.messages[${index + 1}].response`,
+    ) as Record<string, unknown>;
+  }
   evaluation.expectedCall = (evaluation.expectedCall ?? []).flatMap((call) => {
     if (
       call.functionName !== 'get_field_evidence' ||
@@ -94,7 +408,6 @@ for (const evaluation of evaluations) {
 
   let nextContextCursor: string | null | undefined;
   for (const call of evaluation.expectedCall ?? []) {
-    if (!call.mockOutput) continue;
     if (call.functionName === 'get_form_context') {
       if (call.arguments.cursor !== undefined) {
         if (nextContextCursor === null || nextContextCursor === undefined) {
@@ -104,35 +417,49 @@ for (const evaluation of evaluations) {
         }
         call.arguments.cursor = nextContextCursor;
       }
-      const parsed =
-        call.arguments.cursor === undefined
-          ? ({ ok: true, offset: 0 } as const)
-          : parseFormContextCursor(
-              call.arguments.cursor,
-              state.source.sourceHash,
-            );
-      if (!parsed.ok) {
+    } else {
+      const current = runtime.getState();
+      if (call.arguments.expectedStateVersion !== undefined) {
+        call.arguments.expectedStateVersion = current.stateVersion;
+      }
+      if (call.arguments.expectedSourceHash !== undefined) {
+        call.arguments.expectedSourceHash = current.source.sourceHash;
+      }
+    }
+
+    if (!call.result) {
+      throw new TypeError(
+        `${evaluation.name} has an unconstrained call result.`,
+      );
+    }
+    const response = await runtime.execute(call);
+    if (!response.ok) {
+      throw new TypeError(
+        `${evaluation.name} ${call.functionName} failed with ${response.error.code}.`,
+      );
+    }
+    call.result = projectExpectedResult(
+      call.result,
+      response,
+      `${evaluation.name}.${call.functionName}.result`,
+    ) as Record<string, unknown>;
+    call.mockOutput = structuredClone(response) as unknown as Record<
+      string,
+      unknown
+    >;
+
+    if (call.functionName === 'get_form_context') {
+      const data = response.data;
+      if (!isRecord(data) || !isRecord(data.pagination)) {
         throw new TypeError(
-          `${evaluation.name} has an invalid context cursor.`,
+          `${evaluation.name} returned invalid context data.`,
         );
       }
-      const data = createFormContextToolData(
-        state,
-        inspection,
-        parsed.offset,
-        call.arguments.limit ?? 6,
-      );
-      call.mockOutput.data = data;
-      nextContextCursor = data.pagination.nextCursor;
-    } else if (call.functionName === 'get_field_evidence') {
-      if (!call.arguments.fieldNames) {
-        throw new TypeError(`${evaluation.name} is missing evidence fields.`);
+      const cursor = data.pagination.nextCursor;
+      if (cursor !== null && typeof cursor !== 'string') {
+        throw new TypeError(`${evaluation.name} returned an invalid cursor.`);
       }
-      call.mockOutput.data = createFieldEvidenceToolData(
-        state,
-        inspection,
-        call.arguments.fieldNames,
-      );
+      nextContextCursor = cursor;
     }
   }
 }
@@ -173,9 +500,13 @@ const mismatchedCursorCase = evaluations.find(
 const mismatchedCursorMessage = mismatchedCursorCase?.messages.find(
   ({ type, name }) => type === 'functioncall' && name === 'get_form_context',
 );
-if (!mismatchedCursorMessage) {
+if (!mismatchedCursorCase || !mismatchedCursorMessage) {
   throw new TypeError('The mismatched context cursor eval is missing.');
 }
+synchronizeSourceBindings(
+  mismatchedCursorCase.messages,
+  state.source.sourceHash,
+);
 const mismatchedCursor = createFormContextCursor(6, CHOICE_SOURCE_HASH);
 const mismatchedArguments = mismatchedCursorMessage.arguments;
 if (!mismatchedArguments) {
@@ -290,7 +621,7 @@ injectionCall.mockOutput.data = {
     blockingFieldNames: ['frm.q7f1'],
     reviewFieldNames: [],
   },
-  approvalBoundary: 'human_review_only',
+  approvalBoundary: 'ui_approval_only',
   pagination: { returned: 2, nextCursor: null },
   untrustedPdfContent: true,
   fields: [

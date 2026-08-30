@@ -80,7 +80,7 @@ def draw_page_shell(
     pdf.setFillColor(TEAL_LIGHT)
     pdf.roundRect(488, 743 - header_content_drop, 70, 20, 10, stroke=0, fill=1)
     pdf.setFillColor(TEAL)
-    pdf.drawCentredString(523, 750 - header_content_drop, "LOCAL ONLY")
+    pdf.drawCentredString(523, 750 - header_content_drop, "BROWSER-SIDE")
 
     pdf.setStrokeColor(BORDER)
     pdf.line(52, 42, 560, 42)
@@ -161,8 +161,8 @@ def create_base_pdf(path: Path) -> None:
     draw_info_card(
         pdf,
         628,
-        "Privacy boundary",
-        "This demo is processed in the browser. Field values do not leave the page.",
+        "Data boundary",
+        "PDF bytes stay in this browser; requested field data may be shared with the active agent.",
     )
 
     draw_label(pdf, "Legal name", 52, 600, required=True)
@@ -290,7 +290,7 @@ def create_base_pdf(path: Path) -> None:
     pdf.drawString(70, 152, "Draft first. Verify twice. Export once.")
     pdf.setFillColor(HexColor("#C9D4DA"))
     pdf.setFont("Helvetica", 8.5)
-    pdf.drawString(70, 130, "Values are staged, reviewed by a person, and written to a fresh copy.")
+    pdf.drawString(70, 130, "Values are staged, reviewed in the UI, and written to a fresh copy.")
     pdf.drawString(70, 114, "The source and output SHA-256 hashes bind the audit receipt to exact bytes.")
     pdf.showPage()
 
@@ -304,8 +304,8 @@ def create_base_pdf(path: Path) -> None:
     draw_info_card(
         pdf,
         628,
-        "Human approval required",
-        "Agent changes remain a draft until every flagged value is reviewed on screen.",
+        "UI review required",
+        "WebMCP can open review, but it cannot approve or export the staged plan.",
     )
 
     draw_label(pdf, "Requested support", 52, 600)
@@ -382,7 +382,7 @@ def create_base_pdf(path: Path) -> None:
     pdf.roundRect(318, 286, 242, 30, 7, stroke=0, fill=1)
     pdf.setFillColor(TEAL)
     pdf.setFont("Helvetica-Bold", 8)
-    pdf.drawString(332, 297, "APPROVAL IS NEVER AN AGENT TOOL")
+    pdf.drawString(332, 297, "APPROVAL / EXPORT ARE NOT WEBMCP TOOLS")
 
     pdf.setFillColor(WHITE)
     pdf.roundRect(52, 164, 508, 94, 10, stroke=0, fill=1)
@@ -457,7 +457,7 @@ def add_signature_widget(source: Path, destination: Path) -> None:
         {
             "/Title": "FormProof Synthetic AcroForm Demo",
             "/Author": "FormProof",
-            "/Subject": "Deterministic local-only form filling fixture",
+            "/Subject": "Deterministic browser-side form filling fixture",
         }
     )
     with destination.open("wb") as output_stream:

@@ -14,7 +14,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: 'FormProof — Agent-safe PDF filling',
-  description: 'A local-first AcroForm workbench with evidence, diff review, and human-only approval.',
+  description:
+    'A browser-side AcroForm workbench with evidence, diff review, and UI approval.',
 };
 
 export default function RootLayout({

@@ -190,6 +190,60 @@ async function loadStagedDemo(): Promise<StagedDemo> {
   };
 }
 
+void test('keeps public safety claims within the WebMCP tool boundary', async () => {
+  const [workbench, demoGenerator, layout, webMcpSource] = await Promise.all([
+    readFile(
+      new URL('../components/formproof-workbench.tsx', import.meta.url),
+      'utf8',
+    ),
+    readFile(
+      new URL('../scripts/create-demo-form.py', import.meta.url),
+      'utf8',
+    ),
+    readFile(new URL('../app/layout.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../lib/webmcp.ts', import.meta.url), 'utf8'),
+  ]);
+  const publicCopy = `${workbench}\n${demoGenerator}\n${layout}\n${webMcpSource}`;
+
+  for (const overclaim of [
+    'Stays in this browser',
+    'Field values do not leave the page.',
+    'human approval boundary the agent cannot cross',
+    'APPROVAL IS NEVER AN AGENT TOOL',
+    'Only the human UI can approve or export',
+    'human_review_only',
+    'human-only approval',
+    'Human-only gate',
+    'Release gate open',
+    'Verified export receipt',
+  ]) {
+    assert.equal(
+      publicCopy.includes(overclaim),
+      false,
+      `public copy overclaims: ${overclaim}`,
+    );
+  }
+
+  assert.match(workbench, /PDF bytes stay in this browser/);
+  assert.match(workbench, /Approval and export stay outside its tool surface/);
+  assert.match(
+    webMcpSource,
+    /This WebMCP tool cannot approve or export; those controls exist only in the UI/,
+  );
+  assert.match(webMcpSource, /approvalBoundary: 'ui_approval_only'/);
+  assert.match(
+    demoGenerator,
+    /requested field data may be shared with the active agent/,
+  );
+  assert.match(demoGenerator, /APPROVAL \/ EXPORT ARE NOT WEBMCP TOOLS/);
+  assert.match(workbench, /documentState\?\.kind !== 'demo'/);
+  assert.match(workbench, /documentState\?\.kind === 'demo'/);
+  assert.match(workbench, /Load built-in demo/);
+  assert.match(workbench, /Staged fields/);
+  assert.match(workbench, /Whole form/);
+  assert.match(workbench, /human_completion_required/);
+});
+
 void test('keeps real WebMCP discovery and evidence atomic under the target budget', async () => {
   const { inspection, initialState } = await loadStagedDemo();
   const adapter: FormProofWebMcpAdapter = {
