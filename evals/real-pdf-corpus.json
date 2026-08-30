@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "corpusRoot": "tmp/pdfs/real-world",
   "measurement": {
     "encoding": "UTF-8",
@@ -17,8 +17,70 @@
       "byteLength": 220237,
       "pageCount": 2,
       "expectedEngineOutcome": {
-        "status": "blocked",
-        "code": "PDF_SIGNED_UNSUPPORTED"
+        "status": "honestUsefulResult",
+        "artifactType": "original_untouched_fill_package",
+        "fieldCount": 199,
+        "widgetCount": 199,
+        "activeContent": {
+          "javascriptActionCount": 3,
+          "additionalActionDictionaryCount": 0,
+          "openActionCount": 0,
+          "externalActionCount": 0,
+          "highRiskActionCount": 0,
+          "otherActionCount": 0
+        },
+        "protection": {
+          "protectionType": "usage_rights",
+          "allowedMutations": [
+            "inspect_fields",
+            "stage_field_values",
+            "create_fill_package"
+          ],
+          "exportStrategies": ["fill_package"],
+          "signatureImpact": "rewrite_would_invalidate_usage_rights",
+          "requiresHumanConfirmation": false,
+          "catalogPermsPresent": true,
+          "permsKeys": ["UR3"],
+          "usageRightsKeys": ["UR3"],
+          "byteRangeEntryCount": 1,
+          "malformedByteRangeCount": 0,
+          "byteRangeCount": 1,
+          "byteRangesCoverWholeFile": true,
+          "signatureDictionaryCount": 1,
+          "usageRightsSignatureCount": 1,
+          "documentSignatureCount": 0,
+          "unclassifiedSignatureDictionaryCount": 0,
+          "unreachableSignatureDictionaryCount": 0,
+          "signatureFieldCount": 0,
+          "signedSignatureFieldCount": 0,
+          "docMdpPresent": false,
+          "docMdpSignatureDictionaryCount": 0,
+          "docMdpPermission": null,
+          "fieldMdpPresent": false,
+          "adbeExtension": {
+            "baseVersion": "1.7",
+            "extensionLevel": 11
+          },
+          "xfaPresent": true,
+          "sigFlags": 2,
+          "unknownStructures": [],
+          "cmsIntegrity": "not_verified_in_browser",
+          "signerTrust": "not_verified"
+        },
+        "expectedPdfRewriteError": "PDF_XFA_UNSUPPORTED"
+      },
+      "queryExperiment": {
+        "queries": ["f1_01"],
+        "expectedFirstPageFieldNames": ["topmostSubform[0].Page1[0].f1_01[0]"],
+        "expectedMatchCounts": [1],
+        "expectedTotalMatchedFields": 1
+      },
+      "fillPackageExperiment": {
+        "createdAt": "2026-08-29T00:00:00.000Z",
+        "values": {
+          "topmostSubform[0].Page1[0].f1_01[0]": "Synthetic",
+          "topmostSubform[0].Page1[0].c1_1[0]": true
+        }
       }
     },
     {
@@ -31,8 +93,72 @@
       "byteLength": 208845,
       "pageCount": 5,
       "expectedEngineOutcome": {
-        "status": "blocked",
-        "code": "PDF_SIGNED_UNSUPPORTED"
+        "status": "honestUsefulResult",
+        "artifactType": "original_untouched_fill_package",
+        "fieldCount": 48,
+        "widgetCount": 48,
+        "activeContent": {
+          "javascriptActionCount": 3,
+          "additionalActionDictionaryCount": 0,
+          "openActionCount": 0,
+          "externalActionCount": 0,
+          "highRiskActionCount": 0,
+          "otherActionCount": 0
+        },
+        "protection": {
+          "protectionType": "usage_rights",
+          "allowedMutations": [
+            "inspect_fields",
+            "stage_field_values",
+            "create_fill_package"
+          ],
+          "exportStrategies": ["fill_package"],
+          "signatureImpact": "rewrite_would_invalidate_usage_rights",
+          "requiresHumanConfirmation": false,
+          "catalogPermsPresent": true,
+          "permsKeys": ["UR3"],
+          "usageRightsKeys": ["UR3"],
+          "byteRangeEntryCount": 1,
+          "malformedByteRangeCount": 0,
+          "byteRangeCount": 1,
+          "byteRangesCoverWholeFile": true,
+          "signatureDictionaryCount": 1,
+          "usageRightsSignatureCount": 1,
+          "documentSignatureCount": 0,
+          "unclassifiedSignatureDictionaryCount": 0,
+          "unreachableSignatureDictionaryCount": 0,
+          "signatureFieldCount": 0,
+          "signedSignatureFieldCount": 0,
+          "docMdpPresent": false,
+          "docMdpSignatureDictionaryCount": 0,
+          "docMdpPermission": null,
+          "fieldMdpPresent": false,
+          "adbeExtension": {
+            "baseVersion": "1.7",
+            "extensionLevel": 11
+          },
+          "xfaPresent": true,
+          "sigFlags": 2,
+          "unknownStructures": [],
+          "cmsIntegrity": "not_verified_in_browser",
+          "signerTrust": "not_verified"
+        },
+        "expectedPdfRewriteError": "PDF_XFA_UNSUPPORTED"
+      },
+      "queryExperiment": {
+        "queries": ["Step1a"],
+        "expectedFirstPageFieldNames": [
+          "topmostSubform[0].Page1[0].Step1a[0].f1_01[0]"
+        ],
+        "expectedMatchCounts": [4],
+        "expectedTotalMatchedFields": 4
+      },
+      "fillPackageExperiment": {
+        "createdAt": "2026-08-29T00:00:00.000Z",
+        "values": {
+          "topmostSubform[0].Page1[0].Step1a[0].f1_01[0]": "Synthetic",
+          "topmostSubform[0].Page1[0].c1_1[0]": true
+        }
       }
     },
     {
@@ -45,7 +171,8 @@
       "byteLength": 524095,
       "pageCount": 4,
       "expectedEngineOutcome": {
-        "status": "writable",
+        "status": "honestUsefulResult",
+        "artifactType": "filled_pdf",
         "fieldCount": 128,
         "widgetCount": 130,
         "humanOnlyFieldCount": 9,
@@ -56,6 +183,42 @@
           "externalActionCount": 8,
           "highRiskActionCount": 0,
           "otherActionCount": 0
+        },
+        "protection": {
+          "protectionType": "none",
+          "allowedMutations": [
+            "inspect_fields",
+            "stage_field_values",
+            "create_fill_package",
+            "create_filled_pdf"
+          ],
+          "exportStrategies": ["filled_pdf", "fill_package"],
+          "signatureImpact": "none",
+          "requiresHumanConfirmation": false,
+          "catalogPermsPresent": false,
+          "permsKeys": [],
+          "usageRightsKeys": [],
+          "byteRangeEntryCount": 0,
+          "malformedByteRangeCount": 0,
+          "byteRangeCount": 0,
+          "byteRangesCoverWholeFile": null,
+          "signatureDictionaryCount": 0,
+          "usageRightsSignatureCount": 0,
+          "documentSignatureCount": 0,
+          "unclassifiedSignatureDictionaryCount": 0,
+          "unreachableSignatureDictionaryCount": 0,
+          "signatureFieldCount": 0,
+          "signedSignatureFieldCount": 0,
+          "docMdpPresent": false,
+          "docMdpSignatureDictionaryCount": 0,
+          "docMdpPermission": null,
+          "fieldMdpPresent": false,
+          "adbeExtension": null,
+          "xfaPresent": false,
+          "sigFlags": 0,
+          "unknownStructures": [],
+          "cmsIntegrity": "not_applicable",
+          "signerTrust": "not_applicable"
         }
       },
       "queryExperiment": {
@@ -64,7 +227,9 @@
           "CB_1",
           "Signature of Employee",
           "State"
-        ]
+        ],
+        "expectedMatchCounts": [1, 18, 5],
+        "expectedTotalMatchedFields": 24
       },
       "writeExperiment": {
         "values": {
@@ -84,7 +249,8 @@
       "byteLength": 2568395,
       "pageCount": 6,
       "expectedEngineOutcome": {
-        "status": "writable",
+        "status": "honestUsefulResult",
+        "artifactType": "filled_pdf",
         "fieldCount": 84,
         "widgetCount": 99,
         "recoveredRadioGroupCount": 12,
@@ -95,6 +261,42 @@
           "externalActionCount": 0,
           "highRiskActionCount": 0,
           "otherActionCount": 2
+        },
+        "protection": {
+          "protectionType": "none",
+          "allowedMutations": [
+            "inspect_fields",
+            "stage_field_values",
+            "create_fill_package",
+            "create_filled_pdf"
+          ],
+          "exportStrategies": ["filled_pdf", "fill_package"],
+          "signatureImpact": "none",
+          "requiresHumanConfirmation": false,
+          "catalogPermsPresent": false,
+          "permsKeys": [],
+          "usageRightsKeys": [],
+          "byteRangeEntryCount": 0,
+          "malformedByteRangeCount": 0,
+          "byteRangeCount": 0,
+          "byteRangesCoverWholeFile": null,
+          "signatureDictionaryCount": 0,
+          "usageRightsSignatureCount": 0,
+          "documentSignatureCount": 0,
+          "unclassifiedSignatureDictionaryCount": 0,
+          "unreachableSignatureDictionaryCount": 0,
+          "signatureFieldCount": 0,
+          "signedSignatureFieldCount": 0,
+          "docMdpPresent": false,
+          "docMdpSignatureDictionaryCount": 0,
+          "docMdpPermission": null,
+          "fieldMdpPresent": false,
+          "adbeExtension": null,
+          "xfaPresent": false,
+          "sigFlags": 0,
+          "unknownStructures": [],
+          "cmsIntegrity": "not_applicable",
+          "signerTrust": "not_applicable"
         }
       },
       "queryExperiment": {
@@ -102,7 +304,9 @@
         "expectedFirstPageFieldNames": [
           "List all other name you have used",
           "Gender"
-        ]
+        ],
+        "expectedMatchCounts": [13, 3, 0],
+        "expectedTotalMatchedFields": 16
       },
       "writeExperiment": {
         "values": {
@@ -122,8 +326,73 @@
       "byteLength": 1267392,
       "pageCount": 6,
       "expectedEngineOutcome": {
-        "status": "blocked",
-        "code": "PDF_SIGNED_UNSUPPORTED"
+        "status": "honestUsefulResult",
+        "artifactType": "original_untouched_fill_package",
+        "fieldCount": 122,
+        "widgetCount": 151,
+        "humanOnlyFieldCount": 1,
+        "recoveredRadioGroupCount": 22,
+        "activeContent": {
+          "javascriptActionCount": 3,
+          "additionalActionDictionaryCount": 0,
+          "openActionCount": 0,
+          "externalActionCount": 5,
+          "highRiskActionCount": 0,
+          "otherActionCount": 0
+        },
+        "protection": {
+          "protectionType": "usage_rights",
+          "allowedMutations": [
+            "inspect_fields",
+            "stage_field_values",
+            "create_fill_package"
+          ],
+          "exportStrategies": ["fill_package"],
+          "signatureImpact": "rewrite_would_invalidate_usage_rights",
+          "requiresHumanConfirmation": false,
+          "catalogPermsPresent": true,
+          "permsKeys": ["UR3"],
+          "usageRightsKeys": ["UR3"],
+          "byteRangeEntryCount": 1,
+          "malformedByteRangeCount": 0,
+          "byteRangeCount": 1,
+          "byteRangesCoverWholeFile": true,
+          "signatureDictionaryCount": 1,
+          "usageRightsSignatureCount": 1,
+          "documentSignatureCount": 0,
+          "unclassifiedSignatureDictionaryCount": 0,
+          "unreachableSignatureDictionaryCount": 0,
+          "signatureFieldCount": 0,
+          "signedSignatureFieldCount": 0,
+          "docMdpPresent": false,
+          "docMdpSignatureDictionaryCount": 0,
+          "docMdpPermission": null,
+          "fieldMdpPresent": false,
+          "adbeExtension": {
+            "baseVersion": "1.7",
+            "extensionLevel": 8
+          },
+          "xfaPresent": true,
+          "sigFlags": 2,
+          "unknownStructures": [],
+          "cmsIntegrity": "not_verified_in_browser",
+          "signerTrust": "not_verified"
+        },
+        "expectedPdfRewriteError": "PDF_XFA_UNSUPPORTED"
+      },
+      "queryExperiment": {
+        "queries": ["social security"],
+        "expectedFirstPageFieldNames": ["F[0].P4[0].SSN[0]"],
+        "expectedMatchCounts": [6],
+        "expectedTotalMatchedFields": 6
+      },
+      "fillPackageExperiment": {
+        "createdAt": "2026-08-29T00:00:00.000Z",
+        "values": {
+          "F[0].P4[0].PreferredNameForVeteran[0]": "Synthetic",
+          "F[0].P4[0].SSN[0]": "000000000",
+          "F[0].P4[0].CurrentMaritalStatus[0]": "2"
+        }
       }
     }
   ]

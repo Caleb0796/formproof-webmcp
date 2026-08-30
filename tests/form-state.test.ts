@@ -1,14 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import {
+  PDFDict,
+  PDFDocument,
+  PDFHexString,
+  PDFName,
+  PDFNumber,
+  PDFString,
+  StandardFonts,
+} from 'pdf-lib';
 
 import {
   approveDraftFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
   discardDraft,
+  exportApprovedDerivativePdfFromUi,
   exportApprovedPdfFromUi,
+  exportFillPackageFromUi,
   getEffectiveFieldValue,
   getExportGate,
   getFormContext,
@@ -235,6 +245,167 @@ async function createClearableFormPdf(): Promise<Uint8Array> {
   return Uint8Array.from(
     await document.save({ addDefaultPage: false, useObjectStreams: false }),
   );
+}
+
+function usageRightsSignature(document: PDFDocument): PDFDict {
+  const transformParameters = document.context.obj({
+    Type: 'TransformParams',
+    V: '2.2',
+    P: false,
+  }) as PDFDict;
+  const reference = document.context.obj({
+    Type: 'SigRef',
+    TransformMethod: 'UR3',
+    TransformParams: transformParameters,
+  }) as PDFDict;
+  return document.context.obj({
+    Type: 'Sig',
+    Filter: 'Adobe.PPKLite',
+    SubFilter: 'adbe.pkcs7.detached',
+    ByteRange: [0, 1, 2, 3],
+    Contents: PDFHexString.of('00'),
+    Reference: [reference],
+  }) as PDFDict;
+}
+
+async function saveWithStableSignatureByteRange(
+  document: PDFDocument,
+): Promise<Uint8Array> {
+  let bytes = await document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const reopened = await PDFDocument.load(bytes, { updateMetadata: false });
+    let found = false;
+    for (const [, object] of reopened.context.enumerateIndirectObjects()) {
+      if (!(object instanceof PDFDict)) continue;
+      const type = reopened.context.lookup(object.get(PDFName.of('Type')));
+      if (!(type instanceof PDFName) || type.decodeText() !== 'Sig') continue;
+      object.set(
+        PDFName.of('ByteRange'),
+        reopened.context.obj([0, 1, 2, bytes.byteLength - 2]),
+      );
+      found = true;
+    }
+    assert.equal(found, true);
+    const next = await reopened.save({
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      useObjectStreams: false,
+    });
+    if (next.byteLength === bytes.byteLength) return Uint8Array.from(next);
+    bytes = next;
+  }
+  throw new Error('Synthetic usage-rights ByteRange size did not stabilize.');
+}
+
+async function createProtectedFormPdf(
+  options: {
+    xfa?: boolean;
+    unknownProtection?: boolean;
+    requiredOpaque?: boolean;
+  } = {},
+): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([420, 240]);
+  const form = document.getForm();
+
+  const semantic = form.createTextField('formproof.applicant_name');
+  semantic.setText('Original applicant');
+  semantic.acroField.dict.set(PDFName.of('TU'), PDFString.of('Applicant name'));
+  semantic.addToPage(page, { x: 40, y: 150, width: 340, height: 28 });
+
+  const opaque = form.createTextField('opaque.f1_02');
+  opaque.setText(options.requiredOpaque ? '' : 'Original opaque value');
+  if (options.requiredOpaque) opaque.enableRequired();
+  opaque.addToPage(page, { x: 40, y: 90, width: 340, height: 28 });
+
+  const acroForm = form.acroForm.dict;
+  if (options.unknownProtection) {
+    const permsRef = document.context.register(
+      document.context.obj({ VendorProtection: true }) as PDFDict,
+    );
+    document.catalog.set(PDFName.of('Perms'), permsRef);
+  } else {
+    const signatureRef = document.context.register(
+      usageRightsSignature(document),
+    );
+    const permsRef = document.context.register(
+      document.context.obj({ UR3: signatureRef }) as PDFDict,
+    );
+    document.catalog.set(PDFName.of('Perms'), permsRef);
+    acroForm.set(PDFName.of('SigFlags'), PDFNumber.of(2));
+  }
+
+  if (options.xfa !== false) {
+    const xfaRef = document.context.register(
+      document.context.flateStream(
+        '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/"/>',
+        { Type: 'EmbeddedFile' },
+      ),
+    );
+    acroForm.set(
+      PDFName.of('XFA'),
+      document.context.obj([PDFString.of('template'), xfaRef]),
+    );
+  }
+
+  if (!options.unknownProtection) {
+    return saveWithStableSignatureByteRange(document);
+  }
+  return Uint8Array.from(
+    await document.save({
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      useObjectStreams: false,
+    }),
+  );
+}
+
+const OPAQUE_FIELD_PROVENANCE: FieldProvenance = {
+  kind: 'agent_inference',
+  confidence: 0.9,
+  evidence: ['visible page 1 field at the inspected rectangle'],
+  rationale: 'The exact field name has no semantic tooltip.',
+};
+
+async function stagedProtectedForm(
+  options: { xfa?: boolean; unknownProtection?: boolean } = {},
+) {
+  const source = await createProtectedFormPdf(options);
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
+  const state = await createFormState(
+    {
+      fileName: 'protected-hybrid.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const staged = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'formproof.applicant_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+      {
+        fieldName: 'opaque.f1_02',
+        value: 'Synthetic opaque value',
+        provenance: OPAQUE_FIELD_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('protected form staging failed');
+  return { source, sourceSnapshot, inspection, state: staged.state };
 }
 
 async function stageRequiredValues(inputState?: FormState): Promise<FormState> {
@@ -833,6 +1004,374 @@ void test('human approval is bound to source, plan, version, and explicit review
   assert.equal(getExportGate(changed.state).open, false);
 });
 
+void test('exports a deterministic source-bound fill package for protected hybrid XFA fields', async () => {
+  const { source, sourceSnapshot, inspection, state } =
+    await stagedProtectedForm();
+  assert.equal(inspection.protection.protectionType, 'usage_rights');
+  assert.equal(inspection.protection.evidence.xfaPresent, true);
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+
+  const incomplete = await exportFillPackageFromUi(state, source, {
+    confirmedFieldNames: ['formproof.applicant_name'],
+    createdAt: '2026-08-29T18:15:00.000Z',
+  });
+  assert.equal(incomplete.ok, false);
+  if (incomplete.ok) throw new Error('incompletely confirmed package exported');
+  assert.equal(incomplete.state, state);
+  assert.equal(incomplete.errors[0].code, 'review_unconfirmed');
+  assert.match(incomplete.errors[0].message, /opaque\.f1_02/u);
+
+  const request = {
+    confirmedFieldNames: ['opaque.f1_02', 'formproof.applicant_name'],
+    createdAt: '2026-08-29T18:15:00.000Z',
+  } as const;
+  const first = await exportFillPackageFromUi(state, source, request);
+  const second = await exportFillPackageFromUi(state, source, request);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  if (!first.ok || !second.ok) {
+    throw new Error('confirmed protected fill package failed');
+  }
+  assert.equal(first.state, state);
+  assert.deepEqual(first.result.bytes, second.result.bytes);
+  assert.equal(first.result.outputHash, second.result.outputHash);
+  assert.deepEqual(first.result.manifest, second.result.manifest);
+  assert.equal(first.result.roundTripVerified, true);
+
+  const manifest = first.result.manifest;
+  const parsed = JSON.parse(
+    new TextDecoder().decode(first.result.bytes),
+  ) as typeof manifest;
+  assert.deepEqual(parsed, manifest);
+  assert.equal(manifest.schemaVersion, 3);
+  assert.equal(manifest.createdAt, request.createdAt);
+  assert.equal(manifest.sourcePdfModified, false);
+  assert.deepEqual(manifest.source, {
+    fileName: state.source.fileName,
+    sourceHash: state.source.sourceHash,
+    byteLength: state.source.byteLength,
+    pageCount: state.source.pageCount,
+  });
+  assert.equal(manifest.plan.stateVersion, state.stateVersion);
+  assert.equal(manifest.plan.planHash, state.planHash);
+  assert.deepEqual(manifest.plan.confirmedFieldNames, [
+    'formproof.applicant_name',
+    'opaque.f1_02',
+  ]);
+
+  const descriptors = new Map(
+    inspection.fields.map((field) => [field.name, field] as const),
+  );
+  const semanticDescriptor = descriptors.get('formproof.applicant_name');
+  const opaqueDescriptor = descriptors.get('opaque.f1_02');
+  assert.notEqual(semanticDescriptor, undefined);
+  assert.notEqual(opaqueDescriptor, undefined);
+  if (semanticDescriptor === undefined || opaqueDescriptor === undefined) {
+    throw new Error('protected fixture descriptors disappeared');
+  }
+  const packageFields = new Map(
+    manifest.plan.stagedFields.map(
+      (field) => [field.fieldName, field] as const,
+    ),
+  );
+  assert.deepEqual(packageFields.get('formproof.applicant_name'), {
+    fieldName: 'formproof.applicant_name',
+    label: 'Applicant name',
+    semanticLabelAvailable: true,
+    type: 'text',
+    required: false,
+    multiSelect: semanticDescriptor.multiSelect,
+    choices: semanticDescriptor.choices,
+    widgets: semanticDescriptor.widgets,
+    page: semanticDescriptor.page,
+    rect: semanticDescriptor.rect,
+    sourceValue: 'Original applicant',
+    proposedValue: 'Ada Lovelace',
+    provenance: USER_PROVENANCE,
+  });
+  assert.deepEqual(packageFields.get('opaque.f1_02'), {
+    fieldName: 'opaque.f1_02',
+    label: 'opaque.f1_02',
+    semanticLabelAvailable: false,
+    type: 'text',
+    required: false,
+    multiSelect: opaqueDescriptor.multiSelect,
+    choices: opaqueDescriptor.choices,
+    widgets: opaqueDescriptor.widgets,
+    page: opaqueDescriptor.page,
+    rect: opaqueDescriptor.rect,
+    sourceValue: 'Original opaque value',
+    proposedValue: 'Synthetic opaque value',
+    provenance: OPAQUE_FIELD_PROVENANCE,
+  });
+  assert.notEqual(
+    packageFields.get('opaque.f1_02')?.rect,
+    opaqueDescriptor.rect,
+  );
+  assert.deepEqual(manifest.plan.humanSteps, [
+    {
+      fieldName: 'opaque.f1_02',
+      label: 'opaque.f1_02',
+      type: 'text',
+      required: false,
+      multiSelect: false,
+      sourceValue: 'Original opaque value',
+      choices: opaqueDescriptor.choices,
+      widgets: opaqueDescriptor.widgets,
+      page: opaqueDescriptor.page,
+      rect: opaqueDescriptor.rect,
+      reason: 'review_required',
+    },
+  ]);
+
+  assert.deepEqual(manifest.protection, inspection.protection);
+  assert.notEqual(manifest.protection, inspection.protection);
+  assert.equal(manifest.protection.protectionType, 'usage_rights');
+  assert.deepEqual(manifest.protection.allowedMutations, [
+    'inspect_fields',
+    'stage_field_values',
+    'create_fill_package',
+  ]);
+  assert.equal(
+    manifest.protection.signatureImpact,
+    'rewrite_would_invalidate_usage_rights',
+  );
+  assert.deepEqual(manifest.protection.evidence.usageRightsKeys, ['UR3']);
+  assert.equal(manifest.protection.evidence.xfaPresent, true);
+  assert.equal(
+    manifest.limitations.some((item) => item.includes('no semantic tooltip')),
+    true,
+  );
+  assert.equal(
+    manifest.limitations.some((item) => item.includes('XFA captions')),
+    true,
+  );
+
+  const serializedManifest = JSON.stringify(parsed);
+  assert.doesNotMatch(
+    serializedManifest,
+    /"(?:appearanceVerified|appearancesPresent|fieldValuesMatch|signatureIntegrityPreserved|verifiedFields)"/u,
+  );
+  assert.equal(state.output, null);
+  assert.equal(state.verification, null);
+  assert.deepEqual(source, sourceSnapshot, 'source PDF bytes were modified');
+});
+
+void test('puts every unstaged required blocker into the actionable fill-package steps', async () => {
+  const source = await createProtectedFormPdf({ requiredOpaque: true });
+  const inspection = await inspectPdf(source);
+  const initial = await createFormState(
+    {
+      fileName: 'required-protected.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'formproof.applicant_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('required protected staging failed');
+  assert.ok(
+    staged.state.validation.issues.some(
+      ({ code, fieldName }) =>
+        code === 'required_missing' && fieldName === 'opaque.f1_02',
+    ),
+  );
+
+  const unconfirmed = await exportFillPackageFromUi(staged.state, source, {
+    confirmedFieldNames: ['formproof.applicant_name'],
+    createdAt: '2026-08-29T18:15:30.000Z',
+  });
+  assert.equal(unconfirmed.ok, false);
+  if (unconfirmed.ok) throw new Error('required blocker was not confirmed');
+  assert.equal(unconfirmed.errors[0].code, 'review_unconfirmed');
+  assert.match(unconfirmed.errors[0].message, /opaque\.f1_02/u);
+
+  const exported = await exportFillPackageFromUi(staged.state, source, {
+    confirmedFieldNames: ['formproof.applicant_name', 'opaque.f1_02'],
+    createdAt: '2026-08-29T18:15:30.000Z',
+  });
+  assert.equal(exported.ok, true);
+  if (!exported.ok) throw new Error('required blocker fill package failed');
+  const descriptor = inspection.fields.find(
+    ({ name }) => name === 'opaque.f1_02',
+  );
+  assert.notEqual(descriptor, undefined);
+  assert.deepEqual(
+    exported.result.manifest.plan.humanSteps.find(
+      ({ fieldName }) => fieldName === 'opaque.f1_02',
+    ),
+    {
+      fieldName: 'opaque.f1_02',
+      label: 'opaque.f1_02',
+      type: 'text',
+      required: true,
+      multiSelect: false,
+      sourceValue: '',
+      choices: descriptor?.choices,
+      widgets: descriptor?.widgets,
+      page: descriptor?.page,
+      rect: descriptor?.rect,
+      reason: 'required_missing',
+    },
+  );
+});
+
+void test('rejects caller-supplied fill-package evidence that was not derived from the source bytes', async () => {
+  const { source, state } = await stagedProtectedForm();
+  const forgedState = {
+    ...state,
+    fields: {
+      ...state.fields,
+      'formproof.applicant_name': {
+        ...state.fields['formproof.applicant_name'],
+        label: 'Caller-forged label',
+      },
+    },
+  } as FormState;
+  const exported = await exportFillPackageFromUi(forgedState, source, {
+    confirmedFieldNames: ['formproof.applicant_name', 'opaque.f1_02'],
+    createdAt: '2026-08-29T18:15:45.000Z',
+  });
+  assert.equal(exported.ok, false);
+  if (exported.ok) throw new Error('forged fill-package evidence was accepted');
+  assert.deepEqual(
+    exported.errors.map(({ code }) => code),
+    ['plan_mismatch'],
+  );
+});
+
+void test('keeps stale fill packages plan-bound and rejects mismatched or unknown protection', async () => {
+  const { source, sourceSnapshot, state } = await stagedProtectedForm();
+  const confirmedFieldNames = [
+    'formproof.applicant_name',
+    'opaque.f1_02',
+  ] as const;
+  const originalPackage = await exportFillPackageFromUi(state, source, {
+    confirmedFieldNames,
+    createdAt: '2026-08-29T18:16:00.000Z',
+  });
+  assert.equal(originalPackage.ok, true);
+  if (!originalPackage.ok) throw new Error('original fill package failed');
+
+  const restaged = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'opaque.f1_02',
+        value: 'Restaged opaque value',
+        provenance: OPAQUE_FIELD_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(restaged.ok, true);
+  if (!restaged.ok) throw new Error('protected field restaging failed');
+  assert.notEqual(restaged.state.planHash, state.planHash);
+  assert.equal(originalPackage.result.manifest.plan.planHash, state.planHash);
+  assert.notEqual(
+    originalPackage.result.manifest.plan.planHash,
+    restaged.state.planHash,
+  );
+
+  const currentPackage = await exportFillPackageFromUi(restaged.state, source, {
+    confirmedFieldNames,
+    createdAt: '2026-08-29T18:16:00.000Z',
+  });
+  assert.equal(currentPackage.ok, true);
+  if (!currentPackage.ok) throw new Error('restaged fill package failed');
+  assert.equal(
+    currentPackage.result.manifest.plan.planHash,
+    restaged.state.planHash,
+  );
+  assert.notEqual(
+    currentPackage.result.outputHash,
+    originalPackage.result.outputHash,
+  );
+
+  const differentSource = await createProtectedFormPdf({ xfa: false });
+  const mismatched = await exportFillPackageFromUi(state, differentSource, {
+    confirmedFieldNames,
+  });
+  assert.equal(mismatched.ok, false);
+  if (mismatched.ok) throw new Error('mismatched inspection package exported');
+  assert.equal(mismatched.state, state);
+  assert.deepEqual(
+    mismatched.errors.map(({ code }) => code),
+    ['source_mismatch'],
+  );
+  assert.deepEqual(source, sourceSnapshot, 'source PDF bytes were modified');
+
+  const unknown = await stagedProtectedForm({ unknownProtection: true });
+  assert.equal(unknown.inspection.protection.protectionType, 'unknown');
+  assert.deepEqual(unknown.inspection.protection.exportStrategies, []);
+  const unavailable = await exportFillPackageFromUi(
+    unknown.state,
+    unknown.source,
+    { confirmedFieldNames },
+  );
+  assert.equal(unavailable.ok, false);
+  if (unavailable.ok) throw new Error('unknown-protection package exported');
+  assert.equal(unavailable.state, unknown.state);
+  assert.deepEqual(
+    unavailable.errors.map(({ code }) => code),
+    ['artifact_unavailable'],
+  );
+  assert.deepEqual(
+    unknown.source,
+    unknown.sourceSnapshot,
+    'unknown-protection source bytes were modified',
+  );
+});
+
+void test('refuses a usage-rights derivative without explicit human confirmation', async () => {
+  const { source, sourceSnapshot, inspection, state } =
+    await stagedProtectedForm({ xfa: false });
+  assert.deepEqual(inspection.protection.exportStrategies, [
+    'confirmed_plain_derivative_pdf',
+    'fill_package',
+  ]);
+  assert.equal(inspection.protection.requiresHumanConfirmation, true);
+  const approval = approveDraftFromUi(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    expectedPlanHash: state.planHash,
+    approvedBy: 'local user',
+    confirmedFieldNames: ['formproof.applicant_name', 'opaque.f1_02'],
+  });
+  assert.equal(approval.ok, true);
+  if (!approval.ok) throw new Error('derivative plan approval failed');
+
+  const rejected = await exportApprovedDerivativePdfFromUi(
+    approval.state,
+    source,
+    { humanConfirmedProtectionLoss: false },
+  );
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) throw new Error('unconfirmed derivative was exported');
+  assert.equal(rejected.state, approval.state);
+  assert.deepEqual(
+    rejected.errors.map(({ code }) => code),
+    ['review_unconfirmed'],
+  );
+  assert.equal(rejected.state.output, null);
+  assert.equal(rejected.state.verification, null);
+  assert.deepEqual(source, sourceSnapshot, 'source PDF bytes were modified');
+});
+
 void test('rejects a forged Grace export and releases only the exact approved Ada PDF', async () => {
   const source = await createTextFormPdf('legal_name');
   const inspection = await inspectPdf(source);
@@ -898,7 +1437,7 @@ void test('rejects a forged Grace export and releases only the exact approved Ad
       verifiedAt: '2026-08-29T18:21:00.000Z',
       fieldValuesMatch: true,
       appearancesPresent: true,
-      signatureIntegrityPreserved: true,
+      signatureImpact: 'none',
     },
   };
   assert.equal(getReleaseGate(structurallyForgedState).open, false);
@@ -921,7 +1460,7 @@ void test('rejects a forged Grace export and releases only the exact approved Ad
     outputHash: gracePdf.outputHash,
     fieldValuesMatch: true,
     appearancesPresent: true,
-    signatureIntegrityPreserved: true,
+    signatureImpact: 'none',
   });
   assert.equal(forgedVerification.ok, false);
   if (forgedVerification.ok)

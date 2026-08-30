@@ -1,14 +1,17 @@
 import {
   EncryptedPDFError,
   PDFArray,
+  PDFBool,
   PDFCheckBox,
   PDFDict,
   PDFDocument,
   PDFDropdown,
   PDFField,
+  PDFForm,
   PDFHexString,
   PDFName,
   PDFNull,
+  PDFNumber,
   PDFOptionList,
   PDFObject,
   PDFRadioGroup,
@@ -25,8 +28,9 @@ export const PDF_ENGINE_SUPPORT = {
   preservesInteractiveFields: true,
   unsupported: [
     'encrypted PDFs',
-    'XFA forms',
-    'signed PDFs',
+    'PDF mutation when XFA is present',
+    'PDF mutation when document signatures or certification are present',
+    'unknown PDF protection structures',
     'signature writing',
     'characters outside the built-in WinAnsi appearance font',
   ],
@@ -49,6 +53,9 @@ export type PdfEngineErrorCode =
   | 'PDF_LOAD_FAILED'
   | 'PDF_XFA_UNSUPPORTED'
   | 'PDF_SIGNED_UNSUPPORTED'
+  | 'PDF_CERTIFIED_UNSUPPORTED'
+  | 'PDF_UNKNOWN_PROTECTION_UNSUPPORTED'
+  | 'PDF_DERIVATIVE_CONFIRMATION_REQUIRED'
   | 'PDF_HIGH_RISK_ACTION_UNSUPPORTED'
   | 'FIELD_NOT_FOUND'
   | 'FIELD_READ_ONLY'
@@ -65,7 +72,8 @@ export type PdfEngineErrorCode =
   | 'PDF_VERIFY_WIDGET_MISSING'
   | 'PDF_VERIFY_WIDGET_PAGE_MISSING'
   | 'PDF_VERIFY_APPEARANCE_MISSING'
-  | 'PDF_VERIFY_WIDGET_VALUE_MISMATCH';
+  | 'PDF_VERIFY_WIDGET_VALUE_MISMATCH'
+  | 'PDF_VERIFY_PROTECTION_MISMATCH';
 
 export type PdfEngineWarningCode =
   | 'NO_ACROFORM_FIELDS'
@@ -75,7 +83,78 @@ export type PdfEngineWarningCode =
   | 'WIDGET_PAGE_UNKNOWN'
   | 'APPEARANCE_UNAVAILABLE'
   | 'JAVASCRIPT_UNVALIDATED'
-  | 'ACTIVE_CONTENT_PRESERVED';
+  | 'ACTIVE_CONTENT_PRESERVED'
+  | 'USAGE_RIGHTS_DETECTED'
+  | 'XFA_PRESENT_INSPECTION_ONLY'
+  | 'DOCUMENT_SIGNATURE_PROTECTED'
+  | 'DOC_MDP_PROTECTED'
+  | 'UNKNOWN_PROTECTION';
+
+export type PdfProtectionType =
+  | 'none'
+  | 'usage_rights'
+  | 'document_signature'
+  | 'doc_mdp'
+  | 'unknown';
+
+export type PdfAllowedMutation =
+  | 'inspect_fields'
+  | 'stage_field_values'
+  | 'create_filled_pdf'
+  | 'create_plain_derivative_pdf'
+  | 'create_fill_package';
+
+export type PdfExportStrategy =
+  | 'filled_pdf'
+  | 'confirmed_plain_derivative_pdf'
+  | 'fill_package';
+
+export type PdfSignatureImpact =
+  | 'none'
+  | 'usage_rights_removed_in_plain_derivative'
+  | 'rewrite_would_invalidate_usage_rights'
+  | 'rewrite_blocked_to_preserve_document_signature'
+  | 'rewrite_blocked_to_preserve_certification'
+  | 'rewrite_blocked_for_unknown_protection';
+
+export interface PdfProtectionEvidence {
+  readonly catalogPermsPresent: boolean;
+  readonly permsKeys: readonly string[];
+  readonly usageRightsKeys: readonly ('UR' | 'UR3')[];
+  readonly byteRangeEntryCount: number;
+  readonly malformedByteRangeCount: number;
+  readonly byteRanges: readonly (readonly [number, number, number, number])[];
+  readonly byteRangesCoverWholeFile: boolean | null;
+  readonly signatureDictionaryCount: number;
+  readonly usageRightsSignatureCount: number;
+  readonly documentSignatureCount: number;
+  readonly unclassifiedSignatureDictionaryCount: number;
+  readonly unreachableSignatureDictionaryCount: number;
+  readonly signatureFieldCount: number;
+  readonly signedSignatureFieldCount: number;
+  readonly docMdpPresent: boolean;
+  readonly docMdpSignatureDictionaryCount: number;
+  readonly docMdpPermission: 1 | 2 | 3 | null;
+  readonly fieldMdpPresent: boolean;
+  readonly adbeExtension: {
+    readonly baseVersion: string | null;
+    readonly extensionLevel: number | null;
+  } | null;
+  readonly xfaPresent: boolean;
+  readonly sigFlags: number | null;
+  readonly unknownStructures: readonly string[];
+  readonly cmsIntegrity: 'not_applicable' | 'not_verified_in_browser';
+  readonly signerTrust: 'not_applicable' | 'not_verified';
+}
+
+export interface PdfProtectionReport {
+  readonly protectionType: PdfProtectionType;
+  readonly allowedMutations: readonly PdfAllowedMutation[];
+  readonly exportStrategies: readonly PdfExportStrategy[];
+  readonly signatureImpact: PdfSignatureImpact;
+  readonly requiresHumanConfirmation: boolean;
+  readonly evidence: Readonly<PdfProtectionEvidence>;
+}
 
 export interface PdfActiveContentSummary {
   javascriptActionCount: number;
@@ -97,6 +176,8 @@ export interface PdfWidgetDescriptor {
   page: number | null;
   rect: PdfRect;
   hasAppearance: boolean;
+  appearanceState: string | null;
+  choiceValue: string | null;
 }
 
 export interface PdfChoiceDescriptor {
@@ -134,6 +215,7 @@ export interface PdfInspection {
   fieldCount: number;
   widgetCount: number;
   activeContent: PdfActiveContentSummary;
+  protection: PdfProtectionReport;
   fields: PdfFieldDescriptor[];
   warnings: PdfEngineWarning[];
 }
@@ -153,6 +235,9 @@ export interface ApplyResult {
   fieldCount: number;
   widgetCount: number;
   activeContent: PdfActiveContentSummary;
+  exportStrategy: 'filled_pdf' | 'confirmed_plain_derivative_pdf';
+  sourceProtection: PdfProtectionReport;
+  outputProtection: PdfProtectionReport;
   verifiedFields: VerifiedPdfField[];
   warnings: PdfEngineWarning[];
 }
@@ -190,6 +275,14 @@ interface LoadedPdf {
   document: PDFDocument;
   form: ReturnType<PDFDocument['getForm']>;
   activeContent: PdfActiveContentSummary;
+  protectionAnalysis: PdfProtectionAnalysis;
+}
+
+interface PdfProtectionAnalysis {
+  protectionType: PdfProtectionType;
+  evidence: PdfProtectionEvidence;
+  usageRightsRefs: PDFRef[];
+  permsRef: PDFRef | null;
 }
 
 const HUMAN_ONLY_MARKER = /\[\s*HUMAN[_ -]?ONLY\s*\]/i;
@@ -259,6 +352,25 @@ function collectPdfDictionaries(document: PDFDocument): PDFDict[] {
   }
 
   return dictionaries;
+}
+
+function collectUnreachableSignatureDictionaries(
+  document: PDFDocument,
+  reachableDictionaries: readonly PDFDict[],
+): PDFDict[] {
+  const reachable = new Set(reachableDictionaries);
+  const unreachable: PDFDict[] = [];
+  for (const [, object] of document.context.enumerateIndirectObjects()) {
+    if (
+      object instanceof PDFDict &&
+      !reachable.has(object) &&
+      (dictionaryName(object, 'Type') === 'Sig' ||
+        object.has(PDFName.of('ByteRange')))
+    ) {
+      unreachable.push(object);
+    }
+  }
+  return unreachable;
 }
 
 function dictionaryName(dictionary: PDFDict, key: string): string | null {
@@ -338,57 +450,736 @@ function explicitlyReferencedActions(
   return actions;
 }
 
-function ensureNoRestrictedSignatureStructures(
+function resolvedObject(
+  dictionary: PDFDict,
+  key: string,
+): PDFObject | undefined {
+  return dictionary.context.lookup(dictionary.get(PDFName.of(key)));
+}
+
+function dictionaryNumber(dictionary: PDFDict, key: string): number | null {
+  const value = resolvedObject(dictionary, key);
+  return value instanceof PDFNumber ? value.asNumber() : null;
+}
+
+function byteRange(
+  dictionary: PDFDict,
+): readonly [number, number, number, number] | null {
+  const value = resolvedObject(dictionary, 'ByteRange');
+  if (!(value instanceof PDFArray) || value.size() !== 4) return null;
+  const numbers: number[] = [];
+  for (let index = 0; index < value.size(); index += 1) {
+    const item = value.lookup(index);
+    if (!(item instanceof PDFNumber)) return null;
+    const number = item.asNumber();
+    if (!Number.isSafeInteger(number) || number < 0) return null;
+    numbers.push(number);
+  }
+  return numbers as [number, number, number, number];
+}
+
+function byteRangeIsSane(
+  range: readonly [number, number, number, number],
+  sourceByteLength: number,
+): boolean {
+  const [firstOffset, firstLength, secondOffset, secondLength] = range;
+  return (
+    firstOffset === 0 &&
+    firstLength > 0 &&
+    secondOffset > firstOffset + firstLength &&
+    secondLength > 0 &&
+    secondOffset + secondLength <= sourceByteLength
+  );
+}
+
+function byteRangeCoversWholeFile(
+  range: readonly [number, number, number, number],
+  sourceByteLength: number,
+): boolean {
+  return (
+    byteRangeIsSane(range, sourceByteLength) &&
+    range[2] + range[3] === sourceByteLength
+  );
+}
+
+function signatureContentsPresent(signature: PDFDict): boolean {
+  const contents = resolvedObject(signature, 'Contents');
+  return (
+    (contents instanceof PDFHexString || contents instanceof PDFString) &&
+    contents.asBytes().length > 0
+  );
+}
+
+function recognizedSignatureStructure(
+  signature: PDFDict,
+  sourceByteLength: number,
+): boolean {
+  const range = byteRange(signature);
+  return (
+    dictionaryName(signature, 'Type') === 'Sig' &&
+    range !== null &&
+    byteRangeIsSane(range, sourceByteLength) &&
+    signatureContentsPresent(signature)
+  );
+}
+
+interface SignatureReferenceList {
+  readonly present: boolean;
+  readonly valid: boolean;
+  readonly references: readonly PDFDict[];
+}
+
+function signatureReferenceList(signature: PDFDict): SignatureReferenceList {
+  if (!signature.has(PDFName.of('Reference'))) {
+    return { present: false, valid: true, references: [] };
+  }
+  const references = resolvedObject(signature, 'Reference');
+  if (!(references instanceof PDFArray) || references.size() === 0) {
+    return { present: true, valid: false, references: [] };
+  }
+  const output: PDFDict[] = [];
+  for (let index = 0; index < references.size(); index += 1) {
+    const reference = references.get(index);
+    if (!(reference instanceof PDFDict)) {
+      return { present: true, valid: false, references: output };
+    }
+    output.push(reference);
+  }
+  return { present: true, valid: true, references: output };
+}
+
+const SIGNATURE_REFERENCE_KEYS = new Set([
+  'Type',
+  'TransformMethod',
+  'TransformParams',
+  'Data',
+  'DigestMethod',
+  'DigestValue',
+  'DigestLocation',
+]);
+const KNOWN_TRANSFORM_METHODS = new Set([
+  'UR',
+  'UR3',
+  'DocMDP',
+  'FieldMDP',
+  'Identity',
+]);
+const TRANSFORM_METHOD_LABELS: Readonly<Record<string, string>> = {
+  UR: 'ur',
+  UR3: 'ur3',
+  DocMDP: 'doc_mdp',
+  FieldMDP: 'field_mdp',
+  Identity: 'identity',
+};
+const USAGE_RIGHTS_PARAMETER_KEYS = new Set([
+  'Type',
+  'V',
+  'Document',
+  'Msg',
+  'Annots',
+  'Form',
+  'Signature',
+  'EF',
+  'P',
+]);
+const DOC_MDP_PARAMETER_KEYS = new Set(['Type', 'P', 'V']);
+const FIELD_MDP_PARAMETER_KEYS = new Set(['Type', 'Action', 'Fields', 'V']);
+const USAGE_RIGHTS_VALUES = {
+  Document: new Set(['FullSave']),
+  Annots: new Set([
+    'Create',
+    'Delete',
+    'Modify',
+    'Copy',
+    'Import',
+    'Export',
+    'Online',
+  ]),
+  Form: new Set([
+    'Add',
+    'Delete',
+    'FillIn',
+    'Import',
+    'Export',
+    'SubmitStandalone',
+    'SpawnTemplate',
+    'BarcodePlaintext',
+    'Online',
+  ]),
+  Signature: new Set(['Modify']),
+  EF: new Set(['Create', 'Delete', 'Modify', 'Import']),
+} as const;
+
+function dictionaryHasOnlyKeys(
+  dictionary: PDFDict,
+  allowedKeys: ReadonlySet<string>,
+): boolean {
+  return dictionary.keys().every((key) => allowedKeys.has(key.decodeText()));
+}
+
+function optionalNameEquals(
+  dictionary: PDFDict,
+  key: string,
+  expected: string,
+): boolean {
+  return (
+    !dictionary.has(PDFName.of(key)) ||
+    dictionaryName(dictionary, key) === expected
+  );
+}
+
+function nameArrayUsesOnly(
+  dictionary: PDFDict,
+  key: keyof typeof USAGE_RIGHTS_VALUES,
+): boolean {
+  if (!dictionary.has(PDFName.of(key))) return true;
+  const value = resolvedObject(dictionary, key);
+  if (!(value instanceof PDFArray) || value.size() === 0) return false;
+  for (let index = 0; index < value.size(); index += 1) {
+    const item = value.lookup(index);
+    if (
+      !(item instanceof PDFName) ||
+      !USAGE_RIGHTS_VALUES[key].has(item.decodeText() as never)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function recognizedUsageRightsTransformParams(reference: PDFDict): boolean {
+  const parameters = reference.get(PDFName.of('TransformParams'));
+  if (!(parameters instanceof PDFDict)) return false;
+  if (!dictionaryHasOnlyKeys(parameters, USAGE_RIGHTS_PARAMETER_KEYS)) {
+    return false;
+  }
+  if (
+    !optionalNameEquals(parameters, 'Type', 'TransformParams') ||
+    !optionalNameEquals(parameters, 'V', '2.2')
+  ) {
+    return false;
+  }
+  const p = resolvedObject(parameters, 'P');
+  if (p !== undefined && !(p instanceof PDFBool)) return false;
+  const message = resolvedObject(parameters, 'Msg');
+  if (
+    message !== undefined &&
+    !(message instanceof PDFString) &&
+    !(message instanceof PDFHexString)
+  ) {
+    return false;
+  }
+  const rightKeys = Object.keys(
+    USAGE_RIGHTS_VALUES,
+  ) as (keyof typeof USAGE_RIGHTS_VALUES)[];
+  return rightKeys.every((key) => nameArrayUsesOnly(parameters, key));
+}
+
+function recognizedDocMdpTransformParams(reference: PDFDict): boolean {
+  const parameters = reference.get(PDFName.of('TransformParams'));
+  if (
+    !(parameters instanceof PDFDict) ||
+    !dictionaryHasOnlyKeys(parameters, DOC_MDP_PARAMETER_KEYS) ||
+    !optionalNameEquals(parameters, 'Type', 'TransformParams') ||
+    !optionalNameEquals(parameters, 'V', '1.2')
+  ) {
+    return false;
+  }
+  const permission = dictionaryNumber(parameters, 'P');
+  return permission === 1 || permission === 2 || permission === 3;
+}
+
+function textStringArray(value: PDFObject | undefined): boolean {
+  if (!(value instanceof PDFArray)) return false;
+  for (let index = 0; index < value.size(); index += 1) {
+    const item = value.lookup(index);
+    if (!(item instanceof PDFString) && !(item instanceof PDFHexString)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function recognizedFieldMdpTransformParams(reference: PDFDict): boolean {
+  const parameters = reference.get(PDFName.of('TransformParams'));
+  if (
+    !(parameters instanceof PDFDict) ||
+    !dictionaryHasOnlyKeys(parameters, FIELD_MDP_PARAMETER_KEYS) ||
+    !optionalNameEquals(parameters, 'Type', 'TransformParams') ||
+    !optionalNameEquals(parameters, 'V', '1.2')
+  ) {
+    return false;
+  }
+  const action = dictionaryName(parameters, 'Action');
+  if (action !== 'All' && action !== 'Include' && action !== 'Exclude') {
+    return false;
+  }
+  const fieldsPresent = parameters.has(PDFName.of('Fields'));
+  if ((action === 'Include' || action === 'Exclude') && !fieldsPresent) {
+    return false;
+  }
+  return (
+    !fieldsPresent || textStringArray(resolvedObject(parameters, 'Fields'))
+  );
+}
+
+function recognizedSignatureReferenceBase(
+  reference: PDFDict,
+  method: string,
+): boolean {
+  if (
+    !dictionaryHasOnlyKeys(reference, SIGNATURE_REFERENCE_KEYS) ||
+    !optionalNameEquals(reference, 'Type', 'SigRef') ||
+    dictionaryName(reference, 'TransformMethod') !== method
+  ) {
+    return false;
+  }
+
+  const rawData = reference.get(PDFName.of('Data'));
+  const dataRequired = method === 'FieldMDP' || method === 'Identity';
+  if (
+    (dataRequired && !(rawData instanceof PDFRef)) ||
+    (rawData !== undefined && !(rawData instanceof PDFRef)) ||
+    (rawData instanceof PDFRef &&
+      reference.context.lookup(rawData) === undefined)
+  ) {
+    return false;
+  }
+  const digestMethod = resolvedObject(reference, 'DigestMethod');
+  if (
+    digestMethod !== undefined &&
+    (!(digestMethod instanceof PDFName) ||
+      (digestMethod.decodeText() !== 'MD5' &&
+        digestMethod.decodeText() !== 'SHA1'))
+  ) {
+    return false;
+  }
+  const digestValue = resolvedObject(reference, 'DigestValue');
+  if (
+    digestValue !== undefined &&
+    !(digestValue instanceof PDFString) &&
+    !(digestValue instanceof PDFHexString)
+  ) {
+    return false;
+  }
+  const digestLocation = resolvedObject(reference, 'DigestLocation');
+  if (digestLocation !== undefined) {
+    if (!(digestLocation instanceof PDFArray) || digestLocation.size() !== 2) {
+      return false;
+    }
+    for (let index = 0; index < digestLocation.size(); index += 1) {
+      const item = digestLocation.lookup(index);
+      if (
+        !(item instanceof PDFNumber) ||
+        !Number.isSafeInteger(item.asNumber()) ||
+        item.asNumber() < 0
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function recognizedTransformReference(
+  reference: PDFDict,
+  method: string,
+): boolean {
+  if (!recognizedSignatureReferenceBase(reference, method)) return false;
+  if (method === 'UR' || method === 'UR3') {
+    return recognizedUsageRightsTransformParams(reference);
+  }
+  if (method === 'DocMDP') {
+    return recognizedDocMdpTransformParams(reference);
+  }
+  if (method === 'FieldMDP') {
+    return recognizedFieldMdpTransformParams(reference);
+  }
+  return method === 'Identity' && !reference.has(PDFName.of('TransformParams'));
+}
+
+function docMdpPermission(signature: PDFDict): 1 | 2 | 3 | null {
+  const state = signatureReferenceList(signature);
+  if (!state.valid) return null;
+  for (const reference of state.references) {
+    if (dictionaryName(reference, 'TransformMethod') !== 'DocMDP') continue;
+    const parameters = reference.get(PDFName.of('TransformParams'));
+    if (!(parameters instanceof PDFDict)) return null;
+    const permission = dictionaryNumber(parameters, 'P');
+    if (permission === 1 || permission === 2 || permission === 3) {
+      return permission;
+    }
+    return null;
+  }
+  return null;
+}
+
+function countReferenceInObject(
+  object: PDFObject,
+  target: PDFRef,
+  seen: Set<PDFObject>,
+): number {
+  if (object instanceof PDFRef) {
+    return object.toString() === target.toString() ? 1 : 0;
+  }
+  if (seen.has(object)) return 0;
+  seen.add(object);
+
+  if (object instanceof PDFStream) {
+    return countReferenceInObject(object.dict, target, seen);
+  }
+  if (object instanceof PDFDict) {
+    return object
+      .values()
+      .reduce(
+        (count, value) => count + countReferenceInObject(value, target, seen),
+        0,
+      );
+  }
+  if (object instanceof PDFArray) {
+    let count = 0;
+    for (let index = 0; index < object.size(); index += 1) {
+      count += countReferenceInObject(object.get(index), target, seen);
+    }
+    return count;
+  }
+  return 0;
+}
+
+function indirectReferenceCount(document: PDFDocument, target: PDFRef): number {
+  let count = 0;
+  for (const [, object] of document.context.enumerateIndirectObjects()) {
+    count += countReferenceInObject(object, target, new Set());
+  }
+  return count;
+}
+
+function analyzeProtection(
   document: PDFDocument,
   dictionaries: readonly PDFDict[],
-): void {
-  let structure: string | null = document.catalog.has(PDFName.of('Perms'))
-    ? 'catalog /Perms'
-    : null;
-  let fieldName: string | undefined;
-  const signatureFieldValues = new Map<PDFObject, string>();
+  form: PDFForm,
+  sourceByteLength: number,
+  unreachableSignatureDictionaries: readonly PDFDict[],
+): PdfProtectionAnalysis {
+  const catalogPermsPresent = document.catalog.has(PDFName.of('Perms'));
+  const rawPerms = document.catalog.get(PDFName.of('Perms'));
+  const resolvedPerms = document.context.lookup(rawPerms);
+  const perms = resolvedPerms instanceof PDFDict ? resolvedPerms : null;
+  const permsKeys =
+    perms
+      ?.keys()
+      .map((key) => key.decodeText())
+      .sort() ?? [];
+  const unknownStructures = new Set<string>();
+  const usageRightsKeys: ('UR' | 'UR3')[] = [];
+  const usageRightsSignatures = new Set<PDFDict>();
+  const usageRightsRefs: PDFRef[] = [];
+  const docMdpSignatures = new Set<PDFDict>();
+  const signatureCandidates = new Set<PDFDict>();
+  const signatureDictionaries = new Set<PDFDict>();
+  const signedFieldSignatures = new Set<PDFDict>();
+  let docMdpReferenceObserved = false;
+  let fieldMdpPresent = false;
+
+  if (unreachableSignatureDictionaries.length > 0) {
+    unknownStructures.add('historical_or_unreachable_signature_structure');
+  }
+
+  if (catalogPermsPresent && perms === null) {
+    unknownStructures.add('catalog_perms_not_dictionary');
+  }
+  if (perms && permsKeys.length === 0) {
+    unknownStructures.add('catalog_perms_empty');
+  }
+  for (const key of permsKeys) {
+    if (key !== 'UR' && key !== 'UR3' && key !== 'DocMDP') {
+      unknownStructures.add(`catalog_perms_${key}`);
+    }
+  }
 
   for (const dictionary of dictionaries) {
-    if (dictionaryName(dictionary, 'FT') !== 'Sig') continue;
-    const value = dictionary.context.lookup(dictionary.get(PDFName.of('V')));
-    const partialName = dictionary.context.lookup(
-      dictionary.get(PDFName.of('T')),
+    const signatureLike =
+      dictionaryName(dictionary, 'Type') === 'Sig' ||
+      dictionary.has(PDFName.of('ByteRange'));
+    if (!signatureLike) continue;
+
+    const recognized = recognizedSignatureStructure(
+      dictionary,
+      sourceByteLength,
     );
+    signatureCandidates.add(dictionary);
+    if (recognized) signatureDictionaries.add(dictionary);
+    else unknownStructures.add('signature_structure_unrecognized');
+
+    const referenceState = signatureReferenceList(dictionary);
+    if (referenceState.present && !referenceState.valid) {
+      unknownStructures.add('signature_reference_structure_unrecognized');
+    }
+
+    const methods: string[] = [];
+    for (const reference of referenceState.references) {
+      const method = dictionaryName(reference, 'TransformMethod');
+      if (method === null || !KNOWN_TRANSFORM_METHODS.has(method)) {
+        unknownStructures.add('signature_transform_method_unrecognized');
+        continue;
+      }
+      methods.push(method);
+      if (!recognizedTransformReference(reference, method)) {
+        const label = TRANSFORM_METHOD_LABELS[method] ?? 'signature';
+        unknownStructures.add(`${label}_transform_params_unrecognized`);
+      }
+    }
+
+    const docMdpReferenceCount = methods.filter(
+      (method) => method === 'DocMDP',
+    ).length;
+    if (docMdpReferenceCount > 0) {
+      docMdpReferenceObserved = true;
+      if (docMdpReferenceCount !== 1) {
+        unknownStructures.add('doc_mdp_reference_count_invalid');
+      } else if (
+        recognized &&
+        referenceState.valid &&
+        referenceState.references.every((reference) => {
+          const method = dictionaryName(reference, 'TransformMethod');
+          return (
+            method !== null && recognizedTransformReference(reference, method)
+          );
+        })
+      ) {
+        docMdpSignatures.add(dictionary);
+      } else {
+        unknownStructures.add('doc_mdp_structure_unrecognized');
+      }
+    }
+
+    if (methods.includes('FieldMDP')) {
+      fieldMdpPresent = true;
+      if (
+        methods.filter((method) => method === 'FieldMDP').length !== 1 ||
+        !recognized
+      ) {
+        unknownStructures.add('field_mdp_structure_unrecognized');
+      }
+    }
+  }
+
+  for (const key of ['UR', 'UR3'] as const) {
+    if (!perms?.has(PDFName.of(key))) continue;
+    const rawSignature = perms.get(PDFName.of(key));
+    const signature = document.context.lookup(rawSignature);
+    const referenceState =
+      signature instanceof PDFDict
+        ? signatureReferenceList(signature)
+        : { present: false, valid: false, references: [] };
+    const range = signature instanceof PDFDict ? byteRange(signature) : null;
+    const referencesRecognized =
+      referenceState.valid &&
+      referenceState.references.length === 1 &&
+      referenceState.references.every((reference) =>
+        recognizedTransformReference(reference, key),
+      );
+    if (referenceState.present && !referencesRecognized) {
+      unknownStructures.add(
+        `${key.toLowerCase()}_transform_params_unrecognized`,
+      );
+    }
+    const valid =
+      signature instanceof PDFDict &&
+      rawSignature instanceof PDFRef &&
+      recognizedSignatureStructure(signature, sourceByteLength) &&
+      range !== null &&
+      byteRangeCoversWholeFile(range, sourceByteLength) &&
+      dictionaryName(signature, 'Filter') === 'Adobe.PPKLite' &&
+      dictionaryName(signature, 'SubFilter') === 'adbe.pkcs7.detached' &&
+      referencesRecognized;
+    if (!valid || !(signature instanceof PDFDict)) {
+      unknownStructures.add(`${key.toLowerCase()}_structure_unrecognized`);
+      continue;
+    }
+    usageRightsKeys.push(key);
+    usageRightsSignatures.add(signature);
+    if (rawSignature instanceof PDFRef) {
+      usageRightsRefs.push(rawSignature);
+      if (indirectReferenceCount(document, rawSignature) !== 1) {
+        unknownStructures.add(
+          `${key.toLowerCase()}_signature_shared_reference`,
+        );
+      }
+    }
+  }
+  if (usageRightsKeys.length > 1) {
+    unknownStructures.add('multiple_usage_rights_entries');
+  }
+
+  const catalogDocMdpPresent = perms?.has(PDFName.of('DocMDP')) ?? false;
+  if (catalogDocMdpPresent) {
+    const rawSignature = perms?.get(PDFName.of('DocMDP'));
+    const signature = document.context.lookup(rawSignature);
     if (
-      value !== undefined &&
-      (partialName instanceof PDFString || partialName instanceof PDFHexString)
+      !(rawSignature instanceof PDFRef) ||
+      !(signature instanceof PDFDict) ||
+      !docMdpSignatures.has(signature)
     ) {
-      signatureFieldValues.set(value, partialName.decodeText());
+      unknownStructures.add('doc_mdp_structure_unrecognized');
+    }
+  }
+  if (docMdpReferenceObserved && !catalogDocMdpPresent) {
+    unknownStructures.add('doc_mdp_not_catalog_perms');
+  }
+  if (docMdpSignatures.size > 1) {
+    unknownStructures.add('multiple_doc_mdp_signatures');
+  }
+
+  const signatureFields = form
+    .getFields()
+    .filter((field): field is PDFSignature => field instanceof PDFSignature);
+  for (const field of signatureFields) {
+    const value = field.acroField.V();
+    if (value === undefined || value === PDFNull) continue;
+    if (
+      value instanceof PDFDict &&
+      recognizedSignatureStructure(value, sourceByteLength)
+    ) {
+      signedFieldSignatures.add(value);
+    } else {
+      unknownStructures.add('signed_signature_field_value_unrecognized');
     }
   }
 
-  for (const dictionary of dictionaries) {
-    if (structure !== null) break;
-
-    const type = dictionaryName(dictionary, 'Type');
-    const transformMethod = dictionaryName(dictionary, 'TransformMethod');
-    if (type === 'Sig') structure = 'signature dictionary';
-    else if (dictionary.has(PDFName.of('ByteRange'))) {
-      structure = '/ByteRange';
-    } else if (
-      dictionary.has(PDFName.of('DocMDP')) ||
-      transformMethod === 'DocMDP'
-    ) {
-      structure = '/DocMDP';
-    } else if (dictionary.has(PDFName.of('UR3')) || transformMethod === 'UR3') {
-      structure = '/UR3';
-    }
-
-    if (structure !== null) fieldName = signatureFieldValues.get(dictionary);
+  const documentSignatures = [...signedFieldSignatures].filter(
+    (signature) =>
+      !usageRightsSignatures.has(signature) && !docMdpSignatures.has(signature),
+  );
+  const unclassifiedSignatures = [...signatureDictionaries].filter(
+    (signature) =>
+      !usageRightsSignatures.has(signature) &&
+      !docMdpSignatures.has(signature) &&
+      !documentSignatures.includes(signature),
+  );
+  if (unclassifiedSignatures.length > 0) {
+    unknownStructures.add('unclassified_signature_dictionary');
+  }
+  const docMdpPermissions = [...docMdpSignatures]
+    .map(docMdpPermission)
+    .filter((value): value is 1 | 2 | 3 => value !== null);
+  if (docMdpSignatures.size > 0 && docMdpPermissions.length === 0) {
+    unknownStructures.add('doc_mdp_permission_missing_or_invalid');
+  }
+  if (new Set(docMdpPermissions).size > 1) {
+    unknownStructures.add('doc_mdp_permissions_conflict');
   }
 
-  if (structure !== null) {
-    throw new PdfEngineError(
-      'PDF_SIGNED_UNSUPPORTED',
-      'Signed or usage-rights-certified PDFs cannot be modified because saving could invalidate their protections.',
-      { fieldName, details: { structure } },
+  const byteRangeEntries = [...signatureCandidates].filter((signature) =>
+    signature.has(PDFName.of('ByteRange')),
+  );
+  const malformedByteRangeCount = byteRangeEntries.filter((signature) => {
+    const range = byteRange(signature);
+    return range === null || !byteRangeIsSane(range, sourceByteLength);
+  }).length;
+  const byteRanges = [...signatureCandidates]
+    .map(byteRange)
+    .filter(
+      (value): value is readonly [number, number, number, number] =>
+        value !== null,
     );
+  const byteRangesCoverWholeFile =
+    byteRangeEntries.length === 0
+      ? null
+      : malformedByteRangeCount > 0
+        ? false
+        : byteRanges.every((range) =>
+            byteRangeCoversWholeFile(range, sourceByteLength),
+          );
+
+  const acroForm = document.catalog.AcroForm();
+  const xfaPresent = acroForm?.has(PDFName.of('XFA')) ?? false;
+  const sigFlagsPresent = acroForm?.has(PDFName.of('SigFlags')) ?? false;
+  const sigFlagsValue = acroForm
+    ? dictionaryNumber(acroForm, 'SigFlags')
+    : null;
+  if (
+    sigFlagsPresent &&
+    (sigFlagsValue === null ||
+      !Number.isSafeInteger(sigFlagsValue) ||
+      sigFlagsValue < 0 ||
+      sigFlagsValue > 3)
+  ) {
+    unknownStructures.add('sig_flags_unrecognized');
   }
+  if (
+    (sigFlagsValue === 1 || sigFlagsValue === 3) &&
+    signatureFields.length === 0
+  ) {
+    unknownStructures.add('sig_flags_signatures_exist_without_field');
+  }
+  if (
+    (sigFlagsValue === 2 || sigFlagsValue === 3) &&
+    signatureDictionaries.size === 0
+  ) {
+    unknownStructures.add('sig_flags_append_only_without_signature');
+  }
+  const permsRef = rawPerms instanceof PDFRef ? rawPerms : null;
+  if (permsRef && indirectReferenceCount(document, permsRef) !== 1) {
+    unknownStructures.add('catalog_perms_shared_reference');
+  }
+  const extensions = resolvedObject(document.catalog, 'Extensions');
+  const adbe =
+    extensions instanceof PDFDict ? resolvedObject(extensions, 'ADBE') : null;
+  const adbeExtension =
+    adbe instanceof PDFDict
+      ? {
+          baseVersion: dictionaryName(adbe, 'BaseVersion'),
+          extensionLevel: dictionaryNumber(adbe, 'ExtensionLevel'),
+        }
+      : null;
+
+  let protectionType: PdfProtectionType;
+  if (unknownStructures.size > 0) protectionType = 'unknown';
+  else if (docMdpSignatures.size > 0) protectionType = 'doc_mdp';
+  else if (documentSignatures.length > 0) {
+    protectionType = 'document_signature';
+  } else if (usageRightsSignatures.size > 0) protectionType = 'usage_rights';
+  else protectionType = 'none';
+
+  const hasCmsCandidate = signatureCandidates.size > 0;
+  return {
+    protectionType,
+    evidence: {
+      catalogPermsPresent,
+      permsKeys,
+      usageRightsKeys,
+      byteRangeEntryCount: byteRangeEntries.length,
+      malformedByteRangeCount,
+      byteRanges,
+      byteRangesCoverWholeFile,
+      signatureDictionaryCount: signatureDictionaries.size,
+      usageRightsSignatureCount: usageRightsSignatures.size,
+      documentSignatureCount: documentSignatures.length,
+      unclassifiedSignatureDictionaryCount: unclassifiedSignatures.length,
+      unreachableSignatureDictionaryCount:
+        unreachableSignatureDictionaries.length,
+      signatureFieldCount: signatureFields.length,
+      signedSignatureFieldCount: signedFieldSignatures.size,
+      docMdpPresent: catalogDocMdpPresent || docMdpReferenceObserved,
+      docMdpSignatureDictionaryCount: docMdpSignatures.size,
+      docMdpPermission: docMdpPermissions[0] ?? null,
+      fieldMdpPresent,
+      adbeExtension,
+      xfaPresent,
+      sigFlags:
+        sigFlagsValue !== null && Number.isSafeInteger(sigFlagsValue)
+          ? sigFlagsValue
+          : null,
+      unknownStructures: [...unknownStructures].sort(),
+      cmsIntegrity: hasCmsCandidate
+        ? 'not_verified_in_browser'
+        : 'not_applicable',
+      signerTrust: hasCmsCandidate ? 'not_verified' : 'not_applicable',
+    },
+    usageRightsRefs,
+    permsRef,
+  };
 }
 
 function summarizeActiveContent(
@@ -456,6 +1247,86 @@ function hasActiveContent(summary: PdfActiveContentSummary): boolean {
   );
 }
 
+function createProtectionReport(
+  analysis: PdfProtectionAnalysis,
+  fields: readonly PdfFieldDescriptor[],
+  activeContent: PdfActiveContentSummary,
+): PdfProtectionReport {
+  const allowedMutations: PdfAllowedMutation[] = ['inspect_fields'];
+  const exportStrategies: PdfExportStrategy[] = [];
+  const canStage = fields.some(
+    (field) =>
+      !field.readOnly &&
+      !field.humanOnly &&
+      field.type !== 'signature' &&
+      field.type !== 'unsupported',
+  );
+  if (canStage) allowedMutations.push('stage_field_values');
+
+  const pdfActionsAllowExport = activeContent.highRiskActionCount === 0;
+  if (canStage && analysis.protectionType !== 'unknown') {
+    allowedMutations.push('create_fill_package');
+    exportStrategies.push('fill_package');
+  }
+  if (
+    canStage &&
+    pdfActionsAllowExport &&
+    analysis.protectionType === 'none' &&
+    !analysis.evidence.xfaPresent
+  ) {
+    allowedMutations.push('create_filled_pdf');
+    exportStrategies.unshift('filled_pdf');
+  }
+  if (
+    canStage &&
+    pdfActionsAllowExport &&
+    analysis.protectionType === 'usage_rights' &&
+    !analysis.evidence.xfaPresent
+  ) {
+    allowedMutations.push('create_plain_derivative_pdf');
+    exportStrategies.unshift('confirmed_plain_derivative_pdf');
+  }
+
+  let signatureImpact: PdfSignatureImpact;
+  switch (analysis.protectionType) {
+    case 'none':
+      signatureImpact = 'none';
+      break;
+    case 'usage_rights':
+      signatureImpact = exportStrategies.includes(
+        'confirmed_plain_derivative_pdf',
+      )
+        ? 'usage_rights_removed_in_plain_derivative'
+        : 'rewrite_would_invalidate_usage_rights';
+      break;
+    case 'document_signature':
+      signatureImpact = 'rewrite_blocked_to_preserve_document_signature';
+      break;
+    case 'doc_mdp':
+      signatureImpact = 'rewrite_blocked_to_preserve_certification';
+      break;
+    case 'unknown':
+      signatureImpact = 'rewrite_blocked_for_unknown_protection';
+      break;
+  }
+
+  return {
+    protectionType: analysis.protectionType,
+    allowedMutations,
+    exportStrategies,
+    signatureImpact,
+    requiresHumanConfirmation: exportStrategies.includes(
+      'confirmed_plain_derivative_pdf',
+    ),
+    evidence: analysis.evidence,
+  };
+}
+
+function inspectionForm(document: PDFDocument): PDFForm {
+  const acroForm = document.catalog.getAcroForm();
+  return acroForm ? PDFForm.of(acroForm, document) : document.getForm();
+}
+
 async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
   let document: PDFDocument;
 
@@ -483,21 +1354,19 @@ async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
   }
 
   const dictionaries = collectPdfDictionaries(document);
-  ensureNoRestrictedSignatureStructures(document, dictionaries);
+  const unreachableSignatureDictionaries =
+    collectUnreachableSignatureDictionaries(document, dictionaries);
   const activeContent = summarizeActiveContent(document, dictionaries);
+  const form = inspectionForm(document);
+  const protectionAnalysis = analyzeProtection(
+    document,
+    [...dictionaries, ...unreachableSignatureDictionaries],
+    form,
+    bytes.byteLength,
+    unreachableSignatureDictionaries,
+  );
 
-  const acroFormDictionary = document.catalog.AcroForm();
-  if (acroFormDictionary?.has(PDFName.of('XFA'))) {
-    throw new PdfEngineError(
-      'PDF_XFA_UNSUPPORTED',
-      'XFA forms are not supported. Use a standard AcroForm PDF.',
-    );
-  }
-
-  const form = document.getForm();
-  ensureNoExistingSignatures(form);
-
-  return { document, form, activeContent };
+  return { document, form, activeContent, protectionAnalysis };
 }
 
 function recoveredCheckBoxRadioOptions(field: PDFField): string[] | null {
@@ -670,6 +1539,11 @@ function describeWidgets(
   const widgets = field.acroField.getWidgets();
   const refs = widgetRefs(field);
   const pages = document.getPages();
+  const recoveredOptions = recoveredCheckBoxRadioOptions(field);
+  const radioExportValues =
+    field instanceof PDFRadioGroup
+      ? field.acroField.getExportValues()?.map((value) => value.decodeText())
+      : undefined;
 
   return widgets.map((widget, index) => {
     const annotationRef = refs[index];
@@ -688,6 +1562,13 @@ function describeWidgets(
       page: pageIndex < 0 ? null : pageIndex + 1,
       rect: widget.getRectangle(),
       hasAppearance: widgetAppearanceExists(widget),
+      appearanceState: widget.getOnValue()?.decodeText() ?? null,
+      choiceValue:
+        field instanceof PDFRadioGroup
+          ? (radioExportValues?.[index] ?? field.getOptions()[index] ?? null)
+          : recoveredOptions
+            ? (recoveredOptions[index] ?? null)
+            : null,
     };
   });
 }
@@ -724,6 +1605,7 @@ function describeField(
 function inspectionWarnings(
   fields: PdfFieldDescriptor[],
   activeContent: PdfActiveContentSummary,
+  protection: PdfProtectionReport,
 ): PdfEngineWarning[] {
   const warnings: PdfEngineWarning[] = [];
 
@@ -745,6 +1627,38 @@ function inspectionWarnings(
       code: 'JAVASCRIPT_UNVALIDATED',
       message:
         'The PDF contains JavaScript that is preserved, but FormProof does not execute or semantically validate it.',
+    });
+  }
+  if (protection.protectionType === 'usage_rights') {
+    warnings.push({
+      code: 'USAGE_RIGHTS_DETECTED',
+      message:
+        'The PDF contains Reader Extensions usage rights. Rewriting would invalidate those rights; FormProof does not treat this as a user signature.',
+    });
+  } else if (protection.protectionType === 'document_signature') {
+    warnings.push({
+      code: 'DOCUMENT_SIGNATURE_PROTECTED',
+      message:
+        'The PDF contains a document signature. FormProof can inspect fields but will not rewrite the PDF.',
+    });
+  } else if (protection.protectionType === 'doc_mdp') {
+    warnings.push({
+      code: 'DOC_MDP_PROTECTED',
+      message:
+        'The PDF contains DocMDP certification. FormProof cannot independently preserve or validate that certification after a rewrite.',
+    });
+  } else if (protection.protectionType === 'unknown') {
+    warnings.push({
+      code: 'UNKNOWN_PROTECTION',
+      message:
+        'The PDF contains an unrecognized or malformed protection structure. PDF and fill-package export are refused.',
+    });
+  }
+  if (protection.evidence.xfaPresent) {
+    warnings.push({
+      code: 'XFA_PRESENT_INSPECTION_ONLY',
+      message:
+        'The PDF contains XFA. Only its AcroForm fallback fields are inspected; XFA scripts, validation, layout, and semantics are not evaluated, so PDF rewriting is disabled.',
     });
   }
 
@@ -800,25 +1714,39 @@ function inspectLoadedPdf(
   form: ReturnType<PDFDocument['getForm']>,
   sourceHash: string,
   activeContent: PdfActiveContentSummary,
+  protectionAnalysis: PdfProtectionAnalysis,
 ): PdfInspection {
   const fields = form
     .getFields()
     .map((field) => describeField(document, field));
+  const protection = createProtectionReport(
+    protectionAnalysis,
+    fields,
+    activeContent,
+  );
   return {
     sourceHash,
     pageCount: document.getPageCount(),
     fieldCount: fields.length,
     widgetCount: fields.reduce((total, field) => total + field.widgetCount, 0),
     activeContent,
+    protection,
     fields,
-    warnings: inspectionWarnings(fields, activeContent),
+    warnings: inspectionWarnings(fields, activeContent, protection),
   };
 }
 
 export async function inspectPdf(source: Uint8Array): Promise<PdfInspection> {
   const sourceHash = await sha256Hex(source);
-  const { document, form, activeContent } = await loadPdf(source);
-  return inspectLoadedPdf(document, form, sourceHash, activeContent);
+  const { document, form, activeContent, protectionAnalysis } =
+    await loadPdf(source);
+  return inspectLoadedPdf(
+    document,
+    form,
+    sourceHash,
+    activeContent,
+    protectionAnalysis,
+  );
 }
 
 function invalidValueType(fieldName: string, expected: string): PdfEngineError {
@@ -1169,33 +2097,129 @@ function verifyButtonWidgetValues(
   );
 }
 
-function ensureNoExistingSignatures(
-  form: ReturnType<PDFDocument['getForm']>,
-): void {
-  const signedField = form
-    .getFields()
-    .find(
-      (field) =>
-        field instanceof PDFSignature &&
-        field.acroField.V() !== undefined &&
-        field.acroField.V() !== PDFNull,
-    );
-
-  if (signedField) {
-    throw new PdfEngineError(
-      'PDF_SIGNED_UNSUPPORTED',
-      'Signed PDFs cannot be modified because saving would invalidate the existing signature.',
-      { fieldName: signedField.getName() },
-    );
+function clearSignatureFlags(document: PDFDocument): void {
+  const acroForm = document.catalog.AcroForm();
+  if (!acroForm) return;
+  const flags = dictionaryNumber(acroForm, 'SigFlags');
+  if (
+    flags === null ||
+    !Number.isSafeInteger(flags) ||
+    flags < 0 ||
+    flags > 3
+  ) {
+    return;
   }
+  acroForm.delete(PDFName.of('SigFlags'));
 }
 
-export async function applyApprovedValues(
+function removeUsageRightsForDerivative(
+  document: PDFDocument,
+  analysis: PdfProtectionAnalysis,
+): void {
+  document.catalog.delete(PDFName.of('Perms'));
+  for (const reference of analysis.usageRightsRefs) {
+    document.context.delete(reference);
+  }
+  if (analysis.permsRef) document.context.delete(analysis.permsRef);
+  clearSignatureFlags(document);
+}
+
+function mutationError(
+  report: PdfProtectionReport,
+  strategy: 'filled_pdf' | 'confirmed_plain_derivative_pdf',
+): PdfEngineError | null {
+  if (report.protectionType === 'unknown') {
+    return new PdfEngineError(
+      'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+      'This PDF contains an unknown or malformed protection structure. FormProof refuses PDF and fill-package export.',
+      {
+        details: {
+          strategy,
+          unknownStructures: report.evidence.unknownStructures,
+        },
+      },
+    );
+  }
+  if (report.protectionType === 'document_signature') {
+    return new PdfEngineError(
+      'PDF_SIGNED_UNSUPPORTED',
+      'This PDF contains a document signature. FormProof will not rewrite it because pdf-lib cannot make an incremental update and independently verify the signature afterward.',
+      { details: { strategy } },
+    );
+  }
+  if (report.protectionType === 'doc_mdp') {
+    return new PdfEngineError(
+      'PDF_CERTIFIED_UNSUPPORTED',
+      'This PDF contains DocMDP certification. FormProof will not rewrite it because the certification permission and signature cannot be preserved and independently verified.',
+      {
+        details: {
+          strategy,
+          docMdpPermission: report.evidence.docMdpPermission,
+        },
+      },
+    );
+  }
+  if (report.evidence.xfaPresent) {
+    return new PdfEngineError(
+      'PDF_XFA_UNSUPPORTED',
+      'This PDF contains XFA. FormProof can inspect its AcroForm fallback and create a fill package, but will not rewrite the PDF because XFA behavior cannot be preserved or verified.',
+      { details: { strategy } },
+    );
+  }
+  if (strategy === 'filled_pdf' && report.protectionType === 'usage_rights') {
+    return new PdfEngineError(
+      'PDF_DERIVATIVE_CONFIRMATION_REQUIRED',
+      'This PDF has Reader Extensions usage rights. A person must explicitly choose the ordinary derivative strategy, which removes those rights.',
+      { details: { strategy } },
+    );
+  }
+  if (
+    strategy === 'confirmed_plain_derivative_pdf' &&
+    report.protectionType !== 'usage_rights'
+  ) {
+    return new PdfEngineError(
+      'PDF_DERIVATIVE_CONFIRMATION_REQUIRED',
+      'The ordinary derivative strategy is available only for recognized usage-rights-only AcroForms.',
+      {
+        details: {
+          strategy,
+          protectionType: report.protectionType,
+        },
+      },
+    );
+  }
+  return null;
+}
+
+async function applyValues(
   source: Uint8Array,
   values: Record<string, PdfFieldValue>,
+  exportStrategy: 'filled_pdf' | 'confirmed_plain_derivative_pdf',
+  humanConfirmedDerivative: boolean,
 ): Promise<ApplyResult> {
   const sourceHash = await sha256Hex(source);
-  const { document, form, activeContent } = await loadPdf(source);
+  const loaded = await loadPdf(source);
+  const { document, form, activeContent, protectionAnalysis } = loaded;
+  const descriptors = form
+    .getFields()
+    .map((field) => describeField(document, field));
+  const sourceProtection = createProtectionReport(
+    protectionAnalysis,
+    descriptors,
+    activeContent,
+  );
+
+  if (
+    exportStrategy === 'confirmed_plain_derivative_pdf' &&
+    !humanConfirmedDerivative
+  ) {
+    throw new PdfEngineError(
+      'PDF_DERIVATIVE_CONFIRMATION_REQUIRED',
+      'A person must confirm that Reader Extensions usage rights will be removed before creating an ordinary derivative PDF.',
+    );
+  }
+  const blocked = mutationError(sourceProtection, exportStrategy);
+  if (blocked) throw blocked;
 
   if (activeContent.highRiskActionCount > 0) {
     throw new PdfEngineError(
@@ -1209,14 +2233,19 @@ export async function applyApprovedValues(
     );
   }
 
+  if (exportStrategy === 'confirmed_plain_derivative_pdf') {
+    removeUsageRightsForDerivative(document, protectionAnalysis);
+  }
+
   const entries = Object.entries(values);
-  if (entries.length === 0) {
+  if (entries.length === 0 && exportStrategy === 'filled_pdf') {
     const unchanged = copyBytes(source);
     const inspection = inspectLoadedPdf(
       document,
       form,
       sourceHash,
       activeContent,
+      protectionAnalysis,
     );
     return {
       bytes: unchanged,
@@ -1225,6 +2254,9 @@ export async function applyApprovedValues(
       fieldCount: inspection.fieldCount,
       widgetCount: inspection.widgetCount,
       activeContent: inspection.activeContent,
+      exportStrategy,
+      sourceProtection,
+      outputProtection: sourceProtection,
       verifiedFields: [],
       warnings: inspection.warnings,
     };
@@ -1409,7 +2441,23 @@ export async function applyApprovedValues(
     reopened.form,
     outputHash,
     reopened.activeContent,
+    reopened.protectionAnalysis,
   );
+  if (
+    inspection.protection.protectionType !== 'none' ||
+    inspection.protection.evidence.xfaPresent
+  ) {
+    throw new PdfEngineError(
+      'PDF_VERIFY_PROTECTION_MISMATCH',
+      'The exported PDF still contains an active signature, certification, usage-rights, XFA, or unknown protection structure.',
+      {
+        details: {
+          protectionType: inspection.protection.protectionType,
+          xfaPresent: inspection.protection.evidence.xfaPresent,
+        },
+      },
+    );
+  }
 
   return {
     bytes,
@@ -1418,7 +2466,30 @@ export async function applyApprovedValues(
     fieldCount: inspection.fieldCount,
     widgetCount: inspection.widgetCount,
     activeContent: inspection.activeContent,
+    exportStrategy,
+    sourceProtection,
+    outputProtection: inspection.protection,
     verifiedFields,
     warnings: inspection.warnings,
   };
+}
+
+export async function applyApprovedValues(
+  source: Uint8Array,
+  values: Record<string, PdfFieldValue>,
+): Promise<ApplyResult> {
+  return applyValues(source, values, 'filled_pdf', false);
+}
+
+export async function applyConfirmedDerivativeValues(
+  source: Uint8Array,
+  values: Record<string, PdfFieldValue>,
+  options: { readonly humanConfirmedProtectionLoss: boolean },
+): Promise<ApplyResult> {
+  return applyValues(
+    source,
+    values,
+    'confirmed_plain_derivative_pdf',
+    options.humanConfirmedProtectionLoss,
+  );
 }

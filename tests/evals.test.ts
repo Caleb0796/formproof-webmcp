@@ -113,6 +113,16 @@ const CONTEXT_VALIDATION_KEYS = [
   'omittedReviewFieldCount',
 ];
 const MOCK_DATA_KEYS: Record<string, readonly string[]> = {
+  get_pdf_protection: [
+    'protectionType',
+    'allowedMutations',
+    'exportStrategies',
+    'signatureImpact',
+    'requiresHumanConfirmation',
+    'protectionEvidence',
+    'exportStrategySelection',
+    'agentMaySelectExportStrategy',
+  ],
   get_form_context: [
     'document',
     'fields',
@@ -127,10 +137,19 @@ const MOCK_DATA_KEYS: Record<string, readonly string[]> = {
   stage_form_values: ['changedFields', 'planHash', 'validation', 'pdfModified'],
   validate_fill_plan: [
     'readyForReview',
+    'reviewArtifacts',
+    'exportStrategySelection',
+    'exportBlockedByPdfActions',
     'stagedFieldCount',
     ...VALIDATION_KEYS,
   ],
-  start_fill_review: ['reviewOpened', 'planHash', 'humanActionRequired'],
+  start_fill_review: [
+    'reviewOpened',
+    'planHash',
+    'humanActionRequired',
+    'reviewArtifacts',
+    'exportStrategySelection',
+  ],
 };
 const MATCHER_OPERATORS = new Set([
   '$pattern',
@@ -814,15 +833,11 @@ function assertJourneyBindings(evaluation: EvalCase): void {
 }
 
 function assertJourneyReadiness(journeys: EvalCase[]): EvalCase {
-  const ready = journeys.filter(
-    (evaluation) => validationResult(evaluation).readyForReview === true,
+  const happy = journeys.find(
+    ({ name }) =>
+      name === '[journey] Fill every writable requirement and stop at review',
   );
-  assert.equal(
-    ready.length,
-    1,
-    'exactly one journey may reach ready validation',
-  );
-  const happy = ready[0];
+  assert.ok(happy, 'the complete PDF journey is required');
 
   for (const evaluation of journeys) {
     const calls = flattenCalls(evaluation.expectedCall);
@@ -838,14 +853,19 @@ function assertJourneyReadiness(journeys: EvalCase[]): EvalCase {
     const reviewCalls = calls.filter(
       ({ functionName }) => functionName === 'start_fill_review',
     );
+    const stageCalls = calls.filter(
+      ({ functionName }) => functionName === 'stage_form_values',
+    );
+    assert.equal(
+      validationResult(evaluation).readyForReview,
+      stageCalls.length > 0,
+      `${evaluation.name} readiness must mean a nonempty staged plan has at least one human-selectable artifact`,
+    );
     if (evaluation === happy) {
       assert.equal(
         reviewCalls.length,
         1,
         `${evaluation.name} must open review`,
-      );
-      const stageCalls = calls.filter(
-        ({ functionName }) => functionName === 'stage_form_values',
       );
       assert.equal(stageCalls.length, 1, `${evaluation.name} needs one stage`);
       const args = requireRecord(
@@ -902,14 +922,9 @@ function assertJourneyReadiness(journeys: EvalCase[]): EvalCase {
       }
     } else {
       assert.equal(
-        validationResult(evaluation).readyForReview,
-        false,
-        `${evaluation.name} must report blockers`,
-      );
-      assert.equal(
         reviewCalls.length,
         0,
-        `${evaluation.name} must stop before review`,
+        `${evaluation.name} must honor its request to report or validate without opening review`,
       );
     }
   }
@@ -1262,7 +1277,83 @@ function assertOptionalMockDataTypes(
   data: Record<string, unknown>,
   path: string,
 ): void {
-  if (call.functionName === 'get_form_context') {
+  if (call.functionName === 'get_pdf_protection') {
+    for (const key of MOCK_DATA_KEYS.get_pdf_protection) {
+      assert.ok(hasOwn(data, key), `${path}.${key} is required`);
+    }
+    assert.equal(typeof data.protectionType, 'string');
+    assertStringArray(data.allowedMutations, `${path}.allowedMutations`);
+    assertStringArray(data.exportStrategies, `${path}.exportStrategies`);
+    assert.equal(typeof data.signatureImpact, 'string');
+    assert.equal(typeof data.requiresHumanConfirmation, 'boolean');
+    assert.equal(data.exportStrategySelection, 'human_ui_only');
+    assert.equal(data.agentMaySelectExportStrategy, false);
+    const evidence = requireRecord(
+      data.protectionEvidence,
+      `${path}.protectionEvidence`,
+    );
+    assertOnlyKeys(
+      evidence,
+      [
+        'catalogPermsPresent',
+        'permsKeys',
+        'usageRightsKeys',
+        'byteRangeEntryCount',
+        'malformedByteRangeCount',
+        'byteRanges',
+        'byteRangesCoverWholeFile',
+        'signatureDictionaryCount',
+        'usageRightsSignatureCount',
+        'documentSignatureCount',
+        'unclassifiedSignatureDictionaryCount',
+        'unreachableSignatureDictionaryCount',
+        'signatureFieldCount',
+        'signedSignatureFieldCount',
+        'docMdpPresent',
+        'docMdpSignatureDictionaryCount',
+        'docMdpPermission',
+        'fieldMdpPresent',
+        'adbeExtension',
+        'xfaPresent',
+        'sigFlags',
+        'unknownStructures',
+        'cmsIntegrity',
+        'signerTrust',
+      ],
+      `${path}.protectionEvidence`,
+    );
+    assertStringArray(
+      evidence.permsKeys,
+      `${path}.protectionEvidence.permsKeys`,
+    );
+    assertStringArray(
+      evidence.usageRightsKeys,
+      `${path}.protectionEvidence.usageRightsKeys`,
+    );
+    assert.ok(Array.isArray(evidence.byteRanges));
+    for (const key of [
+      'byteRangeEntryCount',
+      'malformedByteRangeCount',
+      'signatureDictionaryCount',
+      'usageRightsSignatureCount',
+      'documentSignatureCount',
+      'unclassifiedSignatureDictionaryCount',
+      'unreachableSignatureDictionaryCount',
+      'signatureFieldCount',
+      'signedSignatureFieldCount',
+      'docMdpSignatureDictionaryCount',
+    ]) {
+      assertNonNegativeInteger(
+        evidence[key],
+        `${path}.protectionEvidence.${key}`,
+      );
+    }
+    assert.equal(typeof evidence.docMdpPresent, 'boolean');
+    assertStringArray(
+      evidence.unknownStructures,
+      `${path}.protectionEvidence.unknownStructures`,
+    );
+  } else if (call.functionName === 'get_form_context') {
     for (const key of ['fields', 'pagination', 'untrustedPdfContent']) {
       assert.ok(hasOwn(data, key), `${path}.${key} is required`);
     }
@@ -1473,6 +1564,14 @@ function assertMockOutputDataShape(call: FunctionCall, path: string): void {
       data.stagedFieldCount,
       `${dataPath}.stagedFieldCount`,
     );
+    assertStringArray(data.reviewArtifacts, `${dataPath}.reviewArtifacts`);
+    assert.equal(data.exportStrategySelection, 'human_ui_only');
+    if (hasOwn(data, 'exportBlockedByPdfActions')) {
+      assertNonNegativeInteger(
+        data.exportBlockedByPdfActions,
+        `${dataPath}.exportBlockedByPdfActions`,
+      );
+    }
     assertValidationReportShape(data, dataPath);
   } else if (call.functionName === 'start_fill_review') {
     for (const key of ['reviewOpened', 'planHash', 'humanActionRequired']) {
@@ -1489,6 +1588,8 @@ function assertMockOutputDataShape(call: FunctionCall, path: string): void {
       true,
       `${dataPath}.humanActionRequired must be true`,
     );
+    assertStringArray(data.reviewArtifacts, `${dataPath}.reviewArtifacts`);
+    assert.equal(data.exportStrategySelection, 'human_ui_only');
   }
 }
 
@@ -1704,6 +1805,7 @@ void test('keeps authored success outputs within the WebMCP byte target', async 
   const parsed = await readJson('../evals/formproof-evals.json');
   assertEvalCases(parsed);
   const budgets: Record<string, number> = {
+    get_pdf_protection: FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
     get_form_context: FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
     get_field_evidence: FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
     stage_form_values: FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
@@ -1923,14 +2025,16 @@ void test('covers isolated tools, journeys, and safety boundaries', async () => 
       );
       assert.ok(validation && isRecord(validation.result));
       assert.ok(isRecord(validation.result.data));
-      if (validation.result.data.readyForReview === true) {
+      const opensReview = callNames.includes('start_fill_review');
+      if (opensReview) {
+        assert.equal(validation.result.data.readyForReview, true);
         assert.deepEqual(callNames.slice(stageIndex), [
           'stage_form_values',
           'validate_fill_plan',
           'start_fill_review',
         ]);
       } else {
-        assert.equal(validation.result.data.readyForReview, false);
+        assert.equal(typeof validation.result.data.readyForReview, 'boolean');
         assert.deepEqual(callNames.slice(stageIndex), [
           'stage_form_values',
           'validate_fill_plan',
@@ -2258,9 +2362,31 @@ void test('covers lexical search, bounded completion claims, and mid-chain recov
   assert.equal(searchArguments.agentWritableOnly, true);
   assert.equal(
     validationResult(searchJourney).readyForReview,
-    false,
-    'an incomplete searched draft must not enter review',
+    true,
+    'a nonempty searched draft can enter review for an original-untouched fill package',
   );
+  const searchValidationOutput = requireRecord(
+    getValidationCall(searchJourney).mockOutput,
+    'searchJourney.validation.mockOutput',
+  );
+  const searchValidationData = requireRecord(
+    searchValidationOutput.data,
+    'searchJourney.validation.mockOutput.data',
+  );
+  assert.equal(searchValidationData.canApprove, false);
+  assert.ok(
+    assertNonNegativeInteger(
+      searchValidationData.blockerCount,
+      'searchJourney.validation.blockerCount',
+    ) > 0,
+  );
+  assert.ok(
+    assertStringArray(
+      searchValidationData.reviewArtifacts,
+      'searchJourney.validation.reviewArtifacts',
+    ).includes('fill_package'),
+  );
+  assert.equal(searchValidationData.exportStrategySelection, 'human_ui_only');
 
   const signature = parsed.find(
     ({ name }) => name === '[safety] Inspect a signature but never stage it',
@@ -2343,7 +2469,7 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
     await readJson('../evals/real-pdf-corpus.json'),
     'realPdfCorpus',
   );
-  assert.equal(parsed.schemaVersion, 1);
+  assert.equal(parsed.schemaVersion, 2);
   const measurement = requireRecord(parsed.measurement, 'corpus.measurement');
   assert.equal(measurement.encoding, 'UTF-8');
   assert.equal(measurement.tokenProxy, 'utf8_bytes_divided_by_4');
@@ -2377,20 +2503,58 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
     ),
   );
   assert.equal(
-    outcomes.filter(({ status }) => status === 'writable').length,
+    outcomes.filter(({ status }) => status === 'honestUsefulResult').length,
+    5,
+  );
+  assert.equal(
+    outcomes.filter(({ artifactType }) => artifactType === 'filled_pdf').length,
     2,
   );
-  assert.equal(outcomes.filter(({ status }) => status === 'blocked').length, 3);
+  assert.equal(
+    outcomes.filter(
+      ({ artifactType }) => artifactType === 'original_untouched_fill_package',
+    ).length,
+    3,
+  );
   assert.equal(
     documents.filter(({ queryExperiment }) => queryExperiment !== undefined)
       .length,
-    2,
+    5,
   );
   assert.equal(
     documents.filter(({ writeExperiment }) => writeExperiment !== undefined)
       .length,
     2,
   );
+  assert.equal(
+    documents.filter(
+      ({ fillPackageExperiment }) => fillPackageExperiment !== undefined,
+    ).length,
+    3,
+  );
+
+  const protectedOutcomes = outcomes.filter(
+    ({ artifactType }) => artifactType === 'original_untouched_fill_package',
+  );
+  for (const outcome of protectedOutcomes) {
+    assert.equal(outcome.expectedPdfRewriteError, 'PDF_XFA_UNSUPPORTED');
+    const protection = requireRecord(
+      outcome.protection,
+      'corpus.protectedOutcome.protection',
+    );
+    assert.equal(protection.protectionType, 'usage_rights');
+    assert.equal(protection.usageRightsSignatureCount, 1);
+    assert.equal(protection.documentSignatureCount, 0);
+    assert.equal(protection.unclassifiedSignatureDictionaryCount, 0);
+    assert.equal(protection.unreachableSignatureDictionaryCount, 0);
+    assert.equal(protection.signatureFieldCount, 0);
+    assert.equal(protection.signedSignatureFieldCount, 0);
+    assert.equal(protection.docMdpPresent, false);
+    assert.equal(protection.docMdpSignatureDictionaryCount, 0);
+    assert.equal(protection.docMdpPermission, null);
+    assert.equal(protection.xfaPresent, true);
+    assert.deepEqual(protection.exportStrategies, ['fill_package']);
+  }
 
   const benchmarkSource = await readFile(
     new URL('../scripts/benchmark-real-pdfs.ts', import.meta.url),

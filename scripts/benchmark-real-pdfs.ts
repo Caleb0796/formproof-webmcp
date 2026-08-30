@@ -18,7 +18,13 @@ import type {
   WebMcpToolDefinition,
 } from '../lib/webmcp';
 
-const { createFormFieldDefinitionFromPdf, createFormState } = (await import(
+const {
+  createFormFieldDefinitionFromPdf,
+  createFormState,
+  exportFillPackageFromUi,
+  getArtifactReviewFieldNames,
+  stageFieldUpdates,
+} = (await import(
   new URL('../lib/form-state.ts', import.meta.url).href
 )) as typeof import('../lib/form-state');
 const { applyApprovedValues, inspectPdf, PdfEngineError } = (await import(
@@ -32,27 +38,63 @@ const {
   new URL('../lib/webmcp.ts', import.meta.url).href
 )) as typeof import('../lib/webmcp');
 
-interface BlockedOutcome {
-  status: 'blocked';
-  code: string;
+interface ExpectedProtectionFacts {
+  protectionType: PdfInspection['protection']['protectionType'];
+  allowedMutations: PdfInspection['protection']['allowedMutations'];
+  exportStrategies: PdfInspection['protection']['exportStrategies'];
+  signatureImpact: PdfInspection['protection']['signatureImpact'];
+  requiresHumanConfirmation: boolean;
+  catalogPermsPresent: boolean;
+  permsKeys: PdfInspection['protection']['evidence']['permsKeys'];
+  usageRightsKeys: PdfInspection['protection']['evidence']['usageRightsKeys'];
+  byteRangeEntryCount: number;
+  malformedByteRangeCount: number;
+  byteRangeCount: number;
+  byteRangesCoverWholeFile: boolean | null;
+  signatureDictionaryCount: number;
+  usageRightsSignatureCount: number;
+  documentSignatureCount: number;
+  unclassifiedSignatureDictionaryCount: number;
+  unreachableSignatureDictionaryCount: number;
+  signatureFieldCount: number;
+  signedSignatureFieldCount: number;
+  docMdpPresent: boolean;
+  docMdpSignatureDictionaryCount: number;
+  docMdpPermission: 1 | 2 | 3 | null;
+  fieldMdpPresent: boolean;
+  adbeExtension: PdfInspection['protection']['evidence']['adbeExtension'];
+  xfaPresent: boolean;
+  sigFlags: number | null;
+  unknownStructures: readonly string[];
+  cmsIntegrity: PdfInspection['protection']['evidence']['cmsIntegrity'];
+  signerTrust: PdfInspection['protection']['evidence']['signerTrust'];
 }
 
-interface WritableOutcome {
-  status: 'writable';
+interface HonestUsefulResult {
+  status: 'honestUsefulResult';
+  artifactType: 'filled_pdf' | 'original_untouched_fill_package';
   fieldCount: number;
   widgetCount: number;
   humanOnlyFieldCount?: number;
   recoveredRadioGroupCount?: number;
   activeContent: PdfActiveContentSummary;
+  protection: ExpectedProtectionFacts;
+  expectedPdfRewriteError?: string;
 }
 
 interface QueryExperiment {
   queries: string[];
   expectedFirstPageFieldNames: string[];
+  expectedMatchCounts: number[];
+  expectedTotalMatchedFields: number;
 }
 
 interface WriteExperiment {
   values: Record<string, PdfFieldValue>;
+}
+
+interface FillPackageExperiment extends WriteExperiment {
+  createdAt: string;
 }
 
 interface CorpusDocument {
@@ -64,13 +106,14 @@ interface CorpusDocument {
   sha256: string;
   byteLength: number;
   pageCount: number;
-  expectedEngineOutcome: BlockedOutcome | WritableOutcome;
-  queryExperiment?: QueryExperiment;
+  expectedEngineOutcome: HonestUsefulResult;
+  queryExperiment: QueryExperiment;
   writeExperiment?: WriteExperiment;
+  fillPackageExperiment?: FillPackageExperiment;
 }
 
 interface CorpusManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   corpusRoot: string;
   measurement: {
     encoding: 'UTF-8';
@@ -89,6 +132,8 @@ interface ContextMeasurement {
   totalUtf8Bytes: number;
   approximateTokenProxy: number;
   firstPageFieldNames: string[];
+  firstPageQueryMatchCounts: number[] | null;
+  firstPageMatchMethod: string | null;
 }
 
 function utf8Bytes(value: unknown): number {
@@ -200,6 +245,8 @@ async function measureContext(
   let outputUtf8Bytes = 0;
   const fieldNames: string[] = [];
   let firstPageFieldNames: string[] = [];
+  let firstPageQueryMatchCounts: number[] | null = null;
+  let firstPageMatchMethod: string | null = null;
 
   do {
     const input: GetFormContextInput = {
@@ -227,7 +274,36 @@ async function measureContext(
       const field = requireRecord(value, `Context field ${index} is invalid.`);
       return requireString(field.name, `Context field ${index} has no name.`);
     });
-    if (calls === 1) firstPageFieldNames = pageFieldNames;
+    if (calls === 1) {
+      firstPageFieldNames = pageFieldNames;
+      if (scope.queries !== undefined) {
+        const search = requireRecord(
+          data.search,
+          'Query context search metadata is not an object.',
+        );
+        if (!Array.isArray(search.queries)) {
+          throw new TypeError(
+            'Query context search metadata has no per-query results.',
+          );
+        }
+        firstPageMatchMethod = requireString(
+          search.matchMethod,
+          'Query context search metadata has no match method.',
+        );
+        firstPageQueryMatchCounts = search.queries.map((value, index) => {
+          const query = requireRecord(
+            value,
+            `Query context search result ${index} is invalid.`,
+          );
+          if (typeof query.matchCount !== 'number') {
+            throw new TypeError(
+              `Query context search result ${index} has no matchCount.`,
+            );
+          }
+          return query.matchCount;
+        });
+      }
+    }
     fieldNames.push(...pageFieldNames);
 
     const pagination = requireRecord(
@@ -261,6 +337,8 @@ async function measureContext(
     totalUtf8Bytes,
     approximateTokenProxy: approximateTokens(totalUtf8Bytes),
     firstPageFieldNames,
+    firstPageQueryMatchCounts,
+    firstPageMatchMethod,
   };
 }
 
@@ -272,6 +350,89 @@ function warningCounts(inspection: PdfInspection): Record<string, number> {
   return Object.fromEntries(
     [...counts.entries()].sort(([left], [right]) => left.localeCompare(right)),
   );
+}
+
+function protectionFacts(inspection: PdfInspection): ExpectedProtectionFacts {
+  const { protection } = inspection;
+  return {
+    protectionType: protection.protectionType,
+    allowedMutations: protection.allowedMutations,
+    exportStrategies: protection.exportStrategies,
+    signatureImpact: protection.signatureImpact,
+    requiresHumanConfirmation: protection.requiresHumanConfirmation,
+    catalogPermsPresent: protection.evidence.catalogPermsPresent,
+    permsKeys: protection.evidence.permsKeys,
+    usageRightsKeys: protection.evidence.usageRightsKeys,
+    byteRangeEntryCount: protection.evidence.byteRangeEntryCount,
+    malformedByteRangeCount: protection.evidence.malformedByteRangeCount,
+    byteRangeCount: protection.evidence.byteRanges.length,
+    byteRangesCoverWholeFile: protection.evidence.byteRangesCoverWholeFile,
+    signatureDictionaryCount: protection.evidence.signatureDictionaryCount,
+    usageRightsSignatureCount: protection.evidence.usageRightsSignatureCount,
+    documentSignatureCount: protection.evidence.documentSignatureCount,
+    unclassifiedSignatureDictionaryCount:
+      protection.evidence.unclassifiedSignatureDictionaryCount,
+    unreachableSignatureDictionaryCount:
+      protection.evidence.unreachableSignatureDictionaryCount,
+    signatureFieldCount: protection.evidence.signatureFieldCount,
+    signedSignatureFieldCount: protection.evidence.signedSignatureFieldCount,
+    docMdpPresent: protection.evidence.docMdpPresent,
+    docMdpSignatureDictionaryCount:
+      protection.evidence.docMdpSignatureDictionaryCount,
+    docMdpPermission: protection.evidence.docMdpPermission,
+    fieldMdpPresent: protection.evidence.fieldMdpPresent,
+    adbeExtension: protection.evidence.adbeExtension,
+    xfaPresent: protection.evidence.xfaPresent,
+    sigFlags: protection.evidence.sigFlags,
+    unknownStructures: protection.evidence.unknownStructures,
+    cmsIntegrity: protection.evidence.cmsIntegrity,
+    signerTrust: protection.evidence.signerTrust,
+  };
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return (
+    left.byteLength === right.byteLength &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function hasKeyDeep(value: unknown, forbidden: ReadonlySet<string>): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => hasKeyDeep(item, forbidden));
+  }
+  if (value === null || typeof value !== 'object') return false;
+  return Object.entries(value).some(
+    ([key, child]) => forbidden.has(key) || hasKeyDeep(child, forbidden),
+  );
+}
+
+function semanticCoverage(state: FormState, inspection: PdfInspection) {
+  const meaningfulTooltipCount = inspection.fields.filter(({ tooltip }) => {
+    const normalized = tooltip?.trim().toLowerCase();
+    return (
+      normalized !== undefined &&
+      normalized !== '' &&
+      normalized !== 'undefined' &&
+      normalized !== 'null'
+    );
+  }).length;
+  const semanticLabelAvailableCount = Object.values(state.fields).filter(
+    ({ name, label }) => label !== name,
+  ).length;
+  return {
+    meaningfulTooltipCount,
+    semanticLabelAvailableCount,
+    semanticLabelUnavailableCount:
+      inspection.fieldCount - semanticLabelAvailableCount,
+    semanticLabelCoveragePercent: Number(
+      ((semanticLabelAvailableCount / inspection.fieldCount) * 100).toFixed(2),
+    ),
+    xfaFallbackOnly: inspection.protection.evidence.xfaPresent,
+    xfaSemanticLimitation: inspection.protection.evidence.xfaPresent
+      ? 'Only AcroForm fallback names/tooltips were measured; XFA captions, scripts, calculations, validation, and layout were not evaluated.'
+      : null,
+  };
 }
 
 async function measureWriteRoundTrip(
@@ -327,6 +488,226 @@ async function measureWriteRoundTrip(
   };
 }
 
+async function measureFillPackage(
+  source: Uint8Array,
+  inspection: PdfInspection,
+  initialState: FormState,
+  experiment: FillPackageExperiment,
+  expectedPdfRewriteError: string,
+) {
+  const sourceSnapshot = source.slice();
+  const sourceHashBefore = sha256(source);
+  const provenance = {
+    kind: 'user_instruction' as const,
+    confidence: 1,
+    evidence: ['Synthetic benchmark value'],
+  };
+  const staged = await stageFieldUpdates(initialState, {
+    expectedStateVersion: initialState.stateVersion,
+    expectedSourceHash: initialState.source.sourceHash,
+    actor: 'agent',
+    updates: Object.entries(experiment.values).map(([fieldName, value]) => ({
+      fieldName,
+      value,
+      provenance,
+    })),
+  });
+  if (!staged.ok) {
+    throw new TypeError(
+      `Fill-package staging failed: ${staged.errors.map(({ code }) => code).join(', ')}`,
+    );
+  }
+  const confirmedFieldNames = getArtifactReviewFieldNames(staged.state);
+  const request = {
+    confirmedFieldNames,
+    createdAt: experiment.createdAt,
+  };
+  const exported = await exportFillPackageFromUi(staged.state, source, request);
+  if (!exported.ok) {
+    throw new TypeError(
+      `Fill-package export failed: ${exported.errors.map(({ code }) => code).join(', ')}`,
+    );
+  }
+  const repeated = await exportFillPackageFromUi(staged.state, source, request);
+  if (!repeated.ok) {
+    throw new TypeError(
+      `Repeated fill-package export failed: ${repeated.errors.map(({ code }) => code).join(', ')}`,
+    );
+  }
+
+  const decoded = JSON.parse(
+    new TextDecoder().decode(exported.result.bytes),
+  ) as unknown;
+  assertEqual(
+    decoded,
+    exported.result.manifest,
+    'Fill-package JSON round-trip changed the manifest',
+  );
+  assertEqual(
+    exported.result.manifest.protection,
+    inspection.protection,
+    'Fill-package protection facts changed',
+  );
+  assertEqual(
+    exported.result.manifest.source,
+    {
+      fileName: initialState.source.fileName,
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    'Fill-package source binding changed',
+  );
+  assertEqual(
+    {
+      stateVersion: exported.result.manifest.plan.stateVersion,
+      planHash: exported.result.manifest.plan.planHash,
+    },
+    {
+      stateVersion: staged.state.stateVersion,
+      planHash: staged.state.planHash,
+    },
+    'Fill-package plan binding changed',
+  );
+  assertEqual(
+    exported.result.manifest.plan.confirmedFieldNames,
+    confirmedFieldNames,
+    'Fill-package confirmations changed',
+  );
+  let multiWidgetChoiceMappingsVerified = 0;
+  for (const [fieldName, proposedValue] of Object.entries(experiment.values)) {
+    const descriptor = inspection.fields.find(({ name }) => name === fieldName);
+    const definition = initialState.fields[fieldName];
+    const packaged = exported.result.manifest.plan.stagedFields.find(
+      (field) => field.fieldName === fieldName,
+    );
+    if (
+      descriptor === undefined ||
+      definition === undefined ||
+      packaged === undefined
+    ) {
+      throw new TypeError(`Fill-package field disappeared: ${fieldName}`);
+    }
+    assertEqual(
+      packaged,
+      {
+        fieldName,
+        label: definition.label,
+        semanticLabelAvailable: definition.label !== fieldName,
+        type: definition.type,
+        required: definition.required,
+        multiSelect: descriptor.multiSelect,
+        choices: descriptor.choices,
+        widgets: descriptor.widgets,
+        page: descriptor.page,
+        rect: descriptor.rect,
+        sourceValue: descriptor.current,
+        proposedValue,
+        provenance,
+      },
+      `Fill-package staged field changed: ${fieldName}`,
+    );
+    if (
+      descriptor.type === 'radio' &&
+      descriptor.widgets.length > 1 &&
+      typeof proposedValue === 'string'
+    ) {
+      assertEqual(
+        packaged.widgets.filter(
+          ({ choiceValue }) => choiceValue === proposedValue,
+        ).length,
+        1,
+        `Fill-package choice-to-widget mapping is ambiguous: ${fieldName}`,
+      );
+      multiWidgetChoiceMappingsVerified += 1;
+    }
+  }
+  assertEqual(
+    bytesEqual(exported.result.bytes, repeated.result.bytes),
+    true,
+    'Fixed-createdAt fill-package bytes were nondeterministic',
+  );
+  assertEqual(
+    exported.result.outputHash,
+    repeated.result.outputHash,
+    'Fixed-createdAt fill-package hash was nondeterministic',
+  );
+  assertEqual(
+    exported.result.outputHash,
+    sha256(exported.result.bytes),
+    'Fill-package output hash did not match its bytes',
+  );
+  assertEqual(
+    exported.result.manifest.sourcePdfModified,
+    false,
+    'Fill-package claimed to modify the source PDF',
+  );
+  if (
+    hasKeyDeep(
+      exported.result.manifest,
+      new Set([
+        'appearanceVerified',
+        'appearancesPresent',
+        'signatureIntegrityPreserved',
+        'signatureVerified',
+      ]),
+    )
+  ) {
+    throw new TypeError(
+      'Fill package must not claim PDF appearance or signature verification.',
+    );
+  }
+
+  let rewriteError: InstanceType<typeof PdfEngineError> | undefined;
+  try {
+    await applyApprovedValues(source, experiment.values);
+  } catch (error) {
+    if (!(error instanceof PdfEngineError)) throw error;
+    rewriteError = error;
+  }
+  if (rewriteError === undefined) {
+    throw new TypeError('Protected/XFA PDF rewrite unexpectedly succeeded.');
+  }
+  assertEqual(
+    rewriteError.code,
+    expectedPdfRewriteError,
+    'Protected/XFA PDF rewrite error changed',
+  );
+  assertEqual(
+    [sha256(source), bytesEqual(source, sourceSnapshot)],
+    [sourceHashBefore, true],
+    'Fill-package workflow changed the original PDF bytes',
+  );
+
+  return {
+    passed: true,
+    artifactType: exported.result.manifest.artifactType,
+    stagedFieldCount: Object.keys(experiment.values).length,
+    confirmedFieldCount: confirmedFieldNames.length,
+    humanStepCount: exported.result.manifest.plan.humanSteps.length,
+    multiWidgetChoiceMappingsVerified,
+    semanticLabelUnavailableStagedFieldCount:
+      exported.result.manifest.plan.stagedFields.filter(
+        ({ semanticLabelAvailable }) => !semanticLabelAvailable,
+      ).length,
+    jsonRoundTripVerified: exported.result.roundTripVerified,
+    deterministicWithFixedCreatedAt: true,
+    sourceHashBound: true,
+    planHashBound: true,
+    sourceBytesUnchanged: true,
+    sourcePdfModified: false,
+    protectionFactsPreserved: true,
+    pdfAppearanceVerification: 'not_applicable_no_pdf_rewrite',
+    documentSignatureVerification: 'not_performed',
+    cmsSignatureVerification: 'not_performed',
+    signerTrustVerification: 'not_performed',
+    pdfRewriteRejected: true,
+    pdfRewriteErrorCode: rewriteError.code,
+    outputByteLength: exported.result.bytes.byteLength,
+    outputHash: exported.result.outputHash,
+  };
+}
+
 function percentSaved(smaller: number, baseline: number): number {
   return Number((((baseline - smaller) / baseline) * 100).toFixed(2));
 }
@@ -354,7 +735,7 @@ const manifest = JSON.parse(
     'utf8',
   ),
 ) as CorpusManifest;
-assertEqual(manifest.schemaVersion, 1, 'Unsupported corpus schema');
+assertEqual(manifest.schemaVersion, 2, 'Unsupported corpus schema');
 assertEqual(manifest.documents.length, 5, 'The corpus must contain five PDFs');
 const corpusDirectory = parseCorpusDirectory(manifest);
 
@@ -387,6 +768,7 @@ for (const document of manifest.documents) {
   const bytes = new Uint8Array(
     await readFile(resolve(corpusDirectory, document.fileName)),
   );
+  const sourceSnapshot = bytes.slice();
   const actualHash = sha256(bytes);
   assertEqual(actualHash, document.sha256, `${document.id} SHA-256 mismatch`);
   assertEqual(
@@ -401,191 +783,235 @@ for (const document of manifest.documents) {
     `${document.id} page count mismatch`,
   );
 
-  try {
-    const inspection = await inspectPdf(bytes);
-    const expected = document.expectedEngineOutcome;
-    if (expected.status !== 'writable') {
-      throw new TypeError(
-        `${document.id} unexpectedly became writable instead of failing with ${expected.code}.`,
-      );
-    }
+  const inspectionStartedAt = performance.now();
+  const inspection = await inspectPdf(bytes);
+  const inspectionDurationMs = Number(
+    (performance.now() - inspectionStartedAt).toFixed(2),
+  );
+  const expected = document.expectedEngineOutcome;
+  assertEqual(
+    expected.status,
+    'honestUsefulResult',
+    `${document.id} expected result status changed`,
+  );
+  assertEqual(
+    inspection.fieldCount,
+    expected.fieldCount,
+    `${document.id} field count mismatch`,
+  );
+  assertEqual(
+    inspection.widgetCount,
+    expected.widgetCount,
+    `${document.id} widget count mismatch`,
+  );
+  assertEqual(
+    inspection.activeContent,
+    expected.activeContent,
+    `${document.id} active-content summary mismatch`,
+  );
+  assertEqual(
+    protectionFacts(inspection),
+    expected.protection,
+    `${document.id} protection facts changed`,
+  );
+  if (expected.humanOnlyFieldCount !== undefined) {
     assertEqual(
-      inspection.fieldCount,
-      expected.fieldCount,
-      `${document.id} field count mismatch`,
+      inspection.fields.filter(({ humanOnly }) => humanOnly).length,
+      expected.humanOnlyFieldCount,
+      `${document.id} human-only field count mismatch`,
     );
+  }
+  if (expected.recoveredRadioGroupCount !== undefined) {
     assertEqual(
-      inspection.widgetCount,
-      expected.widgetCount,
-      `${document.id} widget count mismatch`,
+      inspection.fields.filter(({ type }) => type === 'radio').length,
+      expected.recoveredRadioGroupCount,
+      `${document.id} recovered radio count mismatch`,
     );
-    assertEqual(
-      inspection.activeContent,
-      expected.activeContent,
-      `${document.id} active-content summary mismatch`,
-    );
-    if (expected.humanOnlyFieldCount !== undefined) {
-      assertEqual(
-        inspection.fields.filter(({ humanOnly }) => humanOnly).length,
-        expected.humanOnlyFieldCount,
-        `${document.id} human-only field count mismatch`,
-      );
-    }
-    if (expected.recoveredRadioGroupCount !== undefined) {
-      assertEqual(
-        inspection.fields.filter(({ type }) => type === 'radio').length,
-        expected.recoveredRadioGroupCount,
-        `${document.id} recovered radio count mismatch`,
-      );
-    }
-    if (document.queryExperiment === undefined) {
-      throw new TypeError(`${document.id} has no query experiment.`);
-    }
-    if (document.writeExperiment === undefined) {
-      throw new TypeError(`${document.id} has no write experiment.`);
-    }
+  }
 
-    const writeRoundTrip = await measureWriteRoundTrip(
+  const state = await createFormState(
+    {
+      fileName: document.fileName,
+      sourceHash: inspection.sourceHash,
+      byteLength: bytes.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const artifactStartedAt = performance.now();
+  let artifactValidation: Record<string, unknown>;
+  if (expected.artifactType === 'filled_pdf') {
+    if (
+      document.writeExperiment === undefined ||
+      document.fillPackageExperiment !== undefined
+    ) {
+      throw new TypeError(
+        `${document.id} must define only a filled-PDF write experiment.`,
+      );
+    }
+    artifactValidation = await measureWriteRoundTrip(
       bytes,
       inspection,
       document.writeExperiment,
     );
-
-    const state = await createFormState(
-      {
-        fileName: document.fileName,
-        sourceHash: inspection.sourceHash,
-        byteLength: bytes.byteLength,
-        pageCount: inspection.pageCount,
-      },
-      inspection.fields.map(createFormFieldDefinitionFromPdf),
-    );
-    const contextTool = createContextTool(state, inspection);
-    const fullTraversal = await measureContext(contextTool, {}, false);
-    assertEqual(
-      fullTraversal.returnedFields,
-      inspection.fieldCount,
-      `${document.id} full traversal omitted fields`,
-    );
-    assertEqual(
-      fullTraversal.uniqueReturnedFields,
-      inspection.fieldCount,
-      `${document.id} full traversal repeated fields`,
-    );
-    const queryScope = { queries: document.queryExperiment.queries };
-    const targetedFirstPage = await measureContext(
-      contextTool,
-      queryScope,
-      true,
-    );
-    assertEqual(
-      targetedFirstPage.firstPageFieldNames,
-      document.queryExperiment.expectedFirstPageFieldNames,
-      `${document.id} targeted representatives changed`,
-    );
-    const allQueryMatches = await measureContext(
-      contextTool,
-      queryScope,
-      false,
-    );
-    assertEqual(
-      allQueryMatches.returnedFields,
-      allQueryMatches.uniqueReturnedFields,
-      `${document.id} query traversal repeated fields`,
-    );
-
-    results.push({
-      id: document.id,
-      fileName: document.fileName,
-      officialUrl: document.officialUrl,
-      sha256: actualHash,
-      byteLength: bytes.byteLength,
-      pageCount: inspection.pageCount,
-      writableCompatibility: true,
-      writeRoundTrip,
-      safety: {
-        highRiskNativeActionCount: inspection.activeContent.highRiskActionCount,
-        mutationWouldBeBlockedForHighRiskAction:
-          inspection.activeContent.highRiskActionCount > 0,
-        pdfJavaScriptExecuted: false,
-        activeContent: inspection.activeContent,
-        warningCount: inspection.warnings.length,
-        warningCounts: warningCounts(inspection),
-        formCompletenessAssessed: state.validation.formCompletenessAssessed,
-        ruleCoverage: state.validation.ruleCoverage,
-      },
-      structure: {
-        fieldCount: inspection.fieldCount,
-        widgetCount: inspection.widgetCount,
-        humanOnlyFieldCount: inspection.fields.filter(
-          ({ humanOnly }) => humanOnly,
-        ).length,
-        radioGroupCount: inspection.fields.filter(
-          ({ type }) => type === 'radio',
-        ).length,
-      },
-      measurements: {
-        fullTraversal,
-        targetedFirstPage,
-        allQueryMatches,
-        targetedFirstPageVsFullTraversal: {
-          totalUtf8BytesSaved:
-            fullTraversal.totalUtf8Bytes - targetedFirstPage.totalUtf8Bytes,
-          totalUtf8BytesSavedPercent: percentSaved(
-            targetedFirstPage.totalUtf8Bytes,
-            fullTraversal.totalUtf8Bytes,
-          ),
-          expectedRepresentativeExactMatchRate: 1,
-        },
-        includingOneTimeToolCatalog: {
-          fullTraversalUtf8Bytes:
-            toolCatalogUtf8Bytes + fullTraversal.totalUtf8Bytes,
-          targetedFirstPageUtf8Bytes:
-            toolCatalogUtf8Bytes + targetedFirstPage.totalUtf8Bytes,
-          totalUtf8BytesSaved:
-            fullTraversal.totalUtf8Bytes - targetedFirstPage.totalUtf8Bytes,
-          totalUtf8BytesSavedPercent: percentSaved(
-            toolCatalogUtf8Bytes + targetedFirstPage.totalUtf8Bytes,
-            toolCatalogUtf8Bytes + fullTraversal.totalUtf8Bytes,
-          ),
-        },
-      },
-    });
-  } catch (error) {
-    const expected = document.expectedEngineOutcome;
-    if (!(error instanceof PdfEngineError) || expected.status !== 'blocked') {
-      throw error;
+  } else {
+    if (
+      document.fillPackageExperiment === undefined ||
+      document.writeExperiment !== undefined ||
+      expected.expectedPdfRewriteError === undefined
+    ) {
+      throw new TypeError(
+        `${document.id} must define only a protected fill-package experiment and rewrite error.`,
+      );
     }
-    assertEqual(
-      error.code,
-      expected.code,
-      `${document.id} block code mismatch`,
+    artifactValidation = await measureFillPackage(
+      bytes,
+      inspection,
+      state,
+      document.fillPackageExperiment,
+      expected.expectedPdfRewriteError,
     );
-    results.push({
-      id: document.id,
-      fileName: document.fileName,
-      officialUrl: document.officialUrl,
-      sha256: actualHash,
-      byteLength: bytes.byteLength,
-      pageCount: loaded.getPageCount(),
-      writableCompatibility: false,
-      safety: {
-        blockedBeforeMutation: true,
-        code: error.code,
-        message: error.message,
-      },
-    });
   }
+  const artifactDurationMs = Number(
+    (performance.now() - artifactStartedAt).toFixed(2),
+  );
+
+  assertEqual(
+    [sha256(bytes), bytesEqual(bytes, sourceSnapshot)],
+    [actualHash, true],
+    `${document.id} source bytes changed during the experiment`,
+  );
+  const contextTool = createContextTool(state, inspection);
+  const fullTraversal = await measureContext(contextTool, {}, false);
+  assertEqual(
+    fullTraversal.returnedFields,
+    inspection.fieldCount,
+    `${document.id} full traversal omitted fields`,
+  );
+  assertEqual(
+    fullTraversal.uniqueReturnedFields,
+    inspection.fieldCount,
+    `${document.id} full traversal repeated fields`,
+  );
+  const queryScope = { queries: document.queryExperiment.queries };
+  const targetedFirstPage = await measureContext(contextTool, queryScope, true);
+  assertEqual(
+    targetedFirstPage.firstPageFieldNames,
+    document.queryExperiment.expectedFirstPageFieldNames,
+    `${document.id} targeted representatives changed`,
+  );
+  assertEqual(
+    targetedFirstPage.firstPageQueryMatchCounts,
+    document.queryExperiment.expectedMatchCounts,
+    `${document.id} per-query match counts changed`,
+  );
+  assertEqual(
+    targetedFirstPage.firstPageMatchMethod,
+    'lexical',
+    `${document.id} query match method changed`,
+  );
+  const allQueryMatches = await measureContext(contextTool, queryScope, false);
+  assertEqual(
+    allQueryMatches.returnedFields,
+    allQueryMatches.uniqueReturnedFields,
+    `${document.id} query traversal repeated fields`,
+  );
+  assertEqual(
+    allQueryMatches.returnedFields,
+    document.queryExperiment.expectedTotalMatchedFields,
+    `${document.id} query traversal match total changed`,
+  );
+
+  results.push({
+    id: document.id,
+    fileName: document.fileName,
+    officialUrl: document.officialUrl,
+    sha256: actualHash,
+    byteLength: bytes.byteLength,
+    pageCount: inspection.pageCount,
+    honestUsefulResult: true,
+    artifactType: expected.artifactType,
+    artifactValidation,
+    compatibility: {
+      fieldInspection: true,
+      fieldValueStaging: true,
+      filledPdf: expected.artifactType === 'filled_pdf',
+      originalUntouchedFillPackage:
+        expected.artifactType === 'original_untouched_fill_package',
+      pdfRewriteRejectedCode: expected.expectedPdfRewriteError ?? null,
+    },
+    safety: {
+      highRiskNativeActionCount: inspection.activeContent.highRiskActionCount,
+      mutationWouldBeBlockedForHighRiskAction:
+        inspection.activeContent.highRiskActionCount > 0,
+      pdfJavaScriptExecuted: false,
+      activeContent: inspection.activeContent,
+      warningCount: inspection.warnings.length,
+      warningCounts: warningCounts(inspection),
+      protection: inspection.protection,
+      cmsSignatureVerification: 'not_performed',
+      signerTrustVerification: 'not_performed',
+      formCompletenessAssessed: state.validation.formCompletenessAssessed,
+      ruleCoverage: state.validation.ruleCoverage,
+    },
+    accuracy: {
+      artifactRoundTripVerified: true,
+      queryMatchMethod: targetedFirstPage.firstPageMatchMethod,
+      semanticSearchClaimed: false,
+      expectedQueryRepresentativesVerified: true,
+      expectedQueryMatchCountsVerified: true,
+      ...semanticCoverage(state, inspection),
+    },
+    structure: {
+      fieldCount: inspection.fieldCount,
+      widgetCount: inspection.widgetCount,
+      humanOnlyFieldCount: inspection.fields.filter(
+        ({ humanOnly }) => humanOnly,
+      ).length,
+      radioGroupCount: inspection.fields.filter(({ type }) => type === 'radio')
+        .length,
+    },
+    efficiency: {
+      inspectionDurationMs,
+      artifactDurationMs,
+    },
+    measurements: {
+      fullTraversal,
+      targetedFirstPage,
+      allQueryMatches,
+      targetedFirstPageVsFullTraversal: {
+        totalUtf8BytesSaved:
+          fullTraversal.totalUtf8Bytes - targetedFirstPage.totalUtf8Bytes,
+        totalUtf8BytesSavedPercent: percentSaved(
+          targetedFirstPage.totalUtf8Bytes,
+          fullTraversal.totalUtf8Bytes,
+        ),
+        expectedRepresentativeExactMatchRate: 1,
+      },
+      includingOneTimeToolCatalog: {
+        fullTraversalUtf8Bytes:
+          toolCatalogUtf8Bytes + fullTraversal.totalUtf8Bytes,
+        targetedFirstPageUtf8Bytes:
+          toolCatalogUtf8Bytes + targetedFirstPage.totalUtf8Bytes,
+        totalUtf8BytesSaved:
+          fullTraversal.totalUtf8Bytes - targetedFirstPage.totalUtf8Bytes,
+        totalUtf8BytesSavedPercent: percentSaved(
+          toolCatalogUtf8Bytes + targetedFirstPage.totalUtf8Bytes,
+          toolCatalogUtf8Bytes + fullTraversal.totalUtf8Bytes,
+        ),
+      },
+    },
+  });
 }
 
-const writableResults = results.filter(
-  (result) => result.writableCompatibility === true,
+const filledPdfResults = results.filter(
+  (result) => result.artifactType === 'filled_pdf',
 );
-const blockedResults = results.filter(
-  (result) => result.writableCompatibility === false,
+const fillPackageResults = results.filter(
+  (result) => result.artifactType === 'original_untouched_fill_package',
 );
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   corpusVerified: true,
   measurement: {
     encoding: 'UTF-8',
@@ -605,8 +1031,11 @@ const report = {
       (sum, document) => sum + document.pageCount,
       0,
     ),
-    writableCount: writableResults.length,
-    safelyBlockedCount: blockedResults.length,
+    honestUsefulResultCount: results.filter(
+      (result) => result.honestUsefulResult === true,
+    ).length,
+    filledPdfCount: filledPdfResults.length,
+    originalUntouchedFillPackageCount: fillPackageResults.length,
   },
   documents: results,
 };

@@ -20,7 +20,12 @@ import {
 
 import type { PdfEngineErrorCode, PdfFieldValue } from '../lib/pdf-engine';
 
-const { applyApprovedValues, inspectPdf, PdfEngineError } = (await import(
+const {
+  applyApprovedValues,
+  applyConfirmedDerivativeValues,
+  inspectPdf,
+  PdfEngineError,
+} = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
 )) as typeof import('../lib/pdf-engine');
 
@@ -478,6 +483,343 @@ async function actionLikeMetadataBytes(): Promise<Uint8Array> {
   });
 }
 
+function detachedSignatureDictionary(
+  document: PDFDocument,
+  options: {
+    transformMethod?: 'UR3' | 'DocMDP';
+    docMdpPermission?: 1 | 2 | 3;
+  } = {},
+): PDFDict {
+  const signature = document.context.obj({
+    Type: 'Sig',
+    Filter: 'Adobe.PPKLite',
+    SubFilter: 'adbe.pkcs7.detached',
+    ByteRange: [0, 1, 2, 3],
+    Contents: PDFHexString.of('00'),
+  }) as PDFDict;
+
+  if (options.transformMethod) {
+    const transformParameters = document.context.obj({
+      Type: 'TransformParams',
+      V: options.transformMethod === 'UR3' ? '2.2' : '1.2',
+      P:
+        options.transformMethod === 'DocMDP' ? options.docMdpPermission : false,
+      Form: options.transformMethod === 'UR3' ? ['FillIn'] : undefined,
+    }) as PDFDict;
+    const reference = document.context.obj({
+      Type: 'SigRef',
+      TransformMethod: options.transformMethod,
+      TransformParams: transformParameters,
+    }) as PDFDict;
+    signature.set(PDFName.of('Reference'), document.context.obj([reference]));
+  }
+
+  return signature;
+}
+
+async function saveWithStableSignatureByteRanges(
+  document: PDFDocument,
+): Promise<Uint8Array> {
+  let bytes = await document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const reopened = await PDFDocument.load(bytes, { updateMetadata: false });
+    let signatureCount = 0;
+    for (const [, object] of reopened.context.enumerateIndirectObjects()) {
+      if (!(object instanceof PDFDict)) continue;
+      const type = reopened.context.lookup(object.get(PDFName.of('Type')));
+      if (!(type instanceof PDFName) || type.decodeText() !== 'Sig') continue;
+      object.set(
+        PDFName.of('ByteRange'),
+        reopened.context.obj([0, 1, 2, Math.max(1, bytes.byteLength - 2)]),
+      );
+      signatureCount += 1;
+    }
+    assert.ok(signatureCount > 0);
+    const next = await reopened.save({
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      useObjectStreams: false,
+    });
+    if (next.byteLength === bytes.byteLength) return next;
+    bytes = next;
+  }
+
+  throw new Error('Synthetic signature ByteRange size did not stabilize.');
+}
+
+async function usageRightsBytes(
+  options: {
+    xfa?: boolean;
+    omitFilter?: boolean;
+    unknownTransformParameter?: boolean;
+    hiddenReference?: boolean;
+    sigFlags?: number;
+  } = {},
+): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const acroForm = document.getForm().acroForm.dict;
+  const signature = detachedSignatureDictionary(document, {
+    transformMethod: 'UR3',
+  });
+  if (options.omitFilter) signature.delete(PDFName.of('Filter'));
+  if (options.unknownTransformParameter) {
+    const references = document.context.lookup(
+      signature.get(PDFName.of('Reference')),
+    );
+    const reference =
+      references instanceof PDFArray ? references.lookup(0) : undefined;
+    const transformParameters =
+      reference instanceof PDFDict
+        ? document.context.lookup(reference.get(PDFName.of('TransformParams')))
+        : undefined;
+    assert.ok(transformParameters instanceof PDFDict);
+    transformParameters.set(PDFName.of('FutureProtection'), PDFName.of('On'));
+  }
+  if (options.hiddenReference) {
+    const references = document.context.lookup(
+      signature.get(PDFName.of('Reference')),
+    );
+    assert.ok(references instanceof PDFArray);
+    references.push(PDFString.of('hidden malformed reference'));
+  }
+  const signatureRef = document.context.register(signature);
+  const permsRef = document.context.register(
+    document.context.obj({ UR3: signatureRef }) as PDFDict,
+  );
+  document.catalog.set(PDFName.of('Perms'), permsRef);
+  acroForm.set(PDFName.of('SigFlags'), PDFNumber.of(options.sigFlags ?? 3));
+
+  if (options.xfa) {
+    const xfaRef = document.context.register(
+      document.context.flateStream(
+        '<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/"/>',
+        { Type: 'EmbeddedFile' },
+      ),
+    );
+    acroForm.set(
+      PDFName.of('XFA'),
+      document.context.obj([PDFString.of('template'), xfaRef]),
+    );
+  }
+
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function approvalSignatureBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const signatureRef = document.context.register(
+    detachedSignatureDictionary(document),
+  );
+  const form = document.getForm();
+  form
+    .getSignature(FIELD.signature)
+    .acroField.dict.set(PDFName.of('V'), signatureRef);
+  form.acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function docMdpBytes(permission: 1 | 2 | 3): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const signatureRef = document.context.register(
+    detachedSignatureDictionary(document, {
+      transformMethod: 'DocMDP',
+      docMdpPermission: permission,
+    }),
+  );
+  const permsRef = document.context.register(
+    document.context.obj({ DocMDP: signatureRef }) as PDFDict,
+  );
+  document.catalog.set(PDFName.of('Perms'), permsRef);
+  document.getForm().acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function malformedDocumentSignatureBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const signature = detachedSignatureDictionary(document);
+  signature.delete(PDFName.of('ByteRange'));
+  const signatureRef = document.context.register(signature);
+  document
+    .getForm()
+    .getSignature(FIELD.signature)
+    .acroField.dict.set(PDFName.of('V'), signatureRef);
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+async function signatureReferenceVariantBytes(
+  kind: 'unknown_method' | 'missing_method' | 'non_name_method',
+): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const signature = detachedSignatureDictionary(document);
+  const reference = document.context.obj({
+    Type: 'SigRef',
+    TransformParams: document.context.obj({
+      Type: 'TransformParams',
+      V: '1.2',
+      P: 2,
+    }),
+  }) as PDFDict;
+  if (kind === 'unknown_method') {
+    reference.set(PDFName.of('TransformMethod'), PDFName.of('VendorLock'));
+  } else if (kind === 'non_name_method') {
+    reference.set(PDFName.of('TransformMethod'), PDFString.of('DocMDP'));
+  }
+  signature.set(PDFName.of('Reference'), document.context.obj([reference]));
+  const signatureRef = document.context.register(signature);
+  const form = document.getForm();
+  form
+    .getSignature(FIELD.signature)
+    .acroField.dict.set(PDFName.of('V'), signatureRef);
+  form.acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function malformedDocMdpProtectionBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await docMdpBytes(2), {
+    updateMetadata: false,
+  });
+  const perms = document.context.lookup(
+    document.catalog.get(PDFName.of('Perms')),
+  );
+  assert.ok(perms instanceof PDFDict);
+  const signature = document.context.lookup(perms.get(PDFName.of('DocMDP')));
+  assert.ok(signature instanceof PDFDict);
+  const references = document.context.lookup(
+    signature.get(PDFName.of('Reference')),
+  );
+  assert.ok(references instanceof PDFArray);
+  const reference = references.lookup(0);
+  assert.ok(reference instanceof PDFDict);
+  reference.set(PDFName.of('Type'), PDFName.of('VendorSigRef'));
+  const parameters = document.context.lookup(
+    reference.get(PDFName.of('TransformParams')),
+  );
+  assert.ok(parameters instanceof PDFDict);
+  parameters.set(PDFName.of('Type'), PDFName.of('VendorParams'));
+  parameters.set(PDFName.of('FutureLock'), PDFName.of('On'));
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function fieldMdpBytes(invalidAction: boolean): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+  const root = document.context.trailerInfo.Root;
+  assert.notEqual(root, undefined);
+  const signature = detachedSignatureDictionary(document);
+  const reference = document.context.obj({
+    Type: 'SigRef',
+    TransformMethod: 'FieldMDP',
+    TransformParams: document.context.obj({
+      Type: 'TransformParams',
+      V: '1.2',
+      Action: invalidAction ? 'VendorAction' : 'All',
+    }),
+    Data: root,
+  }) as PDFDict;
+  signature.set(PDFName.of('Reference'), document.context.obj([reference]));
+  const signatureRef = document.context.register(signature);
+  const form = document.getForm();
+  form
+    .getSignature(FIELD.signature)
+    .acroField.dict.set(PDFName.of('V'), signatureRef);
+  form.acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function duplicateDocMdpBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await docMdpBytes(2), {
+    updateMetadata: false,
+  });
+  const second = document.context.register(
+    detachedSignatureDictionary(document, {
+      transformMethod: 'DocMDP',
+      docMdpPermission: 2,
+    }),
+  );
+  document
+    .getForm()
+    .getSignature(FIELD.signature)
+    .acroField.dict.set(PDFName.of('V'), second);
+  return saveWithStableSignatureByteRanges(document);
+}
+
+async function singleTextFieldBytes(options: {
+  readOnly?: boolean;
+  sigFlags?: number;
+}): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([300, 200]);
+  const form = document.getForm();
+  const field = form.createTextField('only.text');
+  if (options.readOnly) field.enableReadOnly();
+  field.addToPage(page, { x: 20, y: 100, width: 120, height: 20 });
+  if (options.sigFlags !== undefined) {
+    form.acroForm.dict.set(
+      PDFName.of('SigFlags'),
+      PDFNumber.of(options.sigFlags),
+    );
+  }
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+type UnknownPermsKind =
+  | 'empty'
+  | 'not_dictionary'
+  | 'unknown_key'
+  | 'malformed_ur3';
+
+async function unknownPermsBytes(kind: UnknownPermsKind): Promise<Uint8Array> {
+  const document = await PDFDocument.load(await demoBytes(), {
+    updateMetadata: false,
+  });
+
+  if (kind === 'not_dictionary') {
+    document.catalog.set(PDFName.of('Perms'), PDFString.of('malformed'));
+  } else {
+    const perms =
+      kind === 'empty'
+        ? (document.context.obj({}) as PDFDict)
+        : kind === 'unknown_key'
+          ? (document.context.obj({ VendorLock: true }) as PDFDict)
+          : (document.context.obj({
+              UR3: PDFString.of('malformed'),
+            }) as PDFDict);
+    document.catalog.set(PDFName.of('Perms'), perms);
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
 const ENCRYPTED_PDF_BASE64 =
   'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovUHJvZHVjZXIgPDM1YzY5Y2I1ZTA+Cj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9UeXBlIC9QYWdlcwovQ291bnQgMQovS2lkcyBbIDQgMCBSIF0KPj4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL0NhdGFsb2cKL1BhZ2VzIDIgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9QYWdlCi9SZXNvdXJjZXMgPDwKPj4KL01lZGlhQm94IFsgMC4wIDAuMCA3MiA3MiBdCi9QYXJlbnQgMiAwIFIKPj4KZW5kb2JqCjUgMCBvYmoKPDwKL1YgMgovUiAzCi9MZW5ndGggMTI4Ci9QIDQyOTQ5NjcyOTIKL0ZpbHRlciAvU3RhbmRhcmQKL08gPDBlNTIyOTI1YTNlNGU4NzRjM2NmYWNiZWY1MTFhNzNhYzRlYzJiZDg2NWRjZDNkNDYyNzYxNDkxN2FiZmQ3ZTQ+Ci9VIDxiNjIzNzAzMjY3YTBjODJlMzliYmIwMTc0YTVlODUzNDI4YmY0ZTVlNGU3NThhNDE2NDAwNGU1NmZmZmEwMTA4Pgo+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAwNTkgMDAwMDAgbiAKMDAwMDAwMDExOCAwMDAwMCBuIAowMDAwMDAwMTY3IDAwMDAwIG4gCjAwMDAwMDAyNTkgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA2Ci9Sb290IDMgMCBSCi9JbmZvIDEgMCBSCi9JRCBbIDw2NDY2NjM2MTY2MzUzNDMyMzczOTMwMzMzMjMwMzY2NDY0MzEzMTM0MzQzMTY0MzA2MjM1NjI2MTM5MzYzMTYyPiA8NjQ2NjM2MTY2MzUzNDMyMzczOTMwMzMzMjMwMzY2NDY0MzEzMTM0MzQzMTY0MzA2MjM1NjI2MTM5MzYzMTYyPiBdCi9FbmNyeXB0IDUgMCBSCj4+CnN0YXJ0eHJlZgo0NzQKJSVFT0YK';
 
@@ -507,6 +849,44 @@ void test('inspects canonical AcroForm fields, widgets, geometry, and policies',
   assert.equal(inspection.pageCount, 2);
   assert.equal(inspection.fieldCount, 11);
   assert.equal(inspection.widgetCount, 13);
+  assert.deepEqual(inspection.protection, {
+    protectionType: 'none',
+    allowedMutations: [
+      'inspect_fields',
+      'stage_field_values',
+      'create_fill_package',
+      'create_filled_pdf',
+    ],
+    exportStrategies: ['filled_pdf', 'fill_package'],
+    signatureImpact: 'none',
+    requiresHumanConfirmation: false,
+    evidence: {
+      catalogPermsPresent: false,
+      permsKeys: [],
+      usageRightsKeys: [],
+      byteRangeEntryCount: 0,
+      malformedByteRangeCount: 0,
+      byteRanges: [],
+      byteRangesCoverWholeFile: null,
+      signatureDictionaryCount: 0,
+      usageRightsSignatureCount: 0,
+      documentSignatureCount: 0,
+      unclassifiedSignatureDictionaryCount: 0,
+      unreachableSignatureDictionaryCount: 0,
+      signatureFieldCount: 1,
+      signedSignatureFieldCount: 0,
+      docMdpPresent: false,
+      docMdpSignatureDictionaryCount: 0,
+      docMdpPermission: null,
+      fieldMdpPresent: false,
+      adbeExtension: null,
+      xfaPresent: false,
+      sigFlags: 1,
+      unknownStructures: [],
+      cmsIntegrity: 'not_applicable',
+      signerTrust: 'not_applicable',
+    },
+  });
 
   const fields = new Map(inspection.fields.map((field) => [field.name, field]));
   assert.deepEqual([...fields.keys()], Object.values(FIELD));
@@ -1058,16 +1438,155 @@ void test('validates every requested change before mutating the fresh copy', asy
   assert.deepEqual(after, before);
 });
 
-void test('rejects XFA and encrypted PDFs before inspection or mutation', async () => {
-  const source = await demoBytes();
-  const document = await PDFDocument.load(source, { updateMetadata: false });
-  document
-    .getForm()
-    .acroForm.dict.set(PDFName.of('XFA'), PDFHexString.fromText('unsupported'));
-  const xfaBytes = await document.save({ updateFieldAppearances: false });
+void test('requires human confirmation before creating a plain usage-rights derivative', async () => {
+  const source = await usageRightsBytes();
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
 
-  await expectEngineError(inspectPdf(xfaBytes), 'PDF_XFA_UNSUPPORTED');
+  assert.deepEqual(inspection.protection, {
+    protectionType: 'usage_rights',
+    allowedMutations: [
+      'inspect_fields',
+      'stage_field_values',
+      'create_fill_package',
+      'create_plain_derivative_pdf',
+    ],
+    exportStrategies: ['confirmed_plain_derivative_pdf', 'fill_package'],
+    signatureImpact: 'usage_rights_removed_in_plain_derivative',
+    requiresHumanConfirmation: true,
+    evidence: {
+      catalogPermsPresent: true,
+      permsKeys: ['UR3'],
+      usageRightsKeys: ['UR3'],
+      byteRangeEntryCount: 1,
+      malformedByteRangeCount: 0,
+      byteRanges: [[0, 1, 2, source.byteLength - 2]],
+      byteRangesCoverWholeFile: true,
+      signatureDictionaryCount: 1,
+      usageRightsSignatureCount: 1,
+      documentSignatureCount: 0,
+      unclassifiedSignatureDictionaryCount: 0,
+      unreachableSignatureDictionaryCount: 0,
+      signatureFieldCount: 1,
+      signedSignatureFieldCount: 0,
+      docMdpPresent: false,
+      docMdpSignatureDictionaryCount: 0,
+      docMdpPermission: null,
+      fieldMdpPresent: false,
+      adbeExtension: null,
+      xfaPresent: false,
+      sigFlags: 3,
+      unknownStructures: [],
+      cmsIntegrity: 'not_verified_in_browser',
+      signerTrust: 'not_verified',
+    },
+  });
+  assert.ok(
+    inspection.warnings.some(
+      (warning) => warning.code === 'USAGE_RIGHTS_DETECTED',
+    ),
+  );
 
+  await expectEngineError(
+    applyApprovedValues(source, { [FIELD.legalName]: 'Ada Lovelace' }),
+    'PDF_DERIVATIVE_CONFIRMATION_REQUIRED',
+  );
+  await expectEngineError(
+    applyConfirmedDerivativeValues(
+      source,
+      { [FIELD.legalName]: 'Ada Lovelace' },
+      { humanConfirmedProtectionLoss: false },
+    ),
+    'PDF_DERIVATIVE_CONFIRMATION_REQUIRED',
+  );
+
+  const result = await applyConfirmedDerivativeValues(
+    source,
+    { [FIELD.legalName]: 'Ada Lovelace' },
+    { humanConfirmedProtectionLoss: true },
+  );
+  assert.equal(result.exportStrategy, 'confirmed_plain_derivative_pdf');
+  assert.equal(result.sourceProtection.protectionType, 'usage_rights');
+  assert.equal(result.outputProtection.protectionType, 'none');
+  assert.deepEqual(result.verifiedFields, [
+    {
+      name: FIELD.legalName,
+      type: 'text',
+      value: 'Ada Lovelace',
+      widgetCount: 1,
+      appearanceVerified: true,
+    },
+  ]);
+
+  const outputInspection = await inspectPdf(result.bytes);
+  assert.equal(outputInspection.protection.protectionType, 'none');
+  assert.equal(
+    outputInspection.fields.find((field) => field.name === FIELD.legalName)
+      ?.current,
+    'Ada Lovelace',
+  );
+  const reopened = await PDFDocument.load(result.bytes, {
+    updateMetadata: false,
+  });
+  assert.equal(reopened.catalog.has(PDFName.of('Perms')), false);
+  assert.equal(reopened.catalog.AcroForm()?.has(PDFName.of('SigFlags')), false);
+  assert.deepEqual(
+    source,
+    sourceSnapshot,
+    'source bytes must remain unchanged',
+  );
+});
+
+void test('keeps usage-rights XFA inspectable and fill-package-only', async () => {
+  const source = await usageRightsBytes({ xfa: true });
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'usage_rights');
+  assert.equal(inspection.protection.evidence.xfaPresent, true);
+  assert.deepEqual(inspection.protection.allowedMutations, [
+    'inspect_fields',
+    'stage_field_values',
+    'create_fill_package',
+  ]);
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+  assert.equal(
+    inspection.protection.signatureImpact,
+    'rewrite_would_invalidate_usage_rights',
+  );
+  assert.equal(inspection.protection.requiresHumanConfirmation, false);
+  assert.ok(inspection.fieldCount > 0);
+  assert.ok(
+    inspection.warnings.some(
+      (warning) => warning.code === 'USAGE_RIGHTS_DETECTED',
+    ),
+  );
+  assert.ok(
+    inspection.warnings.some(
+      (warning) => warning.code === 'XFA_PRESENT_INSPECTION_ONLY',
+    ),
+  );
+
+  await expectEngineError(
+    applyApprovedValues(source, { [FIELD.legalName]: 'Must not be written' }),
+    'PDF_XFA_UNSUPPORTED',
+  );
+  await expectEngineError(
+    applyConfirmedDerivativeValues(
+      source,
+      { [FIELD.legalName]: 'Must not be written' },
+      { humanConfirmedProtectionLoss: true },
+    ),
+    'PDF_XFA_UNSUPPORTED',
+  );
+  assert.deepEqual(
+    source,
+    sourceSnapshot,
+    'source bytes must remain unchanged',
+  );
+});
+
+void test('rejects encrypted PDFs before inspection', async () => {
   const encrypted = Uint8Array.from(
     Buffer.from(ENCRYPTED_PDF_BASE64, 'base64'),
   );
@@ -1302,24 +1821,28 @@ void test('reports but refuses to export native high-risk PDF actions', async ()
   );
 });
 
-void test('ignores unreachable signature and action objects', async () => {
+void test('ignores unreachable actions but fails closed for an unreachable signature object', async () => {
   const source = await activeContentBytes({ highRisk: true, orphan: true });
   const document = await PDFDocument.load(source, { updateMetadata: false });
   document.context.register(
     document.context.obj({
       Type: 'Sig',
+      Filter: 'Adobe.PPKLite',
+      SubFilter: 'adbe.pkcs7.detached',
       ByteRange: [
         PDFNumber.of(0),
-        PDFNumber.of(0),
-        PDFNumber.of(0),
-        PDFNumber.of(0),
+        PDFNumber.of(1),
+        PDFNumber.of(2),
+        PDFNumber.of(3),
       ],
+      Contents: PDFHexString.of('00'),
     }) as PDFDict,
   );
   const withOrphans = await document.save({
     updateFieldAppearances: false,
     useObjectStreams: false,
   });
+  const sourceSnapshot = Uint8Array.from(withOrphans);
   const inspection = await inspectPdf(withOrphans);
 
   assert.deepEqual(inspection.activeContent, {
@@ -1334,6 +1857,31 @@ void test('ignores unreachable signature and action objects', async () => {
     !inspection.warnings.some(
       (warning) => warning.code === 'ACTIVE_CONTENT_PRESERVED',
     ),
+  );
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.equal(inspection.protection.evidence.documentSignatureCount, 0);
+  assert.equal(
+    inspection.protection.evidence.unreachableSignatureDictionaryCount,
+    1,
+  );
+  assert.equal(inspection.protection.evidence.byteRangeEntryCount, 1);
+  assert.equal(inspection.protection.evidence.malformedByteRangeCount, 0);
+  assert.equal(inspection.protection.evidence.byteRangesCoverWholeFile, false);
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'historical_or_unreachable_signature_structure',
+    ),
+  );
+  await expectEngineError(
+    applyApprovedValues(withOrphans, {
+      'active.name': 'Must not be written',
+    }),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+  );
+  assert.deepEqual(
+    withOrphans,
+    sourceSnapshot,
+    'inspection and mutation must not mutate the source buffer',
   );
 });
 
@@ -1414,74 +1962,391 @@ void test('does not classify untriggered metadata as an action', async () => {
   ]);
 });
 
-void test('rejects reachable certification structures before XFA handling', async () => {
-  const restrictedStructures: Array<{
-    name: string;
-    create: (document: PDFDocument) => PDFDict;
-  }> = [
-    {
-      name: 'catalog Perms',
-      create: (document) => document.context.obj({}) as PDFDict,
-    },
-    {
-      name: 'signature dictionary',
-      create: (document) => document.context.obj({ Type: 'Sig' }) as PDFDict,
-    },
-    {
-      name: 'ByteRange',
-      create: (document) =>
-        document.context.obj({ ByteRange: [0, 0, 0, 0] }) as PDFDict,
-    },
-    {
-      name: 'DocMDP',
-      create: (document) =>
-        document.context.obj({ TransformMethod: 'DocMDP' }) as PDFDict,
-    },
-    {
-      name: 'UR3',
-      create: (document) =>
-        document.context.obj({ TransformMethod: 'UR3' }) as PDFDict,
-    },
-  ];
+void test('inspects an approval signature but blocks both PDF rewrite strategies', async () => {
+  const source = await approvalSignatureBytes();
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
 
-  for (const restricted of restrictedStructures) {
-    const document = await PDFDocument.load(await demoBytes(), {
-      updateMetadata: false,
-    });
-    document
-      .getForm()
-      .acroForm.dict.set(PDFName.of('XFA'), PDFHexString.fromText('xfa'));
-    const structure = restricted.create(document);
-    if (restricted.name === 'catalog Perms') {
-      document.catalog.set(PDFName.of('Perms'), structure);
-    } else {
-      document.catalog.set(
-        PDFName.of('FormProofRestrictedStructure'),
-        document.context.register(structure),
-      );
-    }
-    const bytes = await document.save({ updateFieldAppearances: false });
+  assert.deepEqual(inspection.protection, {
+    protectionType: 'document_signature',
+    allowedMutations: [
+      'inspect_fields',
+      'stage_field_values',
+      'create_fill_package',
+    ],
+    exportStrategies: ['fill_package'],
+    signatureImpact: 'rewrite_blocked_to_preserve_document_signature',
+    requiresHumanConfirmation: false,
+    evidence: {
+      catalogPermsPresent: false,
+      permsKeys: [],
+      usageRightsKeys: [],
+      byteRangeEntryCount: 1,
+      malformedByteRangeCount: 0,
+      byteRanges: [[0, 1, 2, source.byteLength - 2]],
+      byteRangesCoverWholeFile: true,
+      signatureDictionaryCount: 1,
+      usageRightsSignatureCount: 0,
+      documentSignatureCount: 1,
+      unclassifiedSignatureDictionaryCount: 0,
+      unreachableSignatureDictionaryCount: 0,
+      signatureFieldCount: 1,
+      signedSignatureFieldCount: 1,
+      docMdpPresent: false,
+      docMdpSignatureDictionaryCount: 0,
+      docMdpPermission: null,
+      fieldMdpPresent: false,
+      adbeExtension: null,
+      xfaPresent: false,
+      sigFlags: 3,
+      unknownStructures: [],
+      cmsIntegrity: 'not_verified_in_browser',
+      signerTrust: 'not_verified',
+    },
+  });
+  assert.ok(
+    inspection.warnings.some(
+      (warning) => warning.code === 'DOCUMENT_SIGNATURE_PROTECTED',
+    ),
+  );
 
-    await expectEngineError(inspectPdf(bytes), 'PDF_SIGNED_UNSUPPORTED');
+  await expectEngineError(
+    applyApprovedValues(source, { [FIELD.legalName]: 'Must not be written' }),
+    'PDF_SIGNED_UNSUPPORTED',
+  );
+  await expectEngineError(
+    applyConfirmedDerivativeValues(
+      source,
+      { [FIELD.legalName]: 'Must not be written' },
+      { humanConfirmedProtectionLoss: true },
+    ),
+    'PDF_SIGNED_UNSUPPORTED',
+  );
+  assert.deepEqual(
+    source,
+    sourceSnapshot,
+    'source bytes must remain unchanged',
+  );
+});
+
+void test('reports every DocMDP permission and blocks both PDF rewrite strategies', async () => {
+  for (const permission of [1, 2, 3] as const) {
+    const source = await docMdpBytes(permission);
+    const sourceSnapshot = Uint8Array.from(source);
+    const inspection = await inspectPdf(source);
+
+    assert.equal(inspection.protection.protectionType, 'doc_mdp');
+    assert.deepEqual(inspection.protection.allowedMutations, [
+      'inspect_fields',
+      'stage_field_values',
+      'create_fill_package',
+    ]);
+    assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+    assert.equal(
+      inspection.protection.signatureImpact,
+      'rewrite_blocked_to_preserve_certification',
+    );
+    assert.equal(inspection.protection.requiresHumanConfirmation, false);
+    assert.deepEqual(inspection.protection.evidence.permsKeys, ['DocMDP']);
+    assert.deepEqual(inspection.protection.evidence.usageRightsKeys, []);
+    assert.deepEqual(inspection.protection.evidence.byteRanges, [
+      [0, 1, 2, source.byteLength - 2],
+    ]);
+    assert.equal(inspection.protection.evidence.byteRangesCoverWholeFile, true);
+    assert.equal(inspection.protection.evidence.documentSignatureCount, 0);
+    assert.equal(inspection.protection.evidence.docMdpPermission, permission);
+    assert.deepEqual(inspection.protection.evidence.unknownStructures, []);
+    assert.ok(
+      inspection.warnings.some(
+        (warning) => warning.code === 'DOC_MDP_PROTECTED',
+      ),
+    );
+
+    await expectEngineError(
+      applyApprovedValues(source, {
+        [FIELD.legalName]: 'Must not be written',
+      }),
+      'PDF_CERTIFIED_UNSUPPORTED',
+    );
+    await expectEngineError(
+      applyConfirmedDerivativeValues(
+        source,
+        { [FIELD.legalName]: 'Must not be written' },
+        { humanConfirmedProtectionLoss: true },
+      ),
+      'PDF_CERTIFIED_UNSUPPORTED',
+    );
+    assert.deepEqual(
+      source,
+      sourceSnapshot,
+      `DocMDP P=${permission} source bytes must remain unchanged`,
+    );
   }
 });
 
-void test('rejects a signed document during inspection and apply', async () => {
-  const source = await demoBytes();
-  const document = await PDFDocument.load(source, { updateMetadata: false });
-  const signature = document.getForm().getSignature(FIELD.signature);
-  const signatureValue = document.context.obj({ Type: 'Sig' }) as PDFDict;
-  signature.acroField.dict.set(PDFName.of('V'), signatureValue);
-  const signedBytes = await document.save({ updateFieldAppearances: false });
+void test('reports unknown Perms variants and refuses every export strategy', async () => {
+  const cases: Array<{
+    kind: UnknownPermsKind;
+    permsKeys: string[];
+    unknownStructures: string[];
+  }> = [
+    {
+      kind: 'empty',
+      permsKeys: [],
+      unknownStructures: ['catalog_perms_empty'],
+    },
+    {
+      kind: 'not_dictionary',
+      permsKeys: [],
+      unknownStructures: ['catalog_perms_not_dictionary'],
+    },
+    {
+      kind: 'unknown_key',
+      permsKeys: ['VendorLock'],
+      unknownStructures: ['catalog_perms_VendorLock'],
+    },
+    {
+      kind: 'malformed_ur3',
+      permsKeys: ['UR3'],
+      unknownStructures: ['ur3_structure_unrecognized'],
+    },
+  ];
 
-  await expectEngineError(
-    inspectPdf(signedBytes),
-    'PDF_SIGNED_UNSUPPORTED',
-    FIELD.signature,
+  for (const item of cases) {
+    const source = await unknownPermsBytes(item.kind);
+    const sourceSnapshot = Uint8Array.from(source);
+    const inspection = await inspectPdf(source);
+
+    assert.equal(inspection.protection.protectionType, 'unknown');
+    assert.deepEqual(inspection.protection.allowedMutations, [
+      'inspect_fields',
+      'stage_field_values',
+    ]);
+    assert.deepEqual(inspection.protection.exportStrategies, []);
+    assert.equal(
+      inspection.protection.signatureImpact,
+      'rewrite_blocked_for_unknown_protection',
+    );
+    assert.equal(inspection.protection.requiresHumanConfirmation, false);
+    assert.equal(inspection.protection.evidence.catalogPermsPresent, true);
+    assert.deepEqual(inspection.protection.evidence.permsKeys, item.permsKeys);
+    assert.deepEqual(
+      inspection.protection.evidence.unknownStructures,
+      item.unknownStructures,
+    );
+    assert.ok(
+      inspection.warnings.some(
+        (warning) => warning.code === 'UNKNOWN_PROTECTION',
+      ),
+    );
+
+    await expectEngineError(
+      applyApprovedValues(source, {
+        [FIELD.legalName]: 'Must not be written',
+      }),
+      'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+    );
+    await expectEngineError(
+      applyConfirmedDerivativeValues(
+        source,
+        { [FIELD.legalName]: 'Must not be written' },
+        { humanConfirmedProtectionLoss: true },
+      ),
+      'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+    );
+    assert.deepEqual(
+      source,
+      sourceSnapshot,
+      `${item.kind} source bytes must remain unchanged`,
+    );
+  }
+});
+
+void test('fails closed for a UR3 dictionary missing its Adobe signature filter', async () => {
+  const source = await usageRightsBytes({ omitFilter: true });
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'ur3_structure_unrecognized',
+    ),
   );
   await expectEngineError(
-    applyApprovedValues(signedBytes, { [FIELD.legalName]: 'Ada Lovelace' }),
-    'PDF_SIGNED_UNSUPPORTED',
-    FIELD.signature,
+    applyApprovedValues(source, { [FIELD.legalName]: 'Must not be written' }),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
   );
+  assert.deepEqual(source, sourceSnapshot);
+});
+
+void test('fails closed for unknown UR3 transform parameters and reserved signature flags', async () => {
+  const source = await usageRightsBytes({
+    unknownTransformParameter: true,
+    sigFlags: 4,
+  });
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'ur3_transform_params_unrecognized',
+    ),
+  );
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'sig_flags_unrecognized',
+    ),
+  );
+  await expectEngineError(
+    applyConfirmedDerivativeValues(
+      source,
+      { [FIELD.legalName]: 'Must not be written' },
+      { humanConfirmedProtectionLoss: true },
+    ),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+  );
+  assert.deepEqual(source, sourceSnapshot);
+});
+
+void test('fails closed when a UR3 Reference array hides a non-dictionary item', async () => {
+  const source = await usageRightsBytes({ hiddenReference: true });
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'signature_reference_structure_unrecognized',
+    ),
+  );
+  await expectEngineError(
+    applyConfirmedDerivativeValues(
+      source,
+      { [FIELD.legalName]: 'Must not be written' },
+      { humanConfirmedProtectionLoss: true },
+    ),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+  );
+});
+
+void test('fails closed for unknown, missing, or non-name signature transform methods', async () => {
+  for (const kind of [
+    'unknown_method',
+    'missing_method',
+    'non_name_method',
+  ] as const) {
+    const source = await signatureReferenceVariantBytes(kind);
+    const inspection = await inspectPdf(source);
+
+    assert.equal(inspection.protection.protectionType, 'unknown', kind);
+    assert.deepEqual(inspection.protection.exportStrategies, [], kind);
+    assert.ok(
+      inspection.protection.evidence.unknownStructures.includes(
+        'signature_transform_method_unrecognized',
+      ),
+      kind,
+    );
+  }
+});
+
+void test('fails closed for malformed DocMDP and FieldMDP transform parameters', async () => {
+  const cases = [
+    {
+      source: await malformedDocMdpProtectionBytes(),
+      marker: 'doc_mdp_transform_params_unrecognized',
+    },
+    {
+      source: await fieldMdpBytes(true),
+      marker: 'field_mdp_transform_params_unrecognized',
+    },
+  ];
+
+  for (const { source, marker } of cases) {
+    const inspection = await inspectPdf(source);
+    assert.equal(inspection.protection.protectionType, 'unknown');
+    assert.deepEqual(inspection.protection.exportStrategies, []);
+    assert.ok(
+      inspection.protection.evidence.unknownStructures.includes(marker),
+    );
+  }
+});
+
+void test('reports a standard FieldMDP signature but never rewrites it', async () => {
+  const source = await fieldMdpBytes(false);
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'document_signature');
+  assert.equal(inspection.protection.evidence.fieldMdpPresent, true);
+  assert.deepEqual(inspection.protection.evidence.unknownStructures, []);
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+  await expectEngineError(
+    applyApprovedValues(source, { [FIELD.legalName]: 'Must not be written' }),
+    'PDF_SIGNED_UNSUPPORTED',
+  );
+});
+
+void test('fails closed for multiple DocMDP certification signatures', async () => {
+  const source = await duplicateDocMdpBytes();
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.equal(
+    inspection.protection.evidence.docMdpSignatureDictionaryCount,
+    2,
+  );
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'multiple_doc_mdp_signatures',
+    ),
+  );
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+});
+
+void test('fails closed for inconsistent signature flags without signature context', async () => {
+  for (const sigFlags of [1, 2, 3]) {
+    const source = await singleTextFieldBytes({ sigFlags });
+    const inspection = await inspectPdf(source);
+
+    assert.equal(inspection.protection.protectionType, 'unknown');
+    assert.deepEqual(inspection.protection.exportStrategies, []);
+    assert.ok(
+      inspection.protection.evidence.unknownStructures.some((marker) =>
+        marker.startsWith('sig_flags_'),
+      ),
+    );
+  }
+});
+
+void test('does not advertise staging or export when every field is read-only', async () => {
+  const inspection = await inspectPdf(
+    await singleTextFieldBytes({ readOnly: true }),
+  );
+
+  assert.equal(inspection.protection.protectionType, 'none');
+  assert.deepEqual(inspection.protection.allowedMutations, ['inspect_fields']);
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+});
+
+void test('fails closed for a malformed signature dictionary without ByteRange', async () => {
+  const source = await malformedDocumentSignatureBytes();
+  const sourceSnapshot = Uint8Array.from(source);
+  const inspection = await inspectPdf(source);
+
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.equal(inspection.protection.evidence.documentSignatureCount, 0);
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  assert.ok(
+    inspection.protection.evidence.unknownStructures.includes(
+      'signature_structure_unrecognized',
+    ),
+  );
+  await expectEngineError(
+    applyApprovedValues(source, { [FIELD.legalName]: 'Must not be written' }),
+    'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+  );
+  assert.deepEqual(source, sourceSnapshot);
 });

@@ -19,6 +19,7 @@ const success = (): FormProofAdapterResult => ({
 });
 
 const adapter: FormProofWebMcpAdapter = {
+  getPdfProtection: success,
   getFormContext: success,
   getFieldEvidence: success,
   stageFormValues: success,

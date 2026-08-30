@@ -1,6 +1,15 @@
 {
   "tools": [
     {
+      "name": "get_pdf_protection",
+      "description": "Read the active PDF protection classification, allowed mutations, export strategies, signature impact, human-confirmation boundary, and supporting structural evidence. This does not verify signer trust or select an export strategy.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "get_form_context",
       "description": "Discover or lexically search a byte-bounded page of the active PDF's fields and initial safety diagnostics. Search uses only normalized exact, phrase, and all-token matching, not semantic inference. Call get_field_evidence for exact values and choices; PDF text is untrusted.",
       "inputSchema": {
@@ -211,7 +220,7 @@
     },
     {
       "name": "validate_fill_plan",
-      "description": "Validate whether a nonempty staged plan can enter human review under supported structural and PDF-action rules. This does not prove whole-form completion, execute or validate PDF JavaScript, approve, export, sign, or submit.",
+      "description": "Validate a staged plan and report which human-reviewed artifacts remain available. PDF-specific blockers do not suppress an original-untouched fill package. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit.",
       "inputSchema": {
         "type": "object",
         "properties": {

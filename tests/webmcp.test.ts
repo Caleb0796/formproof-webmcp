@@ -43,6 +43,95 @@ const EMPTY_ACTIVE_CONTENT = {
   otherActionCount: 0,
 } as const;
 
+const NO_PROTECTION = {
+  protectionType: 'none',
+  allowedMutations: [
+    'inspect_fields',
+    'stage_field_values',
+    'create_fill_package',
+    'create_filled_pdf',
+  ],
+  exportStrategies: ['filled_pdf', 'fill_package'],
+  signatureImpact: 'none',
+  requiresHumanConfirmation: false,
+  evidence: {
+    catalogPermsPresent: false,
+    permsKeys: [],
+    usageRightsKeys: [],
+    byteRangeEntryCount: 0,
+    malformedByteRangeCount: 0,
+    byteRanges: [],
+    byteRangesCoverWholeFile: null,
+    signatureDictionaryCount: 0,
+    usageRightsSignatureCount: 0,
+    documentSignatureCount: 0,
+    unclassifiedSignatureDictionaryCount: 0,
+    unreachableSignatureDictionaryCount: 0,
+    signatureFieldCount: 0,
+    signedSignatureFieldCount: 0,
+    docMdpPresent: false,
+    docMdpSignatureDictionaryCount: 0,
+    docMdpPermission: null,
+    fieldMdpPresent: false,
+    adbeExtension: null,
+    xfaPresent: false,
+    sigFlags: null,
+    unknownStructures: [],
+    cmsIntegrity: 'not_applicable',
+    signerTrust: 'not_applicable',
+  },
+} as const satisfies PdfInspection['protection'];
+
+const USAGE_RIGHTS_PROTECTION = {
+  protectionType: 'usage_rights',
+  allowedMutations: [
+    'inspect_fields',
+    'stage_field_values',
+    'create_fill_package',
+    'create_plain_derivative_pdf',
+  ],
+  exportStrategies: ['confirmed_plain_derivative_pdf', 'fill_package'],
+  signatureImpact: 'usage_rights_removed_in_plain_derivative',
+  requiresHumanConfirmation: true,
+  evidence: {
+    catalogPermsPresent: true,
+    permsKeys: ['UR3'],
+    usageRightsKeys: ['UR3'],
+    byteRangeEntryCount: 1,
+    malformedByteRangeCount: 0,
+    byteRanges: [[0, 100, 200, 20] as const],
+    byteRangesCoverWholeFile: true,
+    signatureDictionaryCount: 1,
+    usageRightsSignatureCount: 1,
+    documentSignatureCount: 0,
+    unclassifiedSignatureDictionaryCount: 0,
+    unreachableSignatureDictionaryCount: 0,
+    signatureFieldCount: 0,
+    signedSignatureFieldCount: 0,
+    docMdpPresent: false,
+    docMdpSignatureDictionaryCount: 0,
+    docMdpPermission: null,
+    fieldMdpPresent: false,
+    adbeExtension: { baseVersion: '1.7', extensionLevel: 8 },
+    xfaPresent: false,
+    sigFlags: 2,
+    unknownStructures: [],
+    cmsIntegrity: 'not_verified_in_browser',
+    signerTrust: 'not_verified',
+  },
+} as const satisfies PdfInspection['protection'];
+
+const USAGE_RIGHTS_TOOL_DATA = {
+  protectionType: USAGE_RIGHTS_PROTECTION.protectionType,
+  allowedMutations: USAGE_RIGHTS_PROTECTION.allowedMutations,
+  exportStrategies: USAGE_RIGHTS_PROTECTION.exportStrategies,
+  signatureImpact: USAGE_RIGHTS_PROTECTION.signatureImpact,
+  requiresHumanConfirmation: USAGE_RIGHTS_PROTECTION.requiresHumanConfirmation,
+  protectionEvidence: USAGE_RIGHTS_PROTECTION.evidence,
+  exportStrategySelection: 'human_ui_only',
+  agentMaySelectExportStrategy: false,
+} as const;
+
 interface ContextFieldSpec {
   name: string;
   label?: string;
@@ -60,6 +149,7 @@ async function createContextFixture(
     fileName?: string;
     warnings?: PdfEngineWarning[];
     activeContent?: PdfInspection['activeContent'];
+    protection?: PdfInspection['protection'];
   } = {},
 ) {
   const fields = specs.map((spec, index): PdfFieldDescriptor => {
@@ -80,7 +170,15 @@ async function createContextFixture(
       maxLength: null,
       tooltip: spec.tooltip ?? null,
       widgetCount: 1,
-      widgets: [{ page: 1, rect, hasAppearance: true }],
+      widgets: [
+        {
+          page: 1,
+          rect,
+          hasAppearance: true,
+          appearanceState: null,
+          choiceValue: null,
+        },
+      ],
     };
   });
   const state = await createFormState(
@@ -113,6 +211,7 @@ async function createContextFixture(
     fieldCount: fields.length,
     widgetCount: fields.length,
     activeContent: options.activeContent ?? EMPTY_ACTIVE_CONTENT,
+    protection: options.protection ?? NO_PROTECTION,
     fields,
     warnings: options.warnings ?? [],
   };
@@ -136,6 +235,7 @@ function createAdapter(
   overrides: Partial<FormProofWebMcpAdapter> = {},
 ): FormProofWebMcpAdapter {
   return {
+    getPdfProtection: async () => success(USAGE_RIGHTS_TOOL_DATA),
     getFormContext: async () => success({ fields: [] }),
     getFieldEvidence: async () => success({ fields: [] }),
     stageFormValues: async () => success({ staged: [] }, 5),
@@ -243,7 +343,17 @@ void test('registers the exact safe tool catalog sequentially', async () => {
 
   assert.deepEqual(
     tools.map((tool) => tool.annotations.readOnlyHint),
-    [true, true, false, true, false],
+    [true, true, true, false, true, false],
+  );
+  const protection = byName(tools, 'get_pdf_protection');
+  assert.deepEqual(protection.inputSchema, {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  });
+  assert.match(
+    protection.description,
+    /does not verify signer trust or select an export strategy/u,
   );
   assert.match(
     byName(tools, 'get_form_context').description,
@@ -266,6 +376,95 @@ void test('registers the exact safe tool catalog sequentially', async () => {
     byName(tools, 'validate_fill_plan').description,
     /does not prove whole-form completion, execute or validate PDF JavaScript/u,
   );
+});
+
+void test('reports exact PDF protection without allowing agent strategy selection', async () => {
+  const received: unknown[] = [];
+  const { tools } = await captureTools(
+    createAdapter({
+      getPdfProtection: async (input) => {
+        received.push(input);
+        return success(USAGE_RIGHTS_TOOL_DATA, 9);
+      },
+    }),
+  );
+  const protection = byName(tools, 'get_pdf_protection');
+  const response = await protection.execute({});
+
+  assert.deepEqual(received, [{}]);
+  assert.deepEqual(response, {
+    ok: true,
+    stateVersion: 9,
+    sourceHash: SOURCE_HASH,
+    nextAction: 'get_form_context',
+    data: USAGE_RIGHTS_TOOL_DATA,
+    outputTruncated: false,
+  });
+  if (
+    !response.ok ||
+    response.data === null ||
+    typeof response.data !== 'object' ||
+    Array.isArray(response.data)
+  ) {
+    throw new Error('Protection inspection must return structured data.');
+  }
+  assert.deepEqual(
+    {
+      protectionType: response.data.protectionType,
+      allowedMutations: response.data.allowedMutations,
+      exportStrategies: response.data.exportStrategies,
+      signatureImpact: response.data.signatureImpact,
+      requiresHumanConfirmation: response.data.requiresHumanConfirmation,
+      exportStrategySelection: response.data.exportStrategySelection,
+      agentMaySelectExportStrategy: response.data.agentMaySelectExportStrategy,
+    },
+    {
+      protectionType: 'usage_rights',
+      allowedMutations: [
+        'inspect_fields',
+        'stage_field_values',
+        'create_fill_package',
+        'create_plain_derivative_pdf',
+      ],
+      exportStrategies: ['confirmed_plain_derivative_pdf', 'fill_package'],
+      signatureImpact: 'usage_rights_removed_in_plain_derivative',
+      requiresHumanConfirmation: true,
+      exportStrategySelection: 'human_ui_only',
+      agentMaySelectExportStrategy: false,
+    },
+  );
+  assert.ok(serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES);
+
+  for (const [input, path] of [
+    [
+      { exportStrategy: 'confirmed_plain_derivative_pdf' },
+      'input.exportStrategy',
+    ],
+    [
+      { humanConfirmedProtectionLoss: true },
+      'input.humanConfirmedProtectionLoss',
+    ],
+    [{ requiresHumanConfirmation: false }, 'input.requiresHumanConfirmation'],
+  ] as const) {
+    const rejected = await protection.execute(input);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, 'INVALID_INPUT');
+    assert.equal(rejected.nextAction, 'fix_tool_input');
+    assert.deepEqual(rejected.error.issues, [{ code: 'INVALID_INPUT', path }]);
+  }
+  assert.deepEqual(received, [{}]);
+  assert.equal(
+    FORMPROOF_WEBMCP_TOOL_NAMES.some((name) =>
+      /select.*export|export.*strategy/iu.test(name),
+    ),
+    false,
+  );
+  for (const tool of tools) {
+    assert.doesNotMatch(
+      JSON.stringify(tool.inputSchema),
+      /exportStrategy|humanConfirmedProtectionLoss|requiresHumanConfirmation/u,
+    );
+  }
 });
 
 void test('keeps context and evidence requests within semantic page limits', async () => {
@@ -1210,7 +1409,8 @@ void test('normalizes unknown field lists into repairable issues', async () => {
   ]);
 });
 
-void test('validate reports review readiness without claiming whole-form validity', async () => {
+void test('validate derives review readiness from available artifacts without claiming whole-form validity', async () => {
+  const reviewArtifacts = ['filled_pdf', 'fill_package'] as const;
   const report = {
     stateVersion: 4,
     issues: [],
@@ -1227,7 +1427,13 @@ void test('validate reports review readiness without claiming whole-form validit
     await captureTools(
       createAdapter({
         validateFillPlan: async () =>
-          success({ valid: false, stagedFieldCount: 1, ...report }),
+          success({
+            valid: false,
+            stagedFieldCount: 1,
+            reviewArtifacts,
+            exportStrategySelection: 'human_ui_only',
+            ...report,
+          }),
       }),
     )
   ).tools;
@@ -1239,6 +1445,8 @@ void test('validate reports review readiness without claiming whole-form validit
             valid: true,
             readyForReview: true,
             stagedFieldCount: 0,
+            reviewArtifacts,
+            exportStrategySelection: 'human_ui_only',
             ...report,
           }),
       }),
@@ -1251,12 +1459,28 @@ void test('validate reports review readiness without claiming whole-form validit
           success({
             valid: true,
             stagedFieldCount: 1,
+            reviewArtifacts,
+            exportStrategySelection: 'human_ui_only',
             ...report,
             structurallyValid: false,
             completionStatus: 'incomplete',
             canApprove: false,
             blockerCount: 1,
             issues: [{ code: 'required_missing' }],
+          }),
+      }),
+    )
+  ).tools;
+  const noArtifactTools = (
+    await captureTools(
+      createAdapter({
+        validateFillPlan: async () =>
+          success({
+            valid: true,
+            stagedFieldCount: 1,
+            reviewArtifacts: [],
+            exportStrategySelection: 'human_ui_only',
+            ...report,
           }),
       }),
     )
@@ -1269,6 +1493,8 @@ void test('validate reports review readiness without claiming whole-form validit
             valid: true,
             readyForReview: true,
             stagedFieldCount: 1,
+            reviewArtifacts: ['fill_package'],
+            exportStrategySelection: 'human_ui_only',
             exportBlockedByPdfActions: 2,
             ...report,
           }),
@@ -1285,6 +1511,10 @@ void test('validate reports review readiness without claiming whole-form validit
   const blocked = await byName(blockedTools, 'validate_fill_plan').execute(
     input,
   );
+  const noArtifact = await byName(
+    noArtifactTools,
+    'validate_fill_plan',
+  ).execute(input);
   const actionBlocked = await byName(
     actionBlockedTools,
     'validate_fill_plan',
@@ -1292,9 +1522,16 @@ void test('validate reports review readiness without claiming whole-form validit
 
   assert.equal(ready.nextAction, 'start_fill_review');
   assert.equal(empty.nextAction, 'resolve_validation_issues');
-  assert.equal(blocked.nextAction, 'resolve_validation_issues');
-  assert.equal(actionBlocked.nextAction, 'load_different_pdf');
-  if (!ready.ok || !empty.ok || !blocked.ok || !actionBlocked.ok) {
+  assert.equal(blocked.nextAction, 'start_fill_review');
+  assert.equal(noArtifact.nextAction, 'resolve_validation_issues');
+  assert.equal(actionBlocked.nextAction, 'start_fill_review');
+  if (
+    !ready.ok ||
+    !empty.ok ||
+    !blocked.ok ||
+    !noArtifact.ok ||
+    !actionBlocked.ok
+  ) {
     throw new Error('Synthetic validation adapters should succeed.');
   }
   if (
@@ -1307,6 +1544,9 @@ void test('validate reports review readiness without claiming whole-form validit
     blocked.data === null ||
     typeof blocked.data !== 'object' ||
     Array.isArray(blocked.data) ||
+    noArtifact.data === null ||
+    typeof noArtifact.data !== 'object' ||
+    Array.isArray(noArtifact.data) ||
     actionBlocked.data === null ||
     typeof actionBlocked.data !== 'object' ||
     Array.isArray(actionBlocked.data)
@@ -1315,13 +1555,16 @@ void test('validate reports review readiness without claiming whole-form validit
   }
   assert.equal(ready.data.readyForReview, true);
   assert.equal(empty.data.readyForReview, false);
-  assert.equal(blocked.data.readyForReview, false);
-  assert.equal(actionBlocked.data.readyForReview, false);
+  assert.equal(blocked.data.readyForReview, true);
+  assert.equal(noArtifact.data.readyForReview, false);
+  assert.equal(actionBlocked.data.readyForReview, true);
   assert.equal(actionBlocked.data.exportBlockedByPdfActions, 2);
   assert.equal('valid' in ready.data, false);
   assert.deepEqual(ready.data, {
     readyForReview: true,
     stagedFieldCount: 1,
+    reviewArtifacts: ['filled_pdf', 'fill_package'],
+    exportStrategySelection: 'human_ui_only',
     stateVersion: 4,
     blockerCount: 0,
     reviewCount: 0,

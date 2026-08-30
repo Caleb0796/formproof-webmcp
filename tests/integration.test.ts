@@ -249,9 +249,12 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.match(workbench, /Completeness/);
   assert.match(workbench, /Not assessed beyond PDF required flags/);
   assert.match(workbench, /human_completion_required/);
+  assert.doesNotMatch(workbench, /appearances (?:are )?verified/iu);
+  assert.match(workbench, /normal appearance streams are present/iu);
+  assert.match(workbench, /visual rendering is not independently checked/iu);
 });
 
-void test('wires scoped context and PDF-action blocks through the workbench adapter', async () => {
+void test('wires scoped context and artifact-specific review boundaries through the workbench adapter', async () => {
   const workbench = await readFile(
     new URL('../components/formproof-workbench.tsx', import.meta.url),
     'utf8',
@@ -281,8 +284,13 @@ void test('wires scoped context and PDF-action blocks through the workbench adap
   const openReview = workbench.slice(openReviewStart, openReviewEnd);
   assert.match(
     openReview,
-    /activeContent\.highRiskActionCount[\s\S]*?if \(highRiskActionCount > 0\) \{[\s\S]*?FormProof will not export it[\s\S]*?return false;[\s\S]*?\}/u,
+    /const preferredStrategy = initialExportStrategy\(inspection\)/u,
   );
+  assert.match(
+    openReview,
+    /preferredStrategy !== 'fill_package'[\s\S]*?!validateDraft\(current\)\.canApprove[\s\S]*?exportStrategies\.includes\('fill_package'\)[\s\S]*?\? 'fill_package'/u,
+  );
+  assert.doesNotMatch(openReview, /PDF_ACTION_UNSUPPORTED|will not export/u);
 
   const validationStart = workbench.indexOf('validateFillPlan(input) {');
   const reviewStart = workbench.indexOf('startFillReview(input) {');
@@ -297,22 +305,30 @@ void test('wires scoped context and PDF-action blocks through the workbench adap
   );
   const validationAdapter = workbench.slice(validationStart, reviewStart);
   assert.match(validationAdapter, /readyForReview:/u);
-  assert.match(validationAdapter, /exportBlockedByPdfActions === 0/u);
-  assert.match(validationAdapter, /\{ exportBlockedByPdfActions \}/u);
+  assert.match(
+    validationAdapter,
+    /reviewArtifacts = inspection\?\.protection\.exportStrategies/u,
+  );
+  assert.match(validationAdapter, /reviewArtifacts\.length > 0/u);
+  assert.match(validationAdapter, /exportStrategySelection: 'human_ui_only'/u);
 
   const reviewAdapter = workbench.slice(reviewStart, adapterEnd);
   assert.match(
     reviewAdapter,
-    /if \(exportBlockedByPdfActions > 0\) \{[\s\S]*?'pdf_action_unsupported'[\s\S]*?Load a different PDF before starting review[\s\S]*?\}/u,
+    /if \(reviewArtifacts\.length === 0\) \{[\s\S]*?'review_not_ready'[\s\S]*?no available artifact strategy[\s\S]*?\}/u,
   );
+  assert.match(reviewAdapter, /exportStrategySelection: 'human_ui_only'/u);
 
+  assert.match(workbench, /agentMaySelectExportStrategy: false/u);
+  assert.match(workbench, /exportFillPackageFromUi\(current, source/u);
+  assert.match(workbench, /getArtifactReviewFieldNames\(formState\)/u);
+  assert.match(workbench, /Required field is blank/u);
+  assert.match(workbench, /fill package remains incomplete/u);
+  assert.match(workbench, /not established; unknown protection remains/u);
+  assert.match(workbench, /exportApprovedDerivativePdfFromUi/u);
   assert.match(
     workbench,
-    /disabled=\{!validation\?\.canApprove \|\| hasBlockedHighRiskActions\}/u,
-  );
-  assert.match(
-    workbench,
-    /const exported = await exportApprovedPdfFromUi\(approval\.state, source\)/u,
+    /selectedCreatesPdf &&[\s\S]*?!validation\?\.canApprove \|\| hasBlockedHighRiskActions/u,
   );
 });
 

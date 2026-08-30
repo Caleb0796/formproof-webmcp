@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Download,
   FileCheck2,
+  FileJson,
   FileText,
   Fingerprint,
   LoaderCircle,
@@ -38,16 +39,24 @@ import {
   approveDraftFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
+  exportApprovedDerivativePdfFromUi,
   exportApprovedPdfFromUi,
+  exportFillPackageFromUi,
+  getArtifactReviewFieldNames,
   getReleaseGate,
   stageFieldUpdates,
   validateDraft,
   type FieldUpdate,
   type FormFieldValue,
   type FormState,
+  type FillPackageResult,
   type StateError,
 } from '@/lib/form-state';
-import type { ApplyResult, PdfInspection } from '@/lib/pdf-engine';
+import type {
+  ApplyResult,
+  PdfExportStrategy,
+  PdfInspection,
+} from '@/lib/pdf-engine';
 import {
   createFieldEvidenceToolData,
   createFormContextToolData,
@@ -175,29 +184,124 @@ function waitForVisibleCommit(): Promise<void> {
   });
 }
 
-function outputFileName(sourceName: string): string {
+function pdfOutputFileName(
+  sourceName: string,
+  strategy: ApplyResult['exportStrategy'],
+): string {
   const stem = sourceName.replace(/\.pdf$/iu, '') || 'form';
-  return `${stem}-formproof.pdf`;
+  return strategy === 'filled_pdf'
+    ? `${stem}-formproof-filled.pdf`
+    : `${stem}-formproof-plain-derivative.pdf`;
+}
+
+function fillPackageFileName(sourceName: string): string {
+  const stem = sourceName.replace(/\.pdf$/iu, '') || 'form';
+  return `${stem}-formproof-fill-package.json`;
+}
+
+function protectionOutcome(inspection: PdfInspection): {
+  title: string;
+  detail: string;
+} {
+  const { protection } = inspection;
+  if (protection.exportStrategies.includes('filled_pdf')) {
+    return {
+      title: 'Filled PDF available',
+      detail:
+        'This is a standard AcroForm. An approved plan can be written to a fresh PDF and reopened to verify field values and confirm that normal appearance streams are present. Visual rendering is not independently checked.',
+    };
+  }
+  if (protection.exportStrategies.includes('confirmed_plain_derivative_pdf')) {
+    return {
+      title: 'Plain derivative available after confirmation',
+      detail:
+        'The source has Reader Extensions usage rights. A person may choose a plain derivative that removes those rights; the original remains unchanged.',
+    };
+  }
+  if (protection.exportStrategies.includes('fill_package')) {
+    return {
+      title: 'Original-untouched fill package',
+      detail: protection.evidence.xfaPresent
+        ? 'The source combines protection with XFA. FormProof will not rewrite it; the UI can export reviewed field data, coordinates, provenance, and limitations as JSON.'
+        : 'The source PDF will not be rewritten. The UI can export reviewed field data, coordinates, provenance, and limitations as JSON.',
+    };
+  }
+  return {
+    title: 'Inspection only',
+    detail:
+      'No artifact export is available because the protection is unknown or no addressable fallback fields were found.',
+  };
+}
+
+function initialExportStrategy(
+  inspection: PdfInspection,
+): PdfExportStrategy | null {
+  const strategies = inspection.protection.exportStrategies;
+  if (strategies.includes('filled_pdf')) return 'filled_pdf';
+  if (strategies.includes('fill_package')) return 'fill_package';
+  return null;
 }
 
 function describeActiveContent(
   activeContent: PdfInspection['activeContent'],
 ): string {
   const markers = [
-    [activeContent.javascriptActionCount, 'JavaScript action'],
+    [
+      activeContent.javascriptActionCount,
+      'JavaScript action',
+      'JavaScript actions',
+    ],
     [
       activeContent.additionalActionDictionaryCount,
       'additional-action dictionary',
+      'additional-action dictionaries',
     ],
-    [activeContent.openActionCount, 'OpenAction'],
-    [activeContent.externalActionCount, 'external action'],
-    [activeContent.highRiskActionCount, 'blocked high-risk action'],
-    [activeContent.otherActionCount, 'other native action'],
+    [activeContent.openActionCount, 'OpenAction', 'OpenActions'],
+    [activeContent.externalActionCount, 'external action', 'external actions'],
+    [
+      activeContent.highRiskActionCount,
+      'blocked high-risk action',
+      'blocked high-risk actions',
+    ],
+    [
+      activeContent.otherActionCount,
+      'other native action',
+      'other native actions',
+    ],
   ] as const;
   return markers
     .filter(([count]) => count > 0)
-    .map(([count, label]) => `${count} ${label}${count === 1 ? '' : 's'}`)
+    .map(
+      ([count, singular, plural]) =>
+        `${count} ${count === 1 ? singular : plural}`,
+    )
     .join(', ');
+}
+
+function exportStrategyCopy(strategy: PdfExportStrategy): {
+  title: string;
+  detail: string;
+} {
+  switch (strategy) {
+    case 'filled_pdf':
+      return {
+        title: 'Filled PDF',
+        detail:
+          'Write the reviewed values to a new PDF, then reopen it to verify field values and confirm that normal appearance streams are present. Visual rendering is not independently checked. The original stays unchanged.',
+      };
+    case 'confirmed_plain_derivative_pdf':
+      return {
+        title: 'Confirmed plain derivative',
+        detail:
+          'Remove the recognized Reader Extensions usage-rights entry and create a new ordinary PDF. This does not preserve that rights signature.',
+      };
+    case 'fill_package':
+      return {
+        title: 'Original-untouched fill package',
+        detail:
+          'Export reviewed values, field names, coordinates, provenance, and limitations as JSON. No PDF bytes are rewritten.',
+      };
+  }
 }
 
 export function FormProofWorkbench() {
@@ -207,6 +311,7 @@ export function FormProofWorkbench() {
   const sourceBytesRef = useRef<Uint8Array | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
   const outputUrlRef = useRef<string | null>(null);
+  const fillPackageUrlRef = useRef<string | null>(null);
   const reviewLockRef = useRef(false);
   const reviewBindingRef = useRef<ReviewBinding | null>(null);
   const pendingPlanMutationsRef = useRef(0);
@@ -221,6 +326,9 @@ export function FormProofWorkbench() {
   );
   const [outputResult, setOutputResult] = useState<ApplyResult | null>(null);
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
+  const [fillPackageResult, setFillPackageResult] =
+    useState<FillPackageResult | null>(null);
+  const [fillPackageUrl, setFillPackageUrl] = useState<string | null>(null);
   const [showOutput, setShowOutput] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [confirmedFields, setConfirmedFields] = useState<Set<string>>(
@@ -228,6 +336,10 @@ export function FormProofWorkbench() {
   );
   const [activeContentAcknowledged, setActiveContentAcknowledged] =
     useState(false);
+  const [protectionLossAcknowledged, setProtectionLossAcknowledged] =
+    useState(false);
+  const [selectedExportStrategy, setSelectedExportStrategy] =
+    useState<PdfExportStrategy | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -252,6 +364,8 @@ export function FormProofWorkbench() {
       setReviewOpen(false);
       setConfirmedFields(new Set());
       setActiveContentAcknowledged(false);
+      setProtectionLossAcknowledged(false);
+      setSelectedExportStrategy(null);
     }
     stateRef.current = next;
     setFormState(next);
@@ -264,6 +378,8 @@ export function FormProofWorkbench() {
     setReviewOpen(false);
     setConfirmedFields(new Set());
     setActiveContentAcknowledged(false);
+    setProtectionLossAcknowledged(false);
+    setSelectedExportStrategy(null);
   }, []);
 
   const openReview = useCallback(() => {
@@ -276,23 +392,24 @@ export function FormProofWorkbench() {
       setError('Wait for the current form update to finish before review.');
       return false;
     }
-    if (!current || Object.keys(current.draft).length === 0) {
+    const inspection = inspectionRef.current;
+    if (!current || !inspection || Object.keys(current.draft).length === 0) {
       setError('Stage at least one field before starting review.');
       return false;
     }
-    const highRiskActionCount =
-      inspectionRef.current?.activeContent.highRiskActionCount ?? 0;
-    if (highRiskActionCount > 0) {
+    const preferredStrategy = initialExportStrategy(inspection);
+    if (preferredStrategy === null) {
       setError(
-        `This PDF contains ${highRiskActionCount} blocked high-risk action${highRiskActionCount === 1 ? '' : 's'}. FormProof will not export it.`,
+        'This document is inspection-only because no artifact export strategy is available.',
       );
       return false;
     }
-    const validation = validateDraft(current);
-    if (!validation.canApprove) {
-      setError('Resolve the required-field blockers before review.');
-      return false;
-    }
+    const strategy =
+      preferredStrategy !== 'fill_package' &&
+      !validateDraft(current).canApprove &&
+      inspection.protection.exportStrategies.includes('fill_package')
+        ? 'fill_package'
+        : preferredStrategy;
     reviewLockRef.current = true;
     reviewBindingRef.current = {
       sourceHash: current.source.sourceHash,
@@ -301,6 +418,8 @@ export function FormProofWorkbench() {
     };
     setConfirmedFields(new Set());
     setActiveContentAcknowledged(false);
+    setProtectionLossAcknowledged(false);
+    setSelectedExportStrategy(strategy);
     setError(null);
     setReviewOpen(true);
     return true;
@@ -308,9 +427,14 @@ export function FormProofWorkbench() {
 
   const resetOutput = useCallback(() => {
     if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
+    if (fillPackageUrlRef.current)
+      URL.revokeObjectURL(fillPackageUrlRef.current);
     outputUrlRef.current = null;
+    fillPackageUrlRef.current = null;
     setOutputUrl(null);
     setOutputResult(null);
+    setFillPackageUrl(null);
+    setFillPackageResult(null);
     setShowOutput(false);
   }, []);
 
@@ -323,6 +447,8 @@ export function FormProofWorkbench() {
     setReviewOpen(false);
     setConfirmedFields(new Set());
     setActiveContentAcknowledged(false);
+    setProtectionLossAcknowledged(false);
+    setSelectedExportStrategy(null);
     setError(null);
     setNotice(null);
     return generation;
@@ -446,6 +572,34 @@ export function FormProofWorkbench() {
     };
 
     const adapter: FormProofWebMcpAdapter = {
+      getPdfProtection() {
+        const current = stateRef.current;
+        const inspection = inspectionRef.current;
+        if (!current || !inspection) {
+          return adapterFailure(
+            null,
+            'no_active_document',
+            'Load a PDF before inspecting its protection.',
+          );
+        }
+        return {
+          ok: true,
+          stateVersion: current.stateVersion,
+          sourceHash: current.source.sourceHash,
+          data: {
+            protectionType: inspection.protection.protectionType,
+            allowedMutations: inspection.protection.allowedMutations,
+            exportStrategies: inspection.protection.exportStrategies,
+            signatureImpact: inspection.protection.signatureImpact,
+            requiresHumanConfirmation:
+              inspection.protection.requiresHumanConfirmation,
+            protectionEvidence: inspection.protection.evidence,
+            exportStrategySelection: 'human_ui_only',
+            agentMaySelectExportStrategy: false,
+          },
+        };
+      },
+
       getFormContext(input) {
         const current = stateRef.current;
         const inspection = inspectionRef.current;
@@ -665,20 +819,23 @@ export function FormProofWorkbench() {
         const mismatch = bindingFailure(current, input);
         if (mismatch) return mismatch;
         const validation = validateDraft(current);
+        const inspection = inspectionRef.current;
         const exportBlockedByPdfActions =
-          inspectionRef.current?.activeContent.highRiskActionCount ?? 0;
+          inspection?.activeContent.highRiskActionCount ?? 0;
+        const reviewArtifacts = inspection?.protection.exportStrategies ?? [];
         return {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
           data: {
             readyForReview:
-              validation.canApprove &&
               Object.keys(current.draft).length > 0 &&
-              exportBlockedByPdfActions === 0,
+              reviewArtifacts.length > 0,
             ...(exportBlockedByPdfActions === 0
               ? {}
               : { exportBlockedByPdfActions }),
+            reviewArtifacts,
+            exportStrategySelection: 'human_ui_only',
             stagedFieldCount: Object.keys(current.draft).length,
             ...validation,
           },
@@ -696,23 +853,20 @@ export function FormProofWorkbench() {
         }
         const mismatch = bindingFailure(current, input);
         if (mismatch) return mismatch;
-        const exportBlockedByPdfActions =
-          inspectionRef.current?.activeContent.highRiskActionCount ?? 0;
-        if (exportBlockedByPdfActions > 0) {
-          return adapterFailure(
-            current,
-            'pdf_action_unsupported',
-            'This PDF contains blocked actions. Load a different PDF before starting review.',
-          );
-        }
-        if (
-          Object.keys(current.draft).length === 0 ||
-          !validateDraft(current).canApprove
-        ) {
+        const reviewArtifacts =
+          inspectionRef.current?.protection.exportStrategies ?? [];
+        if (reviewArtifacts.length === 0) {
           return adapterFailure(
             current,
             'review_not_ready',
-            'Stage a non-empty plan and resolve validation blockers first.',
+            'This document has no available artifact strategy.',
+          );
+        }
+        if (Object.keys(current.draft).length === 0) {
+          return adapterFailure(
+            current,
+            'review_not_ready',
+            'Stage a non-empty plan before review.',
           );
         }
         if (!openReview()) {
@@ -730,6 +884,8 @@ export function FormProofWorkbench() {
             reviewOpened: true,
             planHash: current.planHash,
             humanActionRequired: true,
+            reviewArtifacts,
+            exportStrategySelection: 'human_ui_only',
           },
         };
       },
@@ -786,6 +942,8 @@ export function FormProofWorkbench() {
       loadGenerationRef.current += 1;
       if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
       if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
+      if (fillPackageUrlRef.current)
+        URL.revokeObjectURL(fillPackageUrlRef.current);
     };
   }, []);
 
@@ -936,41 +1094,41 @@ export function FormProofWorkbench() {
 
   const reviewNames = useMemo(() => {
     if (!formState) return [];
-    return [
-      ...new Set([
-        ...Object.keys(formState.draft),
-        ...formState.validation.reviewFieldNames,
-        ...Object.keys(formState.fields).filter((fieldName) => {
-          const field = formState.fields[fieldName];
-          return field.humanOnly || field.type === 'signature';
-        }),
-      ]),
-    ].sort();
+    return getArtifactReviewFieldNames(formState);
   }, [formState]);
 
   const activeContent = documentState?.inspection.activeContent;
   const activeContentDescription = activeContent
     ? describeActiveContent(activeContent)
     : '';
+  const selectedCreatesPdf =
+    selectedExportStrategy === 'filled_pdf' ||
+    selectedExportStrategy === 'confirmed_plain_derivative_pdf';
   const requiresActiveContentAcknowledgment =
-    activeContentDescription.length > 0;
+    selectedCreatesPdf && activeContentDescription.length > 0;
   const hasBlockedHighRiskActions =
     (activeContent?.highRiskActionCount ?? 0) > 0;
+  const requiresProtectionLossAcknowledgment =
+    selectedExportStrategy === 'confirmed_plain_derivative_pdf';
 
   const allReviewFieldsConfirmed =
     reviewNames.length > 0 &&
     reviewNames.every((name) => confirmedFields.has(name)) &&
-    (!requiresActiveContentAcknowledgment || activeContentAcknowledged);
+    (!requiresActiveContentAcknowledgment || activeContentAcknowledged) &&
+    (!requiresProtectionLossAcknowledgment || protectionLossAcknowledged);
 
-  const approveAndExport = useCallback(async () => {
+  const completeReview = useCallback(async () => {
     if (exportingRef.current) return;
     const current = stateRef.current;
     const source = sourceBytesRef.current;
+    const inspection = inspectionRef.current;
     const binding = reviewBindingRef.current;
     if (
       !current ||
       !source ||
+      !inspection ||
       !binding ||
+      selectedExportStrategy === null ||
       !allReviewFieldsConfirmed ||
       binding.sourceHash !== current.source.sourceHash ||
       binding.planHash !== current.planHash ||
@@ -984,6 +1142,8 @@ export function FormProofWorkbench() {
       setReviewOpen(false);
       setConfirmedFields(new Set());
       setActiveContentAcknowledged(false);
+      setProtectionLossAcknowledged(false);
+      setSelectedExportStrategy(null);
       return;
     }
 
@@ -991,78 +1151,153 @@ export function FormProofWorkbench() {
     setExporting(true);
     setError(null);
     try {
-      const approval = approveDraftFromUi(current, {
-        expectedStateVersion: current.stateVersion,
-        expectedSourceHash: current.source.sourceHash,
-        expectedPlanHash: current.planHash,
-        approvedBy: 'UI reviewer',
-        confirmedFieldNames: reviewNames,
-      });
-      if (!approval.ok) {
-        setError(approval.errors.map((item) => item.message).join(' '));
-        return;
-      }
-      const exported = await exportApprovedPdfFromUi(approval.state, source);
-      if (!exported.ok) {
-        setError(exported.errors.map((item) => item.message).join(' '));
-        return;
-      }
-      if (
-        !mountedRef.current ||
-        stateRef.current !== current ||
-        !reviewLockRef.current ||
-        reviewBindingRef.current !== binding ||
-        loadingRef.current
-      ) {
-        return;
-      }
+      if (selectedExportStrategy === 'fill_package') {
+        const packaged = await exportFillPackageFromUi(current, source, {
+          confirmedFieldNames: reviewNames,
+        });
+        if (!packaged.ok) {
+          setError(packaged.errors.map((item) => item.message).join(' '));
+          return;
+        }
+        if (
+          !mountedRef.current ||
+          stateRef.current !== current ||
+          !reviewLockRef.current ||
+          reviewBindingRef.current !== binding ||
+          loadingRef.current
+        ) {
+          return;
+        }
+        const nextUrl = URL.createObjectURL(
+          new Blob([copyArrayBuffer(packaged.result.bytes)], {
+            type: 'application/json',
+          }),
+        );
+        if (fillPackageUrlRef.current)
+          URL.revokeObjectURL(fillPackageUrlRef.current);
+        fillPackageUrlRef.current = nextUrl;
+        setFillPackageUrl(nextUrl);
+        setFillPackageResult(packaged.result);
+        if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
+        outputUrlRef.current = null;
+        setOutputUrl(null);
+        setOutputResult(null);
+        setShowOutput(false);
+        setNotice(
+          'Reviewed field data was exported as an original-untouched fill package. No PDF bytes were rewritten.',
+        );
+      } else {
+        if (!validateDraft(current).canApprove) {
+          setError(
+            'Resolve required-field blockers before creating a PDF artifact. The fill-package option remains available.',
+          );
+          return;
+        }
+        const approval = approveDraftFromUi(current, {
+          expectedStateVersion: current.stateVersion,
+          expectedSourceHash: current.source.sourceHash,
+          expectedPlanHash: current.planHash,
+          approvedBy: 'UI reviewer',
+          confirmedFieldNames: reviewNames,
+        });
+        if (!approval.ok) {
+          setError(approval.errors.map((item) => item.message).join(' '));
+          return;
+        }
+        const exported =
+          selectedExportStrategy === 'confirmed_plain_derivative_pdf'
+            ? await exportApprovedDerivativePdfFromUi(approval.state, source, {
+                humanConfirmedProtectionLoss: protectionLossAcknowledged,
+              })
+            : await exportApprovedPdfFromUi(approval.state, source);
+        if (!exported.ok) {
+          setError(exported.errors.map((item) => item.message).join(' '));
+          return;
+        }
+        if (
+          !mountedRef.current ||
+          stateRef.current !== current ||
+          !reviewLockRef.current ||
+          reviewBindingRef.current !== binding ||
+          loadingRef.current
+        ) {
+          return;
+        }
 
-      const nextUrl = URL.createObjectURL(
-        new Blob([copyArrayBuffer(exported.result.bytes)], {
-          type: 'application/pdf',
-        }),
-      );
-      if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
-      outputUrlRef.current = nextUrl;
-      setOutputUrl(nextUrl);
-      setOutputResult(exported.result);
+        const nextUrl = URL.createObjectURL(
+          new Blob([copyArrayBuffer(exported.result.bytes)], {
+            type: 'application/pdf',
+          }),
+        );
+        if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
+        outputUrlRef.current = nextUrl;
+        setOutputUrl(nextUrl);
+        setOutputResult(exported.result);
+        if (fillPackageUrlRef.current)
+          URL.revokeObjectURL(fillPackageUrlRef.current);
+        fillPackageUrlRef.current = null;
+        setFillPackageUrl(null);
+        setFillPackageResult(null);
+        commitState(exported.state);
+        setShowOutput(true);
+        setNotice(
+          exported.result.exportStrategy === 'filled_pdf'
+            ? 'Approved staged values were written to a filled PDF and reopened: field values matched and normal appearance streams were present. Visual rendering was not independently checked.'
+            : 'A confirmed plain derivative was created, its Reader Extensions usage rights were removed, field values matched after reopening, and normal appearance streams were present. Visual rendering was not independently checked.',
+        );
+      }
       reviewLockRef.current = false;
       reviewBindingRef.current = null;
-      commitState(exported.state);
-      setShowOutput(true);
-      setNotice(
-        'Approved staged values were written to a fresh copy and reopened for verification. Human-only fields remain unchanged.',
-      );
       setReviewOpen(false);
       setConfirmedFields(new Set());
       setActiveContentAcknowledged(false);
+      setProtectionLossAcknowledged(false);
+      setSelectedExportStrategy(null);
     } catch (caught) {
       if (!mountedRef.current) return;
       setError(
         caught instanceof Error
           ? caught.message
-          : 'The approved PDF could not be exported.',
+          : 'The reviewed artifact could not be exported.',
       );
     } finally {
       exportingRef.current = false;
       if (mountedRef.current) setExporting(false);
     }
-  }, [allReviewFieldsConfirmed, commitState, reviewNames]);
+  }, [
+    allReviewFieldsConfirmed,
+    commitState,
+    protectionLossAcknowledged,
+    reviewNames,
+    selectedExportStrategy,
+  ]);
 
   const downloadOutput = useCallback(() => {
     if (
       !outputUrl ||
       !documentState ||
       !formState ||
+      !outputResult ||
       !getReleaseGate(formState).open
     ) {
       return;
     }
     const link = window.document.createElement('a');
     link.href = outputUrl;
-    link.download = outputFileName(documentState.fileName);
+    link.download = pdfOutputFileName(
+      documentState.fileName,
+      outputResult.exportStrategy,
+    );
     link.click();
-  }, [documentState, formState, outputUrl]);
+  }, [documentState, formState, outputResult, outputUrl]);
+
+  const downloadFillPackage = useCallback(() => {
+    if (!fillPackageUrl || !fillPackageResult || !documentState) return;
+    const link = window.document.createElement('a');
+    link.href = fillPackageUrl;
+    link.download = fillPackageFileName(documentState.fileName);
+    link.click();
+  }, [documentState, fillPackageResult, fillPackageUrl]);
 
   const draftEntries = formState ? Object.values(formState.draft) : [];
   const descriptorByName = useMemo(
@@ -1074,6 +1309,10 @@ export function FormProofWorkbench() {
     [documentState],
   );
   const releaseOpen = formState ? getReleaseGate(formState).open : false;
+  const artifactReady = releaseOpen || fillPackageResult !== null;
+  const protectionPresentation = documentState
+    ? protectionOutcome(documentState.inspection)
+    : null;
   const activePreviewUrl =
     showOutput && outputUrl ? outputUrl : documentState?.sourceUrl;
   const validation = formState ? validateDraft(formState) : null;
@@ -1105,17 +1344,26 @@ export function FormProofWorkbench() {
     },
     {
       label: 'Review evidence',
-      detail: formState?.approval ? 'Exact plan approved' : 'UI review gate',
-      state: formState?.approval
-        ? 'done'
-        : draftEntries.length > 0
-          ? 'active'
-          : 'idle',
+      detail: fillPackageResult
+        ? 'Field package reviewed'
+        : formState?.approval
+          ? 'Exact plan approved'
+          : 'UI review gate',
+      state:
+        fillPackageResult || formState?.approval
+          ? 'done'
+          : draftEntries.length > 0
+            ? 'active'
+            : 'idle',
     },
     {
       label: 'Verify & export',
-      detail: releaseOpen ? 'Staged values verified' : 'Locked',
-      state: releaseOpen ? 'done' : formState?.approval ? 'active' : 'idle',
+      detail: outputResult
+        ? 'PDF values verified; appearance streams present'
+        : fillPackageResult
+          ? 'JSON round-trip verified'
+          : 'Locked',
+      state: artifactReady ? 'done' : formState?.approval ? 'active' : 'idle',
     },
   ] as const;
 
@@ -1145,7 +1393,7 @@ export function FormProofWorkbench() {
       <section className="intro" aria-labelledby="page-title">
         <div>
           <p className="eyebrow">
-            <Sparkles aria-hidden="true" /> AcroForm review mode
+            <Sparkles aria-hidden="true" /> Evidence-bound PDF form review
           </p>
           <h1 id="page-title">The agent drafts. You decide.</h1>
           <p>
@@ -1242,13 +1490,170 @@ export function FormProofWorkbench() {
               )}
             </div>
           </div>
+          {documentState && protectionPresentation && (
+            <div className="safety-card">
+              <Fingerprint aria-hidden="true" />
+              <div>
+                <strong>{protectionPresentation.title}</strong>
+                <p>{protectionPresentation.detail}</p>
+                <p>
+                  Protection type:{' '}
+                  <b>{documentState.inspection.protection.protectionType}</b>
+                  <br />
+                  Allowed mutations:{' '}
+                  {documentState.inspection.protection.allowedMutations.join(
+                    ', ',
+                  ) || 'none'}
+                  <br />
+                  Export strategies:{' '}
+                  {documentState.inspection.protection.exportStrategies.join(
+                    ', ',
+                  ) || 'none'}
+                  <br />
+                  Signature impact:{' '}
+                  {documentState.inspection.protection.signatureImpact}
+                  <br />
+                  Human confirmation:{' '}
+                  {documentState.inspection.protection.requiresHumanConfirmation
+                    ? 'required for the plain derivative'
+                    : 'not required by the protection policy'}
+                </p>
+                <p>
+                  Evidence:{' '}
+                  {documentState.inspection.protection.evidence.usageRightsKeys
+                    .length > 0
+                    ? `${documentState.inspection.protection.evidence.usageRightsKeys.join('/')} usage rights; `
+                    : ''}
+                  {
+                    documentState.inspection.protection.evidence
+                      .signatureDictionaryCount
+                  }{' '}
+                  recognized signature{' '}
+                  {documentState.inspection.protection.evidence
+                    .signatureDictionaryCount === 1
+                    ? 'dictionary'
+                    : 'dictionaries'}
+                  {' ('}
+                  {
+                    documentState.inspection.protection.evidence
+                      .usageRightsSignatureCount
+                  }{' '}
+                  UR/UR3 signature dictionaries,{' '}
+                  {
+                    documentState.inspection.protection.evidence
+                      .documentSignatureCount
+                  }{' '}
+                  signed-field document signatures,{' '}
+                  {
+                    documentState.inspection.protection.evidence
+                      .unclassifiedSignatureDictionaryCount
+                  }{' '}
+                  unclassified,{' '}
+                  {
+                    documentState.inspection.protection.evidence
+                      .unreachableSignatureDictionaryCount
+                  }{' '}
+                  unreachable{'); '}
+                  {
+                    documentState.inspection.protection.evidence
+                      .byteRangeEntryCount
+                  }{' '}
+                  ByteRange entr
+                  {documentState.inspection.protection.evidence
+                    .byteRangeEntryCount === 1
+                    ? 'y'
+                    : 'ies'}{' '}
+                  (
+                  {
+                    documentState.inspection.protection.evidence.byteRanges
+                      .length
+                  }{' '}
+                  parsed,{' '}
+                  {
+                    documentState.inspection.protection.evidence
+                      .malformedByteRangeCount
+                  }{' '}
+                  malformed; whole-file coverage{' '}
+                  {documentState.inspection.protection.evidence
+                    .byteRangesCoverWholeFile === null
+                    ? 'not applicable'
+                    : documentState.inspection.protection.evidence
+                          .byteRangesCoverWholeFile
+                      ? 'yes'
+                      : 'no'}
+                  {'); '}DocMDP{' '}
+                  {!documentState.inspection.protection.evidence.docMdpPresent
+                    ? documentState.inspection.protection.evidence
+                        .unknownStructures.length > 0
+                      ? 'not established; unknown protection remains'
+                      : 'absent'
+                    : documentState.inspection.protection.evidence
+                          .docMdpPermission === null
+                      ? 'present; permission unrecognized'
+                      : `present; P=${documentState.inspection.protection.evidence.docMdpPermission}`}
+                  {'; signature fields '}
+                  {
+                    documentState.inspection.protection.evidence
+                      .signatureFieldCount
+                  }{' '}
+                  (
+                  {
+                    documentState.inspection.protection.evidence
+                      .signedSignatureFieldCount
+                  }{' '}
+                  signed); XFA{' '}
+                  {documentState.inspection.protection.evidence.xfaPresent
+                    ? 'present'
+                    : 'absent'}
+                  .
+                </p>
+                {documentState.inspection.protection.evidence.unknownStructures
+                  .length > 0 && (
+                  <p>
+                    Unrecognized protection evidence:{' '}
+                    {documentState.inspection.protection.evidence.unknownStructures.join(
+                      ', ',
+                    )}
+                    . No export strategy is available.
+                  </p>
+                )}
+                {documentState.inspection.protection.evidence.adbeExtension && (
+                  <p>
+                    ADBE developer extension declaration:{' '}
+                    {documentState.inspection.protection.evidence.adbeExtension
+                      .baseVersion ?? 'base version unspecified'}
+                    , level{' '}
+                    {documentState.inspection.protection.evidence.adbeExtension
+                      .extensionLevel ?? 'unspecified'}
+                    . This declaration is not itself a usage right or a
+                    signature.
+                  </p>
+                )}
+                <p>
+                  Browser CMS integrity:{' '}
+                  {documentState.inspection.protection.evidence.cmsIntegrity.replaceAll(
+                    '_',
+                    ' ',
+                  )}
+                  ; signer trust:{' '}
+                  {documentState.inspection.protection.evidence.signerTrust.replaceAll(
+                    '_',
+                    ' ',
+                  )}
+                  .
+                </p>
+              </div>
+            </div>
+          )}
         </aside>
 
         <article className="document-panel" aria-labelledby="document-title">
           <div className="document-toolbar">
             <div>
               <p className="section-kicker">
-                {showOutput ? 'Verified draft copy' : 'Untouched source'}
+                {showOutput && outputResult
+                  ? exportStrategyCopy(outputResult.exportStrategy).title
+                  : 'Untouched source'}
               </p>
               <h2 id="document-title">
                 {documentState?.fileName ?? 'No PDF loaded'}
@@ -1281,7 +1686,9 @@ export function FormProofWorkbench() {
                 className={showOutput ? 'selected' : ''}
                 onClick={() => setShowOutput(true)}
               >
-                Verified draft
+                {outputResult
+                  ? exportStrategyCopy(outputResult.exportStrategy).title
+                  : 'PDF result'}
               </button>
             </div>
           )}
@@ -1414,17 +1821,24 @@ export function FormProofWorkbench() {
               className="w-full"
               size="lg"
               onClick={openReview}
-              disabled={!validation?.canApprove || hasBlockedHighRiskActions}
+              disabled={
+                !documentState ||
+                documentState.inspection.protection.exportStrategies.length ===
+                  0
+              }
             >
               Review exact plan <ArrowRight aria-hidden="true" />
             </Button>
           )}
           <p className="button-note">
-            {hasBlockedHighRiskActions
-              ? 'Export is blocked because the PDF contains a high-risk native action.'
-              : validation && validation.blockerCount > 0
-                ? `${validation.blockerCount} validation blocker(s) remain.`
-                : 'Approval and export are not WebMCP tools.'}
+            {documentState &&
+            documentState.inspection.protection.exportStrategies.length === 0
+              ? 'Unknown protection remains inspection-only; no artifact export is offered.'
+              : hasBlockedHighRiskActions
+                ? 'PDF rewriting is not offered because of high-risk native actions; an original-untouched fill package remains available.'
+                : validation && validation.blockerCount > 0
+                  ? `${validation.blockerCount} PDF validation blocker(s) remain; an original-untouched fill package can still be reviewed.`
+                  : 'A person chooses the artifact here; WebMCP cannot select or export it.'}
           </p>
 
           {releaseOpen && formState?.approval && outputResult && (
@@ -1435,10 +1849,20 @@ export function FormProofWorkbench() {
                 </span>
                 <div>
                   <p className="section-kicker">Staged values verified</p>
-                  <strong>Fresh copy receipt</strong>
+                  <strong>
+                    {outputResult.exportStrategy === 'filled_pdf'
+                      ? 'Filled PDF receipt'
+                      : 'Confirmed derivative receipt'}
+                  </strong>
                 </div>
               </div>
               <dl>
+                <div>
+                  <dt>Artifact</dt>
+                  <dd>
+                    {exportStrategyCopy(outputResult.exportStrategy).title}
+                  </dd>
+                </div>
                 <div>
                   <dt>Source</dt>
                   <dd>{shortHash(formState.source.sourceHash)}</dd>
@@ -1456,8 +1880,8 @@ export function FormProofWorkbench() {
                 <div>
                   <dt>Staged fields</dt>
                   <dd>
-                    {outputResult.verifiedFields.length} values and appearances
-                    verified
+                    {outputResult.verifiedFields.length} values verified; normal
+                    appearance streams present
                   </dd>
                 </div>
                 <div>
@@ -1466,6 +1890,10 @@ export function FormProofWorkbench() {
                     {outputResult.fieldCount} total fields ·{' '}
                     {outputResult.widgetCount} total widgets
                   </dd>
+                </div>
+                <div>
+                  <dt>Signature impact</dt>
+                  <dd>{outputResult.sourceProtection.signatureImpact}</dd>
                 </div>
                 <div>
                   <dt>Completeness</dt>
@@ -1485,8 +1913,73 @@ export function FormProofWorkbench() {
               <Button className="w-full" onClick={downloadOutput}>
                 <Download aria-hidden="true" />{' '}
                 {pendingHumanCompletionNames.length > 0
-                  ? 'Download copy for completion'
-                  : 'Download verified copy'}
+                  ? 'Download PDF for completion'
+                  : outputResult.exportStrategy === 'filled_pdf'
+                    ? 'Download filled PDF'
+                    : 'Download confirmed derivative'}
+              </Button>
+            </div>
+          )}
+
+          {fillPackageResult && formState && (
+            <div className="receipt-card">
+              <div className="receipt-heading">
+                <span>
+                  <FileJson aria-hidden="true" />
+                </span>
+                <div>
+                  <p className="section-kicker">Original PDF not modified</p>
+                  <strong>Fill package receipt</strong>
+                </div>
+              </div>
+              <dl>
+                <div>
+                  <dt>Artifact</dt>
+                  <dd>Original-untouched fill package</dd>
+                </div>
+                <div>
+                  <dt>Source</dt>
+                  <dd>
+                    {shortHash(fillPackageResult.manifest.source.sourceHash)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Plan</dt>
+                  <dd>
+                    {shortHash(
+                      fillPackageResult.manifest.plan.planHash.replace(
+                        /^sha256:/u,
+                        '',
+                      ),
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Output</dt>
+                  <dd>{shortHash(fillPackageResult.outputHash)}</dd>
+                </div>
+                <div>
+                  <dt>Staged fields</dt>
+                  <dd>
+                    {fillPackageResult.manifest.plan.stagedFields.length}{' '}
+                    reviewed field values
+                  </dd>
+                </div>
+                <div>
+                  <dt>Original PDF modified</dt>
+                  <dd>No</dd>
+                </div>
+                <div>
+                  <dt>Verification</dt>
+                  <dd>JSON round-trip and source/plan binding verified</dd>
+                </div>
+                <div>
+                  <dt>PDF field appearances</dt>
+                  <dd>Not applicable; this artifact does not fill a PDF</dd>
+                </div>
+              </dl>
+              <Button className="w-full" onClick={downloadFillPackage}>
+                <Download aria-hidden="true" /> Download fill package (JSON)
               </Button>
             </div>
           )}
@@ -1521,6 +2014,62 @@ export function FormProofWorkbench() {
             </span>
           </div>
 
+          <div>
+            <p className="section-kicker">Choose the artifact yourself</p>
+            <p className="button-note">
+              WebMCP reports the available strategies but cannot select one or
+              trigger export.
+            </p>
+          </div>
+          <div className="review-checklist" aria-label="Artifact choice">
+            {documentState?.inspection.protection.exportStrategies.map(
+              (strategy) => {
+                const copy = exportStrategyCopy(strategy);
+                const createsPdf = strategy !== 'fill_package';
+                const unavailable =
+                  createsPdf &&
+                  (!validation?.canApprove || hasBlockedHighRiskActions);
+                const strategyId = `export-strategy-${strategy}`;
+                return (
+                  <div className="review-check" key={strategy}>
+                    <input
+                      id={strategyId}
+                      name="export-strategy"
+                      type="radio"
+                      checked={selectedExportStrategy === strategy}
+                      onChange={() => {
+                        setSelectedExportStrategy(strategy);
+                        setActiveContentAcknowledged(false);
+                        setProtectionLossAcknowledged(false);
+                      }}
+                      disabled={exporting || unavailable}
+                    />
+                    <div className="review-check-copy">
+                      <span className="review-check-heading">
+                        <label htmlFor={strategyId}>
+                          <strong>{copy.title}</strong>
+                        </label>
+                        <Badge variant="outline">
+                          {strategy === 'confirmed_plain_derivative_pdf'
+                            ? 'Explicit confirmation'
+                            : strategy === 'fill_package'
+                              ? 'No PDF rewrite'
+                              : 'PDF output'}
+                        </Badge>
+                      </span>
+                      <span className="human-only-note">
+                        {copy.detail}
+                        {unavailable
+                          ? ' This PDF option is unavailable until its validation or native-action blockers are resolved.'
+                          : ''}
+                      </span>
+                    </div>
+                  </div>
+                );
+              },
+            )}
+          </div>
+
           <div className="review-checklist">
             {reviewNames.map((fieldName, index) => {
               const field = formState?.fields[fieldName];
@@ -1534,6 +2083,12 @@ export function FormProofWorkbench() {
                   (issue) =>
                     issue.fieldName === fieldName &&
                     issue.code === 'human_completion_required',
+                ) ?? false;
+              const isRequiredMissing =
+                formState?.validation.issues.some(
+                  (issue) =>
+                    issue.fieldName === fieldName &&
+                    issue.code === 'required_missing',
                 ) ?? false;
               return (
                 <div className="review-check" key={fieldName}>
@@ -1557,20 +2112,24 @@ export function FormProofWorkbench() {
                         <strong>{field?.label ?? fieldName}</strong>
                       </label>
                       <Badge variant="outline">
-                        {isHumanCompletion
-                          ? requiresHumanCompletion
-                            ? 'Complete after export'
-                            : 'Preserved unchanged'
-                          : staged.provenance.kind.replaceAll('_', ' ')}
+                        {isRequiredMissing
+                          ? 'Required field is blank'
+                          : isHumanCompletion
+                            ? requiresHumanCompletion
+                              ? 'Complete after export'
+                              : 'Preserved unchanged'
+                            : staged.provenance.kind.replaceAll('_', ' ')}
                       </Badge>
                     </span>
                     {isHumanCompletion ? (
                       <span className="human-only-note">
-                        {requiresHumanCompletion
-                          ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
-                          : sourceIsBlank
-                            ? 'FormProof will preserve this blank field. Complete it personally in a trusted PDF reader if needed.'
-                            : 'FormProof will preserve the existing value and will not rewrite this field.'}
+                        {isRequiredMissing
+                          ? 'This PDF marks the field as required and it is still blank. Confirm that the fill package remains incomplete and complete the field manually.'
+                          : requiresHumanCompletion
+                            ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
+                            : sourceIsBlank
+                              ? 'FormProof will preserve this blank field. Complete it personally in a trusted PDF reader if needed.'
+                              : 'FormProof will preserve the existing value and will not rewrite this field.'}
                       </span>
                     ) : (
                       <span className="full-diff">
@@ -1588,6 +2147,13 @@ export function FormProofWorkbench() {
                             {formatValue(staged.value, descriptor?.choices)}
                           </b>
                         </span>
+                      </span>
+                    )}
+                    {!isHumanCompletion && isRequiredMissing && (
+                      <span className="human-only-note">
+                        This staged value leaves a PDF-required field blank.
+                        Confirm that the fill package remains incomplete and
+                        complete the field manually.
                       </span>
                     )}
                     {staged?.provenance.rationale && (
@@ -1634,14 +2200,48 @@ export function FormProofWorkbench() {
                 </div>
               </div>
             )}
+            {requiresProtectionLossAcknowledgment && (
+              <div className="review-check">
+                <input
+                  id="review-protection-loss"
+                  type="checkbox"
+                  checked={protectionLossAcknowledged}
+                  onChange={(event) =>
+                    setProtectionLossAcknowledged(event.target.checked)
+                  }
+                  disabled={exporting}
+                />
+                <div className="review-check-copy">
+                  <span className="review-check-heading">
+                    <label htmlFor="review-protection-loss">
+                      <strong>Reader Extensions rights will be removed</strong>
+                    </label>
+                    <Badge variant="outline">Required confirmation</Badge>
+                  </span>
+                  <span className="human-only-note">
+                    I understand this creates an ordinary derivative PDF,
+                    removes the recognized UR/UR3 rights entry, its signature
+                    dictionary, and its declared CMS container. CMS integrity
+                    and signer trust were not verified here; the original PDF
+                    stays unchanged.
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="dialog-safety-note">
-            <ShieldCheck aria-hidden="true" />
+            {selectedExportStrategy === 'fill_package' ? (
+              <FileJson aria-hidden="true" />
+            ) : (
+              <ShieldCheck aria-hidden="true" />
+            )}
             <span>
-              The original bytes stay unchanged. Export writes only this
-              approved draft to a fresh copy, reopens it, and verifies staged
-              values plus appearances. Human-only fields remain untouched.
+              {selectedExportStrategy === 'filled_pdf'
+                ? 'Filled PDF: the original bytes stay unchanged. A new PDF is reopened, its staged values are verified, and normal appearance streams are confirmed present. Visual rendering is not independently checked. Human-only fields remain untouched.'
+                : selectedExportStrategy === 'confirmed_plain_derivative_pdf'
+                  ? 'Confirmed derivative: the original stays unchanged, but the new PDF intentionally loses its recognized Reader Extensions rights. No signature-preservation claim is made.'
+                  : 'Original-untouched fill package: no PDF bytes are written. The JSON package is round-trip checked and bound to this source and plan; it is not a completed PDF form.'}
             </span>
           </div>
 
@@ -1654,18 +2254,33 @@ export function FormProofWorkbench() {
               Cancel
             </Button>
             <Button
-              onClick={() => void approveAndExport()}
-              disabled={!allReviewFieldsConfirmed || exporting}
+              onClick={() => void completeReview()}
+              disabled={
+                !allReviewFieldsConfirmed ||
+                exporting ||
+                selectedExportStrategy === null ||
+                (selectedCreatesPdf &&
+                  (!validation?.canApprove || hasBlockedHighRiskActions))
+              }
             >
               {exporting ? (
                 <>
                   <LoaderCircle className="spin" aria-hidden="true" />
-                  Verifying fresh copy…
+                  Creating reviewed artifact…
                 </>
               ) : (
                 <>
-                  <FileCheck2 aria-hidden="true" />
-                  Approve & create verified copy
+                  {selectedExportStrategy === 'fill_package' ? (
+                    <FileJson aria-hidden="true" />
+                  ) : (
+                    <FileCheck2 aria-hidden="true" />
+                  )}
+                  {selectedExportStrategy === 'filled_pdf'
+                    ? 'Approve & create filled PDF'
+                    : selectedExportStrategy ===
+                        'confirmed_plain_derivative_pdf'
+                      ? 'Confirm & create plain derivative'
+                      : 'Create original-untouched fill package'}
                 </>
               )}
             </Button>

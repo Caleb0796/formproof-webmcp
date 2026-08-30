@@ -2,6 +2,8 @@ import type {
   ApplyResult,
   PdfFieldDescriptor,
   PdfFieldValue,
+  PdfInspection,
+  PdfSignatureImpact,
 } from './pdf-engine.ts';
 
 export type FormFieldType =
@@ -146,7 +148,7 @@ export interface VerificationRecord extends OutputRecord {
   readonly verifiedAt: string;
   readonly fieldValuesMatch: true;
   readonly appearancesPresent: true;
-  readonly signatureIntegrityPreserved: true;
+  readonly signatureImpact: PdfSignatureImpact;
 }
 
 export interface FormState {
@@ -179,6 +181,7 @@ export type StateErrorCode =
   | 'approval_missing'
   | 'approval_stale'
   | 'trusted_export_required'
+  | 'artifact_unavailable'
   | 'output_missing'
   | 'output_stale'
   | 'verification_failed'
@@ -239,7 +242,7 @@ export interface RecordVerificationRequest {
   readonly outputHash: string;
   readonly fieldValuesMatch: boolean;
   readonly appearancesPresent: boolean;
-  readonly signatureIntegrityPreserved: boolean;
+  readonly signatureImpact: PdfSignatureImpact;
   readonly verifiedAt?: string;
 }
 
@@ -262,6 +265,87 @@ export type ExportApprovedPdfResult =
       readonly state: FormState;
       readonly errors: readonly StateError[];
     };
+
+export interface FillPackageField {
+  readonly fieldName: string;
+  readonly label: string;
+  readonly semanticLabelAvailable: boolean;
+  readonly type: FormFieldType;
+  readonly required: boolean;
+  readonly multiSelect: boolean;
+  readonly choices: PdfFieldDescriptor['choices'];
+  readonly widgets: PdfFieldDescriptor['widgets'];
+  readonly page: number | null;
+  readonly rect: PdfFieldDescriptor['rect'];
+  readonly sourceValue: FormFieldValue;
+  readonly proposedValue: FormFieldValue;
+  readonly provenance: Readonly<FieldProvenance>;
+}
+
+export interface FillPackageHumanStep {
+  readonly fieldName: string;
+  readonly label: string;
+  readonly type: FormFieldType;
+  readonly required: boolean;
+  readonly multiSelect: boolean;
+  readonly sourceValue: FormFieldValue;
+  readonly choices: PdfFieldDescriptor['choices'];
+  readonly widgets: PdfFieldDescriptor['widgets'];
+  readonly page: number | null;
+  readonly rect: PdfFieldDescriptor['rect'];
+  readonly reason:
+    | 'human_only'
+    | 'signature'
+    | 'review_required'
+    | 'required_missing';
+}
+
+export interface FillPackageManifest {
+  readonly artifactType: 'original_untouched_fill_package';
+  readonly schemaVersion: 3;
+  readonly createdAt: string;
+  readonly source: {
+    readonly fileName: string;
+    readonly sourceHash: string;
+    readonly byteLength: number;
+    readonly pageCount: number;
+  };
+  readonly sourcePdfModified: false;
+  readonly protection: PdfInspection['protection'];
+  readonly plan: {
+    readonly stateVersion: number;
+    readonly planHash: string;
+    readonly stagedFields: readonly FillPackageField[];
+    readonly humanSteps: readonly FillPackageHumanStep[];
+    readonly confirmedFieldNames: readonly string[];
+    readonly validation: Readonly<ValidationReport>;
+  };
+  readonly limitations: readonly string[];
+}
+
+export interface FillPackageResult {
+  readonly bytes: Uint8Array;
+  readonly outputHash: string;
+  readonly manifest: Readonly<FillPackageManifest>;
+  readonly roundTripVerified: true;
+}
+
+export type ExportFillPackageResult =
+  | {
+      readonly ok: true;
+      readonly state: FormState;
+      readonly result: FillPackageResult;
+    }
+  | {
+      readonly ok: false;
+      readonly state: FormState;
+      readonly errors: readonly StateError[];
+    };
+
+export interface ExportFillPackageRequest {
+  readonly confirmedFieldNames: readonly string[];
+  readonly createdAt?: string;
+}
 
 export interface GateResult {
   readonly open: boolean;
@@ -1274,6 +1358,295 @@ function approvedDraftValues(state: FormState): Record<string, PdfFieldValue> {
   return values;
 }
 
+function cloneProtection(
+  protection: PdfInspection['protection'],
+): PdfInspection['protection'] {
+  return {
+    protectionType: protection.protectionType,
+    allowedMutations: [...protection.allowedMutations],
+    exportStrategies: [...protection.exportStrategies],
+    signatureImpact: protection.signatureImpact,
+    requiresHumanConfirmation: protection.requiresHumanConfirmation,
+    evidence: {
+      ...protection.evidence,
+      permsKeys: [...protection.evidence.permsKeys],
+      usageRightsKeys: [...protection.evidence.usageRightsKeys],
+      byteRanges: protection.evidence.byteRanges.map((range) => [...range]),
+      adbeExtension: protection.evidence.adbeExtension
+        ? { ...protection.evidence.adbeExtension }
+        : null,
+      unknownStructures: [...protection.evidence.unknownStructures],
+    },
+  };
+}
+
+export function getArtifactReviewFieldNames(
+  state: FormState,
+): readonly string[] {
+  const validation = validateDraft(state);
+  return deepFreeze(
+    [
+      ...new Set([
+        ...Object.keys(state.draft),
+        ...validation.issues.map(({ fieldName }) => fieldName),
+        ...Object.keys(state.fields).filter((fieldName) => {
+          const definition = requiredOwnValue(state.fields, fieldName);
+          return definition.humanOnly || definition.type === 'signature';
+        }),
+      ]),
+    ].sort(),
+  );
+}
+
+export async function exportFillPackageFromUi(
+  state: FormState,
+  sourceBytes: Uint8Array,
+  request: ExportFillPackageRequest,
+): Promise<ExportFillPackageResult> {
+  const source = Uint8Array.from(sourceBytes);
+  const sourceHash = await sha256Bytes(source);
+  if (
+    sourceHash !== state.source.sourceHash ||
+    source.byteLength !== state.source.byteLength
+  ) {
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'source_mismatch',
+        message: 'The selected PDF does not match the staged source document.',
+      }),
+    });
+  }
+
+  const { inspectPdf } = await import(
+    // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
+    './pdf-engine.ts'
+  );
+  const inspection = await inspectPdf(source);
+  const inspectedFields = createRecord<Readonly<FormFieldDefinition>>();
+  for (const descriptor of inspection.fields) {
+    inspectedFields[descriptor.name] =
+      createFormFieldDefinitionFromPdf(descriptor);
+  }
+  const calculatedPlanHash = await calculatePlanHash(
+    state.source.sourceHash,
+    state.fields,
+    state.draft,
+  );
+  if (
+    inspection.sourceHash !== state.source.sourceHash ||
+    inspection.pageCount !== state.source.pageCount ||
+    canonicalize(inspectedFields) !== canonicalize(state.fields) ||
+    calculatedPlanHash !== state.planHash
+  ) {
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'plan_mismatch',
+        message:
+          'The staged plan does not match a fresh inspection of the selected PDF.',
+      }),
+    });
+  }
+
+  const validation = validateDraft(state);
+  const errors: StateError[] = [];
+  if (!inspection.protection.exportStrategies.includes('fill_package')) {
+    errors.push({
+      code: 'artifact_unavailable',
+      message:
+        'A fill package is unavailable for this document because its protection is unknown or it has no addressable fallback fields.',
+    });
+  }
+  if (Object.keys(state.draft).length === 0) {
+    errors.push({
+      code: 'invalid_request',
+      message: 'Stage at least one field before creating a fill package.',
+    });
+  }
+
+  const confirmations = new Set(request.confirmedFieldNames);
+  const unknownConfirmations = [...confirmations].filter(
+    (fieldName) => ownValue(state.fields, fieldName) === undefined,
+  );
+  if (
+    confirmations.size !== request.confirmedFieldNames.length ||
+    unknownConfirmations.length > 0
+  ) {
+    errors.push({
+      code: 'invalid_request',
+      message: 'confirmedFieldNames must be unique names from this form.',
+    });
+  }
+  const requiredConfirmations = getArtifactReviewFieldNames(state);
+  const missingReviews = requiredConfirmations.filter(
+    (fieldName) => !confirmations.has(fieldName),
+  );
+  if (missingReviews.length > 0) {
+    errors.push({
+      code: 'review_unconfirmed',
+      message: `Explicitly confirm staged and review fields: ${missingReviews.join(', ')}.`,
+    });
+  }
+  if (errors.length > 0) {
+    return deepFreeze({ ok: false, state, errors: stateErrors(...errors) });
+  }
+
+  const descriptors = new Map(
+    inspection.fields.map((field) => [field.name, field] as const),
+  );
+  const stagedFields = Object.keys(state.draft)
+    .sort()
+    .map((fieldName): FillPackageField => {
+      const definition = requiredOwnValue(state.fields, fieldName);
+      const staged = requiredOwnValue(state.draft, fieldName);
+      const descriptor = descriptors.get(fieldName);
+      return {
+        fieldName,
+        label: definition.label,
+        semanticLabelAvailable: definition.label !== fieldName,
+        type: definition.type,
+        required: definition.required,
+        multiSelect: descriptor?.multiSelect ?? false,
+        choices: descriptor?.choices.map((choice) => ({ ...choice })) ?? [],
+        widgets:
+          descriptor?.widgets.map((widget) => ({
+            ...widget,
+            rect: { ...widget.rect },
+          })) ?? [],
+        page: descriptor?.page ?? null,
+        rect: descriptor?.rect ? { ...descriptor.rect } : null,
+        sourceValue: cloneValue(definition.sourceValue),
+        proposedValue: cloneValue(staged.value),
+        provenance: cloneProvenance(staged.provenance),
+      };
+    });
+  const humanStepNames = [
+    ...new Set([
+      ...validation.reviewFieldNames,
+      ...validation.issues.map(({ fieldName }) => fieldName),
+      ...Object.keys(state.fields).filter((fieldName) => {
+        const definition = requiredOwnValue(state.fields, fieldName);
+        return definition.humanOnly || definition.type === 'signature';
+      }),
+    ]),
+  ].sort();
+  const validationCodesByField = new Map<
+    string,
+    Set<ValidationIssue['code']>
+  >();
+  for (const issue of validation.issues) {
+    const codes = validationCodesByField.get(issue.fieldName) ?? new Set();
+    codes.add(issue.code);
+    validationCodesByField.set(issue.fieldName, codes);
+  }
+  const humanSteps = humanStepNames.map((fieldName): FillPackageHumanStep => {
+    const definition = requiredOwnValue(state.fields, fieldName);
+    const descriptor = descriptors.get(fieldName);
+    return {
+      fieldName,
+      label: definition.label,
+      type: definition.type,
+      required: definition.required,
+      multiSelect: descriptor?.multiSelect ?? false,
+      sourceValue: cloneValue(definition.sourceValue),
+      choices: descriptor?.choices.map((choice) => ({ ...choice })) ?? [],
+      widgets:
+        descriptor?.widgets.map((widget) => ({
+          ...widget,
+          rect: { ...widget.rect },
+        })) ?? [],
+      page: descriptor?.page ?? null,
+      rect: descriptor?.rect ? { ...descriptor.rect } : null,
+      reason:
+        definition.type === 'signature'
+          ? 'signature'
+          : definition.humanOnly
+            ? 'human_only'
+            : validationCodesByField.get(fieldName)?.has('required_missing')
+              ? 'required_missing'
+              : 'review_required',
+    };
+  });
+
+  const limitations = [
+    'The source PDF is not included or modified; match sourceHash before using this plan.',
+    'This package records staged field data and provenance, not a completed or submitted form.',
+    'Choice labels, choice-to-widget mappings, and appearance states come from the AcroForm structure; verify coded or ambiguous options against the original PDF.',
+    'Whole-form completeness is not assessed beyond PDF required flags.',
+    ...(inspection.protection.evidence.xfaPresent
+      ? [
+          'Only AcroForm fallback fields were inspected; XFA captions, scripts, calculations, validation, and layout were not evaluated. Verify every field meaning in the original PDF.',
+        ]
+      : []),
+    ...(stagedFields.some((field) => !field.semanticLabelAvailable)
+      ? [
+          'At least one staged field has no semantic tooltip; use its exact name, page, and rectangle to verify it in the original PDF.',
+        ]
+      : []),
+  ];
+  const manifest = deepFreeze<FillPackageManifest>({
+    artifactType: 'original_untouched_fill_package',
+    schemaVersion: 3,
+    createdAt: request.createdAt ?? new Date().toISOString(),
+    source: {
+      fileName: state.source.fileName,
+      sourceHash: state.source.sourceHash,
+      byteLength: state.source.byteLength,
+      pageCount: state.source.pageCount,
+    },
+    sourcePdfModified: false,
+    protection: cloneProtection(inspection.protection),
+    plan: {
+      stateVersion: state.stateVersion,
+      planHash: state.planHash,
+      stagedFields,
+      humanSteps,
+      confirmedFieldNames: [...confirmations].sort(),
+      validation,
+    },
+    limitations,
+  });
+  const bytes = new TextEncoder().encode(
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+  const decoded = JSON.parse(new TextDecoder().decode(bytes)) as Record<
+    string,
+    unknown
+  >;
+  const decodedSource = decoded.source as Record<string, unknown> | undefined;
+  const decodedPlan = decoded.plan as Record<string, unknown> | undefined;
+  if (
+    decoded.artifactType !== manifest.artifactType ||
+    decodedSource?.sourceHash !== state.source.sourceHash ||
+    decodedPlan?.planHash !== state.planHash ||
+    !Array.isArray(decodedPlan?.stagedFields) ||
+    decodedPlan.stagedFields.length !== stagedFields.length ||
+    canonicalize(decoded) !== canonicalize(manifest)
+  ) {
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'verification_failed',
+        message: 'The fill package failed its JSON round-trip verification.',
+      }),
+    });
+  }
+  return {
+    ok: true,
+    state,
+    result: {
+      bytes,
+      outputHash: await sha256Bytes(bytes),
+      manifest,
+      roundTripVerified: true as const,
+    },
+  };
+}
+
 function verifiedValueMatches(
   expected: PdfFieldValue,
   actual: PdfFieldValue,
@@ -1287,9 +1660,11 @@ function verifiedValueMatches(
   return expected === actual;
 }
 
-export async function exportApprovedPdfFromUi(
+async function exportApprovedPdfWithStrategy(
   state: FormState,
   sourceBytes: Uint8Array,
+  strategy: 'filled_pdf' | 'confirmed_plain_derivative_pdf',
+  humanConfirmedProtectionLoss: boolean,
 ): Promise<ExportApprovedPdfResult> {
   const gate = getExportGate(state);
   if (!gate.open) {
@@ -1311,11 +1686,16 @@ export async function exportApprovedPdfFromUi(
   }
 
   const values = approvedDraftValues(state);
-  const { applyApprovedValues } = await import(
+  const { applyApprovedValues, applyConfirmedDerivativeValues } = await import(
     // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
     './pdf-engine.ts'
   );
-  const applyResult = await applyApprovedValues(source, values);
+  const applyResult =
+    strategy === 'filled_pdf'
+      ? await applyApprovedValues(source, values)
+      : await applyConfirmedDerivativeValues(source, values, {
+          humanConfirmedProtectionLoss,
+        });
   const errors: StateError[] = [];
 
   if (applyResult.sourceHash !== sourceHash) {
@@ -1389,7 +1769,7 @@ export async function exportApprovedPdfFromUi(
     verifiedAt: recordedAt,
     fieldValuesMatch: true as const,
     appearancesPresent: true as const,
-    signatureIntegrityPreserved: true as const,
+    signatureImpact: applyResult.sourceProtection.signatureImpact,
   });
   const releasedState = freezeState({ ...state, output, verification });
   trustedApprovedStates.add(releasedState);
@@ -1399,6 +1779,37 @@ export async function exportApprovedPdfFromUi(
     state: releasedState,
     result: applyResult,
   };
+}
+
+export async function exportApprovedPdfFromUi(
+  state: FormState,
+  sourceBytes: Uint8Array,
+): Promise<ExportApprovedPdfResult> {
+  return exportApprovedPdfWithStrategy(state, sourceBytes, 'filled_pdf', false);
+}
+
+export async function exportApprovedDerivativePdfFromUi(
+  state: FormState,
+  sourceBytes: Uint8Array,
+  options: { readonly humanConfirmedProtectionLoss: boolean },
+): Promise<ExportApprovedPdfResult> {
+  if (!options.humanConfirmedProtectionLoss) {
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'review_unconfirmed',
+        message:
+          'A person must confirm that Reader Extensions usage rights will be removed from the ordinary derivative PDF.',
+      }),
+    });
+  }
+  return exportApprovedPdfWithStrategy(
+    state,
+    sourceBytes,
+    'confirmed_plain_derivative_pdf',
+    true,
+  );
 }
 
 export function getFormContext(state: FormState): FormContext {
