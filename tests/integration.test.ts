@@ -28,6 +28,7 @@ const { inspectPdf } = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
 )) as typeof import('../lib/pdf-engine');
 const {
+  FORMPROOF_WEBMCP_TOOL_NAMES,
   FORMPROOF_MAX_RESPONSE_BYTES,
   FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
   createFieldChoiceCursor,
@@ -252,6 +253,31 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.doesNotMatch(workbench, /appearances (?:are )?verified/iu);
   assert.match(workbench, /normal appearance streams are present/iu);
   assert.match(workbench, /visual rendering is not independently checked/iu);
+});
+
+void test('gives the UI reviewer a way to reject staged proposals', async () => {
+  const workbench = await readFile(
+    new URL('../components/formproof-workbench.tsx', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(workbench, /discardDraftFields/);
+  assert.match(workbench, /Reject proposal/u);
+  assert.match(workbench, /Discard all proposals/u);
+  assert.match(workbench, /Confirm discard.*proposals/u);
+  assert.match(workbench, /if \(discardAllArmed\)/u);
+  assert.match(
+    workbench,
+    /The plan changed, so review closed and every confirmation was cleared/u,
+  );
+  assert.deepEqual(FORMPROOF_WEBMCP_TOOL_NAMES, [
+    'get_pdf_protection',
+    'get_form_context',
+    'get_field_evidence',
+    'stage_form_values',
+    'validate_fill_plan',
+    'start_fill_review',
+  ]);
 });
 
 void test('wires scoped context and artifact-specific review boundaries through the workbench adapter', async () => {

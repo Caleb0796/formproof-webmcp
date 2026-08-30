@@ -16,6 +16,7 @@ import {
   createFormFieldDefinitionFromPdf,
   createFormState,
   discardDraft,
+  discardDraftFields,
   exportApprovedDerivativePdfFromUi,
   exportApprovedPdfFromUi,
   exportFillPackageFromUi,
@@ -627,6 +628,183 @@ void test('stages a batch atomically with CAS and document-hash checks', async (
     ),
     true,
   );
+});
+
+void test('discards selected staged proposals atomically with source and version checks', async () => {
+  const initial = await initialState();
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'full_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+      {
+        fieldName: 'programs',
+        value: ['Health'],
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('discard fixture failed to stage');
+  const state = staged.state;
+
+  const stale = await discardDraftFields(state, {
+    expectedStateVersion: state.stateVersion - 1,
+    expectedSourceHash: 'sha256:other',
+    fieldNames: ['full_name'],
+  });
+  assert.equal(stale.ok, false);
+  if (stale.ok) throw new Error('stale discard unexpectedly succeeded');
+  assert.equal(stale.state, state);
+  assert.deepEqual(
+    stale.errors.map(({ code }) => code),
+    ['stale_state', 'source_mismatch'],
+  );
+
+  const empty = await discardDraftFields(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    fieldNames: [],
+  });
+  assert.equal(empty.ok, false);
+  if (empty.ok) throw new Error('empty discard unexpectedly succeeded');
+  assert.equal(empty.state, state);
+  assert.equal(empty.errors[0].code, 'invalid_request');
+
+  const duplicate = await discardDraftFields(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    fieldNames: ['full_name', 'full_name'],
+  });
+  assert.equal(duplicate.ok, false);
+  if (duplicate.ok) throw new Error('duplicate discard unexpectedly succeeded');
+  assert.equal(duplicate.state, state);
+  assert.equal(duplicate.errors[0].code, 'duplicate_update');
+  assert.deepEqual(Object.keys(duplicate.state.draft).sort(), [
+    'full_name',
+    'programs',
+  ]);
+
+  const mixed = await discardDraftFields(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    fieldNames: ['full_name', 'region'],
+  });
+  assert.equal(mixed.ok, false);
+  if (mixed.ok) throw new Error('mixed discard unexpectedly succeeded');
+  assert.equal(mixed.state, state);
+  assert.equal(mixed.errors[0].code, 'invalid_request');
+  assert.equal(mixed.errors[0].fieldName, 'region');
+  assert.deepEqual(Object.keys(mixed.state.draft).sort(), [
+    'full_name',
+    'programs',
+  ]);
+
+  const single = await discardDraftFields(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    fieldNames: ['full_name'],
+  });
+  assert.equal(single.ok, true);
+  if (!single.ok) throw new Error('single discard failed');
+  assert.equal(single.state.stateVersion, state.stateVersion + 1);
+  assert.notEqual(single.state.planHash, state.planHash);
+  assert.deepEqual(Object.keys(single.state.draft), ['programs']);
+  assert.equal(single.state.validation.stateVersion, single.state.stateVersion);
+  assert.equal(
+    single.state.validation.issues.some(
+      ({ code, fieldName }) =>
+        code === 'required_missing' && fieldName === 'full_name',
+    ),
+    true,
+  );
+  assert.equal(Object.isFrozen(single), true);
+  assert.equal(Object.isFrozen(single.state), true);
+  assert.equal(Object.isFrozen(single.state.draft), true);
+
+  const last = await discardDraftFields(single.state, {
+    expectedStateVersion: single.state.stateVersion,
+    expectedSourceHash: single.state.source.sourceHash,
+    fieldNames: ['programs'],
+  });
+  assert.equal(last.ok, true);
+  if (!last.ok) throw new Error('last discard failed');
+  assert.equal(last.state.stateVersion, single.state.stateVersion + 1);
+  assert.deepEqual(Object.keys(last.state.draft), []);
+  assert.equal(Object.getPrototypeOf(last.state.draft), null);
+  assert.equal(last.state.planHash, initial.planHash);
+  assert.equal(last.state.validation.stateVersion, last.state.stateVersion);
+});
+
+void test('discarding a staged proposal invalidates approval and released output', async () => {
+  const source = await createTextFormPdf('legal_name');
+  const inspection = await inspectPdf(source);
+  const initial = await createFormState(
+    {
+      fileName: 'identity.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    [
+      {
+        name: 'legal_name',
+        label: 'Legal name',
+        type: 'text',
+        required: true,
+        readOnly: false,
+        humanOnly: false,
+        sourceValue: '',
+      },
+    ],
+  );
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'legal_name',
+        value: 'Ada Lovelace',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('release fixture failed to stage');
+  const approved = approveDraftFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    approvedBy: 'local user',
+    confirmedFieldNames: ['legal_name'],
+  });
+  assert.equal(approved.ok, true);
+  if (!approved.ok) throw new Error('release fixture approval failed');
+  const released = await exportApprovedPdfFromUi(approved.state, source);
+  assert.equal(released.ok, true);
+  if (!released.ok) throw new Error('release fixture export failed');
+  assert.notEqual(released.state.approval, null);
+  assert.notEqual(released.state.output, null);
+  assert.notEqual(released.state.verification, null);
+
+  const discarded = await discardDraftFields(released.state, {
+    expectedStateVersion: released.state.stateVersion,
+    expectedSourceHash: released.state.source.sourceHash,
+    fieldNames: ['legal_name'],
+  });
+  assert.equal(discarded.ok, true);
+  if (!discarded.ok) throw new Error('released proposal discard failed');
+  assert.deepEqual(Object.keys(discarded.state.draft), []);
+  assert.equal(discarded.state.approval, null);
+  assert.equal(discarded.state.output, null);
+  assert.equal(discarded.state.verification, null);
+  assert.equal(getReleaseGate(discarded.state).open, false);
 });
 
 void test('rejects duplicate, unknown, read-only, human-only, signature, type, and provenance violations', async () => {

@@ -218,6 +218,10 @@ export interface DiscardDraftRequest {
   readonly expectedSourceHash: string;
 }
 
+export interface DiscardDraftFieldsRequest extends DiscardDraftRequest {
+  readonly fieldNames: readonly string[];
+}
+
 export interface ApproveDraftRequest {
   readonly expectedStateVersion: number;
   readonly expectedSourceHash: string;
@@ -1164,6 +1168,73 @@ export async function discardDraft(
   }
 
   const draft = deepFreeze(createRecord<Readonly<StagedFieldValue>>());
+  const stateVersion = state.stateVersion + 1;
+  const planHash = await calculatePlanHash(
+    state.source.sourceHash,
+    state.fields,
+    draft,
+  );
+  return deepFreeze({
+    ok: true,
+    state: freezeState({
+      source: state.source,
+      fields: state.fields,
+      draft,
+      stateVersion,
+      planHash,
+      validation: buildValidationReport(stateVersion, state.fields, draft),
+      approval: null,
+      output: null,
+      verification: null,
+    }),
+  });
+}
+
+export async function discardDraftFields(
+  state: FormState,
+  request: DiscardDraftFieldsRequest,
+): Promise<WorkflowResult> {
+  const errors = preconditionErrors(
+    state,
+    request.expectedStateVersion,
+    request.expectedSourceHash,
+  );
+  if (errors.length > 0) return workflowFailure(state, ...errors);
+  if (request.fieldNames.length === 0) {
+    return workflowFailure(state, {
+      code: 'invalid_request',
+      message: 'At least one staged field is required.',
+    });
+  }
+
+  const requested = new Set<string>();
+  for (const fieldName of request.fieldNames) {
+    if (requested.has(fieldName)) {
+      errors.push({
+        code: 'duplicate_update',
+        fieldName,
+        message: `${fieldName} appears more than once in the same atomic discard.`,
+      });
+      continue;
+    }
+    requested.add(fieldName);
+    if (ownValue(state.draft, fieldName) === undefined) {
+      errors.push({
+        code: 'invalid_request',
+        fieldName,
+        message: `No staged proposal exists for ${fieldName}.`,
+      });
+    }
+  }
+  if (errors.length > 0) return workflowFailure(state, ...errors);
+
+  const draft = createRecord<Readonly<StagedFieldValue>>();
+  for (const fieldName of Object.keys(state.draft)) {
+    if (!requested.has(fieldName)) {
+      draft[fieldName] = requiredOwnValue(state.draft, fieldName);
+    }
+  }
+  deepFreeze(draft);
   const stateVersion = state.stateVersion + 1;
   const planHash = await calculatePlanHash(
     state.source.sourceHash,

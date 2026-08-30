@@ -14,6 +14,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import {
@@ -39,6 +40,7 @@ import {
   approveDraftFromUi,
   createFormFieldDefinitionFromPdf,
   createFormState,
+  discardDraftFields,
   exportApprovedDerivativePdfFromUi,
   exportApprovedPdfFromUi,
   exportFillPackageFromUi,
@@ -314,6 +316,7 @@ export function FormProofWorkbench() {
   const fillPackageUrlRef = useRef<string | null>(null);
   const reviewLockRef = useRef(false);
   const reviewBindingRef = useRef<ReviewBinding | null>(null);
+  const reviewMutationRef = useRef(false);
   const pendingPlanMutationsRef = useRef(0);
   const loadingRef = useRef(true);
   const exportingRef = useRef(false);
@@ -342,6 +345,8 @@ export function FormProofWorkbench() {
     useState<PdfExportStrategy | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [reviewMutating, setReviewMutating] = useState(false);
+  const [discardAllArmed, setDiscardAllArmed] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toolState, setToolState] = useState<ToolState>({
@@ -366,13 +371,14 @@ export function FormProofWorkbench() {
       setActiveContentAcknowledged(false);
       setProtectionLossAcknowledged(false);
       setSelectedExportStrategy(null);
+      setDiscardAllArmed(false);
     }
     stateRef.current = next;
     setFormState(next);
   }, []);
 
   const closeReview = useCallback(() => {
-    if (exportingRef.current) return;
+    if (exportingRef.current || reviewMutationRef.current) return;
     reviewLockRef.current = false;
     reviewBindingRef.current = null;
     setReviewOpen(false);
@@ -380,6 +386,7 @@ export function FormProofWorkbench() {
     setActiveContentAcknowledged(false);
     setProtectionLossAcknowledged(false);
     setSelectedExportStrategy(null);
+    setDiscardAllArmed(false);
   }, []);
 
   const openReview = useCallback(() => {
@@ -387,7 +394,8 @@ export function FormProofWorkbench() {
     if (
       pendingPlanMutationsRef.current > 0 ||
       loadingRef.current ||
-      exportingRef.current
+      exportingRef.current ||
+      reviewMutationRef.current
     ) {
       setError('Wait for the current form update to finish before review.');
       return false;
@@ -420,6 +428,7 @@ export function FormProofWorkbench() {
     setActiveContentAcknowledged(false);
     setProtectionLossAcknowledged(false);
     setSelectedExportStrategy(strategy);
+    setDiscardAllArmed(false);
     setError(null);
     setReviewOpen(true);
     return true;
@@ -449,6 +458,7 @@ export function FormProofWorkbench() {
     setActiveContentAcknowledged(false);
     setProtectionLossAcknowledged(false);
     setSelectedExportStrategy(null);
+    setDiscardAllArmed(false);
     setError(null);
     setNotice(null);
     return generation;
@@ -520,7 +530,7 @@ export function FormProofWorkbench() {
   );
 
   const loadDemo = useCallback(async () => {
-    if (exportingRef.current) return;
+    if (exportingRef.current || reviewMutationRef.current) return;
     const generation = beginLoad();
     try {
       const response = await fetch(DEMO_URL);
@@ -952,9 +962,9 @@ export function FormProofWorkbench() {
       const file = event.target.files?.[0];
       event.target.value = '';
       if (!file) return;
-      if (exportingRef.current) {
+      if (exportingRef.current || reviewMutationRef.current) {
         setError(
-          'Wait for the verified export to finish before loading a PDF.',
+          'Wait for the current review update or verified export to finish before loading a PDF.',
         );
         return;
       }
@@ -1117,8 +1127,77 @@ export function FormProofWorkbench() {
     (!requiresActiveContentAcknowledgment || activeContentAcknowledged) &&
     (!requiresProtectionLossAcknowledgment || protectionLossAcknowledged);
 
+  const rejectProposals = useCallback(
+    async (fieldNames: readonly string[]) => {
+      if (exportingRef.current || reviewMutationRef.current) return;
+      const current = stateRef.current;
+      const binding = reviewBindingRef.current;
+      if (
+        !current ||
+        !binding ||
+        !reviewLockRef.current ||
+        fieldNames.length === 0 ||
+        binding.sourceHash !== current.source.sourceHash ||
+        binding.planHash !== current.planHash ||
+        binding.stateVersion !== current.stateVersion
+      ) {
+        setError(
+          'The fill plan changed. Reopen review before rejecting a proposal.',
+        );
+        return;
+      }
+
+      reviewMutationRef.current = true;
+      pendingPlanMutationsRef.current += 1;
+      setReviewMutating(true);
+      setError(null);
+      try {
+        const result = await discardDraftFields(current, {
+          expectedStateVersion: current.stateVersion,
+          expectedSourceHash: current.source.sourceHash,
+          fieldNames,
+        });
+        if (
+          !mountedRef.current ||
+          stateRef.current !== current ||
+          !reviewLockRef.current ||
+          reviewBindingRef.current !== binding ||
+          loadingRef.current
+        ) {
+          return;
+        }
+        if (!result.ok) {
+          setError(result.errors.map((item) => item.message).join(' '));
+          return;
+        }
+
+        const discardedAll =
+          fieldNames.length === Object.keys(current.draft).length;
+        const fieldLabel =
+          current.fields[fieldNames[0]]?.label ?? fieldNames[0];
+        commitState(result.state);
+        resetOutput();
+        setNotice(
+          `${discardedAll ? `All ${fieldNames.length} proposals discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared.`,
+        );
+      } catch (caught) {
+        if (!mountedRef.current) return;
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : 'The staged proposal could not be rejected.',
+        );
+      } finally {
+        pendingPlanMutationsRef.current -= 1;
+        reviewMutationRef.current = false;
+        if (mountedRef.current) setReviewMutating(false);
+      }
+    },
+    [commitState, resetOutput],
+  );
+
   const completeReview = useCallback(async () => {
-    if (exportingRef.current) return;
+    if (exportingRef.current || reviewMutationRef.current) return;
     const current = stateRef.current;
     const source = sourceBytesRef.current;
     const inspection = inspectionRef.current;
@@ -1990,14 +2069,17 @@ export function FormProofWorkbench() {
         open={reviewOpen}
         onOpenChange={(open) => (open ? openReview() : closeReview())}
       >
-        <DialogContent className="review-dialog" showCloseButton={!exporting}>
+        <DialogContent
+          className="review-dialog"
+          showCloseButton={!exporting && !reviewMutating}
+        >
           <DialogHeader>
             <p className="section-kicker">UI approval and export gate</p>
             <DialogTitle>Review the exact plan</DialogTitle>
             <DialogDescription>
-              Confirm every changed or human-only field. Approval is bound to
-              this source hash, plan hash, and revision; any later change
-              invalidates it.
+              Confirm or reject every proposed change, then confirm any
+              human-only field. Approval is bound to this source hash, plan
+              hash, and revision; any later change invalidates it.
             </DialogDescription>
           </DialogHeader>
 
@@ -2042,7 +2124,7 @@ export function FormProofWorkbench() {
                         setActiveContentAcknowledged(false);
                         setProtectionLossAcknowledged(false);
                       }}
-                      disabled={exporting || unavailable}
+                      disabled={exporting || reviewMutating || unavailable}
                     />
                     <div className="review-check-copy">
                       <span className="review-check-heading">
@@ -2104,7 +2186,7 @@ export function FormProofWorkbench() {
                         return next;
                       });
                     }}
-                    disabled={exporting}
+                    disabled={exporting || reviewMutating}
                   />
                   <div className="review-check-copy">
                     <span className="review-check-heading">
@@ -2169,6 +2251,18 @@ export function FormProofWorkbench() {
                         </ul>
                       </div>
                     )}
+                    {staged && (
+                      <Button
+                        type="button"
+                        className="self-start"
+                        variant="destructive"
+                        size="xs"
+                        onClick={() => void rejectProposals([fieldName])}
+                        disabled={exporting || reviewMutating}
+                      >
+                        Reject proposal
+                      </Button>
+                    )}
                   </div>
                 </div>
               );
@@ -2182,7 +2276,7 @@ export function FormProofWorkbench() {
                   onChange={(event) =>
                     setActiveContentAcknowledged(event.target.checked)
                   }
-                  disabled={exporting}
+                  disabled={exporting || reviewMutating}
                 />
                 <div className="review-check-copy">
                   <span className="review-check-heading">
@@ -2209,7 +2303,7 @@ export function FormProofWorkbench() {
                   onChange={(event) =>
                     setProtectionLossAcknowledged(event.target.checked)
                   }
-                  disabled={exporting}
+                  disabled={exporting || reviewMutating}
                 />
                 <div className="review-check-copy">
                   <span className="review-check-heading">
@@ -2247,9 +2341,31 @@ export function FormProofWorkbench() {
 
           <DialogFooter>
             <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                const fieldNames = Object.keys(formState?.draft ?? {});
+                if (discardAllArmed) {
+                  void rejectProposals(fieldNames);
+                } else {
+                  setDiscardAllArmed(true);
+                }
+              }}
+              disabled={
+                exporting ||
+                reviewMutating ||
+                Object.keys(formState?.draft ?? {}).length === 0
+              }
+            >
+              <Trash2 aria-hidden="true" />{' '}
+              {discardAllArmed
+                ? `Confirm discard ${Object.keys(formState?.draft ?? {}).length} proposals`
+                : 'Discard all proposals'}
+            </Button>
+            <Button
               variant="outline"
               onClick={closeReview}
-              disabled={exporting}
+              disabled={exporting || reviewMutating}
             >
               Cancel
             </Button>
@@ -2258,6 +2374,7 @@ export function FormProofWorkbench() {
               disabled={
                 !allReviewFieldsConfirmed ||
                 exporting ||
+                reviewMutating ||
                 selectedExportStrategy === null ||
                 (selectedCreatesPdf &&
                   (!validation?.canApprove || hasBlockedHighRiskActions))
