@@ -2285,6 +2285,158 @@ void test('reports adapter issues omitted before byte bounding', async () => {
   assert.ok(serializedBytes(response) <= FORMPROOF_MAX_RESPONSE_BYTES);
 });
 
+void test('rejects a pre-aborted invocation before adapter execution while preserving legacy calls', async () => {
+  let contextCalls = 0;
+  const receivedSignals: AbortSignal[] = [];
+  const adapter = createAdapter({
+    getFormContext: async (_input, context) => {
+      contextCalls += 1;
+      receivedSignals.push(context.signal);
+      return success({ fields: [] });
+    },
+  });
+  const { registration, tools } = await captureTools(adapter);
+  const context = byName(tools, 'get_form_context');
+  const invocation = new AbortController();
+  invocation.abort();
+
+  const aborted = await context.execute({}, { signal: invocation.signal });
+  assert.equal(aborted.ok, false);
+  assert.equal(aborted.error.code, 'OPERATION_ABORTED');
+  assert.equal(aborted.nextAction, 'none');
+  assert.equal(contextCalls, 0);
+  assert.equal(registration.signal.aborted, false);
+
+  const legacy = await context.execute({});
+  assert.equal(legacy.ok, true);
+  assert.equal(contextCalls, 1);
+  assert.deepEqual(receivedSignals, [registration.signal]);
+  assert.equal(registration.signal.aborted, false);
+});
+
+void test('isolates a cancelled invocation from concurrent and later calls', async () => {
+  const calls: string[] = [];
+  let cancelledContextSignal: AbortSignal | undefined;
+  let releaseCancelled: () => void = () => undefined;
+  let markCancelledStarted!: () => void;
+  const cancelledStarted = new Promise<void>((resolve) => {
+    markCancelledStarted = resolve;
+  });
+  const adapter = createAdapter({
+    getFormContext: async (input, context) => {
+      const call = input.queries?.[0] ?? 'legacy';
+      calls.push(call);
+      if (call !== 'cancelled') return success({ call });
+
+      cancelledContextSignal = context.signal;
+      await new Promise<void>((resolve) => {
+        releaseCancelled = () => resolve();
+        context.signal.addEventListener('abort', releaseCancelled, {
+          once: true,
+        });
+        markCancelledStarted();
+      });
+      return success({ call });
+    },
+  });
+  const { registration, tools } = await captureTools(adapter);
+  const context = byName(tools, 'get_form_context');
+  const cancelledInvocation = new AbortController();
+  const siblingInvocation = new AbortController();
+
+  const cancelledCall = context.execute(
+    { queries: ['cancelled'] },
+    { signal: cancelledInvocation.signal },
+  );
+  await cancelledStarted;
+  const sibling = await context.execute(
+    { queries: ['sibling'] },
+    { signal: siblingInvocation.signal },
+  );
+  assert.equal(sibling.ok, true);
+  assert.ok(cancelledContextSignal);
+  assert.notEqual(cancelledContextSignal, cancelledInvocation.signal);
+  assert.notEqual(cancelledContextSignal, registration.signal);
+
+  cancelledInvocation.abort();
+  const adapterObservedAbort = cancelledContextSignal.aborted;
+  releaseCancelled();
+  const cancelled = await cancelledCall;
+
+  assert.equal(adapterObservedAbort, true);
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.error.code, 'OPERATION_ABORTED');
+  assert.equal(cancelled.nextAction, 'refresh_form_context');
+  assert.match(cancelled.error.message, /work may have completed/u);
+  assert.equal(registration.signal.aborted, false);
+  assert.equal(siblingInvocation.signal.aborted, false);
+
+  const afterward = await context.execute({ queries: ['after'] });
+  assert.equal(afterward.ok, true);
+  assert.deepEqual(calls, ['cancelled', 'sibling', 'after']);
+});
+
+void test('cleanup aborts every in-flight invocation without aborting caller signals', async () => {
+  const contextSignals = new Map<string, AbortSignal>();
+  const releases = new Map<string, () => void>();
+  let startedCount = 0;
+  let markAllStarted!: () => void;
+  const allStarted = new Promise<void>((resolve) => {
+    markAllStarted = resolve;
+  });
+  const adapter = createAdapter({
+    getFormContext: async (input, context) => {
+      const call = input.queries?.[0];
+      assert.ok(call);
+      contextSignals.set(call, context.signal);
+      await new Promise<void>((resolve) => {
+        const release = () => resolve();
+        releases.set(call, release);
+        context.signal.addEventListener('abort', release, { once: true });
+        startedCount += 1;
+        if (startedCount === 2) markAllStarted();
+      });
+      return success({ call });
+    },
+  });
+  const { registration, tools } = await captureTools(adapter);
+  const context = byName(tools, 'get_form_context');
+  const firstInvocation = new AbortController();
+  const secondInvocation = new AbortController();
+
+  const firstCall = context.execute(
+    { queries: ['first'] },
+    { signal: firstInvocation.signal },
+  );
+  const secondCall = context.execute(
+    { queries: ['second'] },
+    { signal: secondInvocation.signal },
+  );
+  await allStarted;
+
+  registration.cleanup();
+  const adaptersObservedAbort = [...contextSignals.values()].every(
+    (signal) => signal.aborted,
+  );
+  for (const release of releases.values()) release();
+  const responses = await Promise.all([firstCall, secondCall]);
+
+  assert.equal(adaptersObservedAbort, true);
+  assert.equal(registration.signal.aborted, true);
+  assert.equal(firstInvocation.signal.aborted, false);
+  assert.equal(secondInvocation.signal.aborted, false);
+  assert.equal(contextSignals.size, 2);
+  assert.notEqual(contextSignals.get('first'), contextSignals.get('second'));
+  assert.notEqual(contextSignals.get('first'), registration.signal);
+  assert.notEqual(contextSignals.get('second'), registration.signal);
+  for (const response of responses) {
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'OPERATION_ABORTED');
+    assert.equal(response.nextAction, 'refresh_form_context');
+    assert.match(response.error.message, /work may have completed/u);
+  }
+});
+
 void test('cleanup aborts every registered tool and prevents later execution', async () => {
   let contextCalls = 0;
   const adapter = createAdapter({

@@ -158,6 +158,10 @@ export interface FormProofExecutionContext {
   signal: AbortSignal;
 }
 
+export interface WebMcpToolExecutionOptions {
+  readonly signal: AbortSignal;
+}
+
 export interface WebMcpToolDefinition {
   name: FormProofWebMcpToolName;
   title: string;
@@ -167,7 +171,10 @@ export interface WebMcpToolDefinition {
     readOnlyHint: boolean;
     untrustedContentHint: boolean;
   };
-  execute(input: unknown): Promise<FormProofToolResponse>;
+  execute(
+    input: unknown,
+    options?: WebMcpToolExecutionOptions,
+  ): Promise<FormProofToolResponse>;
 }
 
 export interface WebMcpModelContext {
@@ -1619,9 +1626,12 @@ function createToolExecutor(
   name: FormProofWebMcpToolName,
   adapter: FormProofWebMcpAdapter,
   awaitVisibleCommit: () => void | Promise<void>,
-  signal: AbortSignal,
-): (input: unknown) => Promise<FormProofToolResponse> {
-  return async (input) => {
+  lifecycleSignal: AbortSignal,
+): WebMcpToolDefinition['execute'] {
+  const execute = async (
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<FormProofToolResponse> => {
     if (signal.aborted) {
       return failureResponse('OPERATION_ABORTED', null, null, 'none');
     }
@@ -1719,7 +1729,8 @@ function createToolExecutor(
         'OPERATION_ABORTED',
         readResultStateVersion(result, parsedInput),
         readResultSourceHash(result, parsedInput),
-        'none',
+        'refresh_form_context',
+        'The request was aborted after work may have completed. Refresh form context before retrying.',
       );
     }
 
@@ -1740,7 +1751,8 @@ function createToolExecutor(
         'OPERATION_ABORTED',
         readResultStateVersion(result, parsedInput),
         readResultSourceHash(result, parsedInput),
-        'none',
+        'refresh_form_context',
+        'The request was aborted after work may have completed. Refresh form context before retrying.',
       );
     }
 
@@ -1754,6 +1766,38 @@ function createToolExecutor(
         'none',
       );
     }
+  };
+
+  return (input, options) => {
+    const execution = createExecutionSignal(lifecycleSignal, options?.signal);
+    return execute(input, execution.signal).finally(() => execution.dispose());
+  };
+}
+
+function createExecutionSignal(
+  lifecycleSignal: AbortSignal,
+  invocationSignal: AbortSignal | undefined,
+): { signal: AbortSignal; dispose(): void } {
+  if (invocationSignal === undefined || invocationSignal === lifecycleSignal) {
+    return { signal: lifecycleSignal, dispose: () => undefined };
+  }
+
+  const controller = new AbortController();
+  const abortFromLifecycle = () => controller.abort(lifecycleSignal.reason);
+  const abortFromInvocation = () => controller.abort(invocationSignal.reason);
+  lifecycleSignal.addEventListener('abort', abortFromLifecycle, { once: true });
+  invocationSignal.addEventListener('abort', abortFromInvocation, {
+    once: true,
+  });
+  if (lifecycleSignal.aborted) abortFromLifecycle();
+  else if (invocationSignal.aborted) abortFromInvocation();
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      lifecycleSignal.removeEventListener('abort', abortFromLifecycle);
+      invocationSignal.removeEventListener('abort', abortFromInvocation);
+    },
   };
 }
 
