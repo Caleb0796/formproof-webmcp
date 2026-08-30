@@ -125,6 +125,15 @@ function formatValue(
     : 'Blank';
 }
 
+function formatFieldLocation(
+  field: PdfInspection['fields'][number] | undefined,
+): string {
+  const page = field?.page == null ? 'page unavailable' : `page ${field.page}`;
+  if (field?.rect == null) return `${page}; rectangle unavailable`;
+  const { x, y, width, height } = field.rect;
+  return `${page}; rectangle x ${x.toFixed(1)}, y ${y.toFixed(1)}, width ${width.toFixed(1)}, height ${height.toFixed(1)} PDF points`;
+}
+
 function isBlankValue(value: FormFieldValue): boolean {
   return (
     value === null ||
@@ -2060,6 +2069,8 @@ export function FormProofWorkbench() {
               {draftEntries.map((entry) => {
                 const field = formState?.fields[entry.fieldName];
                 const descriptor = descriptorByName.get(entry.fieldName);
+                const requiresIdentityReview =
+                  (entry.identityReviewReasons?.length ?? 0) > 0;
                 return (
                   <div className="draft-card" key={entry.fieldName}>
                     <div className="draft-card-heading">
@@ -2067,7 +2078,9 @@ export function FormProofWorkbench() {
                       <Badge variant="outline">
                         {entry.actor === 'human'
                           ? 'Human locked'
-                          : `${Math.round(entry.provenance.confidence * 100)}%`}
+                          : requiresIdentityReview
+                            ? 'Verify field identity'
+                            : `${Math.round(entry.provenance.confidence * 100)}%`}
                       </Badge>
                     </div>
                     <div className="mini-diff">
@@ -2085,6 +2098,14 @@ export function FormProofWorkbench() {
                         ? 'human correction · agent locked for this session'
                         : entry.provenance.kind.replaceAll('_', ' ')}
                     </small>
+                    {requiresIdentityReview && (
+                      <small className="human-only-note">
+                        A non-authoritative discovery hint can recall this
+                        candidate, but it is not a label or evidence. Verify the
+                        field in the untouched original PDF at{' '}
+                        {formatFieldLocation(descriptor)} before export.
+                      </small>
+                    )}
                     {entry.provenance.evidence && (
                       <ul className="evidence-list compact-evidence">
                         {entry.provenance.evidence.slice(0, 2).map((item) => (
@@ -2320,8 +2341,10 @@ export function FormProofWorkbench() {
             <DialogTitle>Review the exact plan</DialogTitle>
             <DialogDescription>
               Confirm, correct, or reject every proposed change, then confirm
-              any human-only field. Approval is bound to this source hash, plan
-              hash, and revision; any later change invalidates it.
+              any human-only field and verify every field found through a
+              non-authoritative discovery fallback. Approval is bound to this
+              source hash, plan hash, and revision; any later change invalidates
+              it.
             </DialogDescription>
           </DialogHeader>
 
@@ -2402,6 +2425,8 @@ export function FormProofWorkbench() {
               const checkboxId = `review-field-${index}`;
               const isHumanCompletion = !staged;
               const isHumanPinned = staged?.actor === 'human';
+              const requiresIdentityReview =
+                (staged?.identityReviewReasons?.length ?? 0) > 0;
               const canCorrect =
                 staged?.actor === 'agent' &&
                 field !== undefined &&
@@ -2440,18 +2465,24 @@ export function FormProofWorkbench() {
                   <div className="review-check-copy">
                     <span className="review-check-heading">
                       <label htmlFor={checkboxId}>
-                        <strong>{field?.label ?? fieldName}</strong>
+                        <strong>
+                          {requiresIdentityReview
+                            ? `Verify field identity — ${field?.label ?? fieldName}`
+                            : (field?.label ?? fieldName)}
+                        </strong>
                       </label>
                       <Badge variant="outline">
                         {isHumanPinned
                           ? 'Human correction · agent locked'
-                          : isRequiredMissing
-                            ? 'Required field is blank'
-                            : isHumanCompletion
-                              ? requiresHumanCompletion
-                                ? 'Complete after export'
-                                : 'Preserved unchanged'
-                              : staged.provenance.kind.replaceAll('_', ' ')}
+                          : requiresIdentityReview
+                            ? 'Identity check required'
+                            : isRequiredMissing
+                              ? 'Required field is blank'
+                              : isHumanCompletion
+                                ? requiresHumanCompletion
+                                  ? 'Complete after export'
+                                  : 'Preserved unchanged'
+                                : staged.provenance.kind.replaceAll('_', ' ')}
                       </Badge>
                     </span>
                     {isHumanCompletion ? (
@@ -2480,6 +2511,15 @@ export function FormProofWorkbench() {
                             {formatValue(staged.value, descriptor?.choices)}
                           </b>
                         </span>
+                      </span>
+                    )}
+                    {requiresIdentityReview && (
+                      <span className="human-only-note">
+                        This candidate can be recalled by a non-authoritative
+                        discovery hint. That hint is not the field label and is
+                        not evidence. Open the untouched original PDF and verify
+                        the displayed field at {formatFieldLocation(descriptor)}
+                        before checking this box.
                       </span>
                     )}
                     {!isHumanCompletion && isRequiredMissing && (

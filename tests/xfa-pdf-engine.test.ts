@@ -51,6 +51,31 @@ async function xfaPdf(
   });
 }
 
+async function textPdf(
+  fieldName: string,
+  tooltip: string | null = null,
+): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const field = document.getForm().createTextField(fieldName);
+  if (tooltip !== null) {
+    field.acroField.dict.set(PDFName.of('TU'), PDFString.of(tooltip));
+  }
+  field.addToPage(page, {
+    x: 40,
+    y: 700,
+    width: 240,
+    height: 24,
+    borderWidth: 1,
+    borderColor: rgb(0, 0, 0),
+  });
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
 async function xfaRadioPdf(template: string): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([612, 792]);
@@ -125,6 +150,98 @@ void test('attaches bounded XFA semantics by exact SOM name without changing the
       error instanceof PdfEngineError && error.code === 'PDF_XFA_UNSUPPORTED',
   );
   assert.deepEqual(source, snapshot);
+});
+
+void test('keeps disabled XFA speak discovery-only without changing field authority or protection', async () => {
+  const discoveryText = 'First name and middle initial';
+  const source = await xfaPdf(`<?xml version="1.0" encoding="UTF-8"?>
+<template xmlns="http://www.xfa.org/schema/xfa-template/3.6/">
+  <subform name="topmostSubform"><subform name="Page1">
+    <field name="f1_01">
+      <assist><speak disable="1" priority="custom">${discoveryText}</speak></assist>
+    </field>
+  </subform></subform>
+</template>`);
+
+  const inspection = await inspectPdf(source);
+  const field = inspection.fields[0];
+  const definition = createFormFieldDefinitionFromPdf(field);
+
+  assert.equal(field.name, FIELD_NAME);
+  assert.equal(field.xfaSomNameMatched, true);
+  assert.equal(field.xfaSpeak, null);
+  assert.equal(field.xfaCaption, null);
+  assert.deepEqual(field.discoveryAliases, [
+    { value: discoveryText, source: 'xfa_disabled_speak' },
+  ]);
+  assert.equal(field.humanOnly, false);
+  assert.equal(field.readOnly, false);
+  assert.equal(definition.label, FIELD_NAME);
+  assert.deepEqual(definition.identityReviewReasons, ['xfa_disabled_speak']);
+  assert.equal(inspection.protection.protectionType, 'none');
+  assert.deepEqual(inspection.protection.allowedMutations, [
+    'inspect_fields',
+    'stage_field_values',
+    'create_fill_package',
+  ]);
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+  assert.equal(inspection.protection.signatureImpact, 'none');
+  assert.equal(inspection.protection.requiresHumanConfirmation, false);
+  assert.equal(inspection.protection.evidence.xfaPresent, true);
+});
+
+void test('suppresses disabled XFA discovery text behind any real tooltip', async () => {
+  const template = `<?xml version="1.0" encoding="UTF-8"?>
+<template xmlns="http://www.xfa.org/schema/xfa-template/3.6/">
+  <subform name="topmostSubform"><subform name="Page1">
+    <field name="f1_01">
+      <assist><speak disable="1">Untrusted nearby instruction</speak></assist>
+    </field>
+  </subform></subform>
+</template>`;
+
+  for (const tooltip of [
+    'Printed applicant name',
+    `Detailed authoritative PDF help ${'x'.repeat(200)}`,
+  ]) {
+    const inspection = await inspectPdf(await xfaPdf(template, tooltip));
+    const field = inspection.fields[0];
+
+    assert.equal(field.xfaSpeak, null);
+    assert.equal(field.discoveryAliases, undefined);
+  }
+});
+
+void test('adds only an exact whole-token SSN discovery alias', async () => {
+  const exactInspection = await inspectPdf(await textPdf('Applicant SSN 1'));
+  const exactField = exactInspection.fields[0];
+
+  assert.deepEqual(exactField.discoveryAliases, [
+    {
+      value: 'social security number',
+      source: 'standard_initialism',
+    },
+  ]);
+  assert.equal(exactField.xfaSpeak, null);
+  assert.equal(exactField.xfaCaption, null);
+  assert.equal(
+    createFormFieldDefinitionFromPdf(exactField).label,
+    'Applicant SSN 1',
+  );
+
+  for (const nearName of [
+    'Applicant SSN1',
+    'ApplicantSSN',
+    'Applicant SSNs',
+    'Applicant ssn 1',
+  ]) {
+    const inspection = await inspectPdf(await textPdf(nearName));
+    assert.equal(
+      inspection.fields[0].discoveryAliases,
+      undefined,
+      `${nearName} must not expand as SSN`,
+    );
+  }
 });
 
 void test('rejects agent staging when XFA field restrictions cannot be resolved', async () => {

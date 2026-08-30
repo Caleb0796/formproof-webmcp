@@ -16,6 +16,8 @@ const MAX_SOM_CANDIDATES = 10_000;
 const MAX_GENERATED_SOM_CHARACTERS = 2 * 1024 * 1024;
 const MAX_SPEAK_TEXT = 2_000;
 const MAX_CAPTION_TEXT = 512;
+const MAX_DISCOVERY_SPEAK_TEXT = 180;
+const MAX_DISCOVERY_SPEAK_CHARACTERS = 256 * 1024;
 const XFA_TEMPLATE_NAMESPACES = new Set([
   'http://www.xfa.org/schema/xfa-template/3.3/',
   'http://www.xfa.org/schema/xfa-template/3.6/',
@@ -27,6 +29,7 @@ const XML_NAME_WITHOUT_COLON =
 export interface XfaFieldSemantics {
   readonly speak: string | null;
   readonly caption: string | null;
+  readonly discoverySpeak?: string;
 }
 
 export type XfaSemanticsUnavailableReason =
@@ -659,6 +662,18 @@ function effectiveCaption(terminal: TerminalState): string | null {
     : terminal.caption;
 }
 
+function discoverySpeak(terminal: TerminalState): string | null {
+  const value = terminal.customSpeak;
+  return terminal.speakDisabled &&
+    terminal.speakControlSupported &&
+    (terminal.speakPriority === null || terminal.speakPriority === 'custom') &&
+    value !== null &&
+    value.length <= MAX_DISCOVERY_SPEAK_TEXT &&
+    /[\p{L}\p{N}]/u.test(value)
+    ? value
+    : null;
+}
+
 function createCollector(limit: number): TextCollector {
   return { value: '', pendingSpace: false, overflowed: false, limit };
 }
@@ -719,6 +734,7 @@ function parseTemplate(xml: string): XfaSemanticsResult {
   let nodeCount = 0;
   let candidateCount = 0;
   let generatedSomCharacterCount = 0;
+  let discoverySpeakCharacterCount = 0;
   let duplicateCount = 0;
 
   const parser = new SaxesParser({ xmlns: true });
@@ -1037,17 +1053,22 @@ function parseTemplate(xml: string): XfaSemanticsResult {
       parent?.assistFor
     ) {
       const disable = tag.local === 'speak' ? attribute(tag, 'disable') : null;
+      const priority =
+        tag.local === 'speak' ? attribute(tag, 'priority') : null;
       frame.capture = {
         kind: tag.local,
         terminal: parent.assistFor,
         collector: createCollector(MAX_SPEAK_TEXT),
-        priority: tag.local === 'speak' ? attribute(tag, 'priority') : null,
+        priority,
         disabled: disable === '1',
         controlSupported:
           tag.local !== 'speak' ||
-          disable === null ||
-          disable === '0' ||
-          disable === '1',
+          ((disable === null || disable === '0' || disable === '1') &&
+            (priority === null ||
+              priority === 'custom' ||
+              priority === 'caption' ||
+              priority === 'name' ||
+              priority === 'toolTip')),
         hasNestedElement: false,
       };
       captureStack.push(frame.capture);
@@ -1119,9 +1140,19 @@ function parseTemplate(xml: string): XfaSemanticsResult {
     }
 
     if (frame.terminal) {
+      const discoveryOnlySpeak = discoverySpeak(frame.terminal);
+      if (discoveryOnlySpeak !== null) {
+        discoverySpeakCharacterCount += discoveryOnlySpeak.length;
+        if (discoverySpeakCharacterCount > MAX_DISCOVERY_SPEAK_CHARACTERS) {
+          throw new XfaUnavailableError('template_semantic_budget_exceeded');
+        }
+      }
       const semantics: XfaFieldSemantics = {
         speak: effectiveSpeak(frame.terminal),
         caption: effectiveCaption(frame.terminal),
+        ...(discoveryOnlySpeak === null
+          ? {}
+          : { discoverySpeak: discoveryOnlySpeak }),
       };
       if (frame.terminal.humanOnly) {
         humanOnlyExactSomNames.add(frame.terminal.somName);

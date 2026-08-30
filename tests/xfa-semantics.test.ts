@@ -772,7 +772,15 @@ void test('resolves effective speak prompts from disable and priority', async ()
     'Tooltip prompt',
   );
   assert.equal(result.byExactSomName.get('Disabled[0]')?.speak, null);
+  assert.equal(
+    result.byExactSomName.get('Disabled[0]')?.discoverySpeak,
+    undefined,
+  );
   assert.equal(result.byExactSomName.get('InvalidDisable[0]')?.speak, null);
+  assert.equal(
+    result.byExactSomName.get('InvalidDisable[0]')?.discoverySpeak,
+    undefined,
+  );
   assert.equal(
     result.byExactSomName.get('CaptionFallback[0]')?.speak,
     'Caption fallback custom',
@@ -785,6 +793,89 @@ void test('resolves effective speak prompts from disable and priority', async ()
     result.byExactSomName.get('CustomFallback[0]')?.speak,
     'Custom fallback tooltip',
   );
+});
+
+void test('accepts only bounded direct disabled custom speak as discovery text', async () => {
+  const boundaryText = 'A'.repeat(180);
+  const document = await documentWithTemplate(`
+    <template xmlns="${XFA_NAMESPACE}" xmlns:h="http://www.w3.org/1999/xhtml">
+      <field name="DefaultPriority">
+        <assist><speak disable="1"> First name   and middle initial </speak></assist>
+      </field>
+      <field name="CustomPriority">
+        <assist><speak disable="1" priority="custom">Employer identification number</speak></assist>
+      </field>
+      <field name="Boundary">
+        <assist><speak disable="1">${boundaryText}</speak></assist>
+      </field>
+      <field name="CaptionPriority">
+        <assist><speak disable="1" priority="caption">Caption-derived hint</speak></assist>
+      </field>
+      <field name="NamePriority">
+        <assist><speak disable="1" priority="name">Name-derived hint</speak></assist>
+      </field>
+      <field name="ToolTipPriority">
+        <assist><speak disable="1" priority="toolTip">Tooltip-derived hint</speak></assist>
+      </field>
+      <field name="UnknownPriority">
+        <assist><speak disable="1" priority="future">Unknown-priority hint</speak></assist>
+      </field>
+      <field name="EnabledByDefault">
+        <assist><speak>Visible prompt</speak></assist>
+      </field>
+      <field name="ExplicitlyEnabled">
+        <assist><speak disable="0">Visible prompt</speak></assist>
+      </field>
+      <field name="UnknownDisable">
+        <assist><speak disable="true">Untrusted hidden prompt</speak></assist>
+      </field>
+      <field name="Nested">
+        <assist><speak disable="1">Pay <h:strong>nothing</h:strong> now</speak></assist>
+      </field>
+      <field name="TooLong">
+        <assist><speak disable="1">${'B'.repeat(181)}</speak></assist>
+      </field>
+      <field name="PunctuationOnly">
+        <assist><speak disable="1">--- ... !!!</speak></assist>
+      </field>
+    </template>
+  `);
+
+  const result = extractXfaSemantics(document);
+
+  assert.equal(result.status, 'available');
+  assert.deepEqual(result.byExactSomName.get('DefaultPriority[0]'), {
+    speak: null,
+    caption: null,
+    discoverySpeak: 'First name and middle initial',
+  });
+  assert.deepEqual(result.byExactSomName.get('CustomPriority[0]'), {
+    speak: null,
+    caption: null,
+    discoverySpeak: 'Employer identification number',
+  });
+  assert.equal(
+    result.byExactSomName.get('Boundary[0]')?.discoverySpeak,
+    boundaryText,
+  );
+  for (const fieldName of [
+    'CaptionPriority',
+    'NamePriority',
+    'ToolTipPriority',
+    'UnknownPriority',
+    'EnabledByDefault',
+    'ExplicitlyEnabled',
+    'UnknownDisable',
+    'Nested',
+    'TooLong',
+    'PunctuationOnly',
+  ]) {
+    assert.equal(
+      result.byExactSomName.get(`${fieldName}[0]`)?.discoverySpeak,
+      undefined,
+      `${fieldName} must not supply discovery text`,
+    );
+  }
 });
 
 void test('marks an exact XFA signature UI as human-only structural evidence', async () => {
@@ -1172,6 +1263,32 @@ void test('rejects cumulative exact SOM key amplification from a small template'
 
   assertUnavailable(
     extractXfaSemantics(document),
+    'template_semantic_budget_exceeded',
+  );
+});
+
+void test('fails the whole template closed above the discovery text budget', async () => {
+  const disabledSpeakField = (value: string) =>
+    `<field name="F"><assist><speak disable="1">${value}</speak></assist></field>`;
+  const repeatedAliases = disabledSpeakField('A'.repeat(180)).repeat(1_456);
+  const atLimit = await documentWithTemplate(
+    `<template xmlns="${XFA_NAMESPACE}">${repeatedAliases}${disabledSpeakField('B'.repeat(64))}</template>`,
+  );
+
+  const atLimitResult = extractXfaSemantics(atLimit);
+  assert.equal(atLimitResult.status, 'available');
+  assert.equal(atLimitResult.candidateCount, 1_457);
+  assert.equal(
+    atLimitResult.byExactSomName.get('F[1456]')?.discoverySpeak?.length,
+    64,
+  );
+
+  const overLimit = await documentWithTemplate(
+    `<template xmlns="${XFA_NAMESPACE}">${repeatedAliases}${disabledSpeakField('B'.repeat(64))}${disabledSpeakField('C')}</template>`,
+  );
+
+  assertUnavailable(
+    extractXfaSemantics(overLimit),
     'template_semantic_budget_exceeded',
   );
 });

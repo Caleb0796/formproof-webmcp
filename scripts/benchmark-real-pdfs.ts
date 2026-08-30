@@ -7,6 +7,7 @@ import { PDFDocument } from 'pdf-lib';
 import type { FormState, PdfFieldLabelSource } from '../lib/form-state';
 import type {
   PdfActiveContentSummary,
+  PdfFieldIdentityReviewReason,
   PdfFieldValue,
   PdfInspection,
 } from '../lib/pdf-engine';
@@ -32,6 +33,8 @@ const { applyApprovedValues, inspectPdf, PdfEngineError } = (await import(
   new URL('../lib/pdf-engine.ts', import.meta.url).href
 )) as typeof import('../lib/pdf-engine');
 const {
+  FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+  createFieldEvidenceToolData,
   createFormContextToolData,
   createFormProofToolDefinitions,
   parseFormContextCursor,
@@ -93,13 +96,33 @@ interface QueryExperiment {
   expectedFirstPageFieldNames: string[];
   expectedMatchCounts: number[];
   expectedTotalMatchedFields: number;
-  naturalLanguageCoverageLoss?: {
-    queries: string[];
-    expectedFirstPageFieldNames: string[];
-    expectedMatchCounts: number[];
-    expectedTotalMatchedFields: number;
-    reason: string;
-  };
+  discoveryFallbackExperiment?: DiscoveryFallbackExperiment;
+}
+
+type QueryMatchBasis = 'field_metadata' | 'discovery_alias' | 'unmatched';
+
+interface DiscoveryFallbackCase {
+  name: string;
+  queries: string[];
+  expectedFirstPageFieldNames: string[];
+  expectedMatchCounts: number[];
+  expectedTotalMatchedFields: number;
+  expectedQueryMatchBases: QueryMatchBasis[];
+  expectedAmbiguousQueries: boolean[];
+  expectedHumanVerificationFieldNames: string[];
+  expectedEvidenceByField: Record<string, DiscoveryEvidenceField>;
+  reason: string;
+}
+
+interface DiscoveryEvidenceField {
+  requiresHumanVerification: true;
+  identityReviewReasons: PdfFieldIdentityReviewReason[];
+  page: number;
+  rect: { x: number; y: number; width: number; height: number };
+}
+
+interface DiscoveryFallbackExperiment {
+  cases: DiscoveryFallbackCase[];
 }
 
 interface WriteExperiment {
@@ -156,6 +179,21 @@ interface CorpusManifest {
   documents: CorpusDocument[];
 }
 
+interface DiscoveryAliasLeakProbe {
+  distinguishableTexts: readonly string[];
+  trustedMetadataCollisionTexts: readonly string[];
+}
+
+interface DiscoveryAliasLeakAssessment {
+  structuralAliasDataExposed: false;
+  distinguishableTextCount: number;
+  distinguishableTextLeakDetected: false;
+  trustedMetadataCollisionTextCount: number;
+  trustedMetadataCollisionTextAssessment:
+    | 'not_applicable'
+    | 'indeterminate_trusted_metadata_paths_only';
+}
+
 interface ContextMeasurement {
   calls: number;
   returnedFields: number;
@@ -166,7 +204,33 @@ interface ContextMeasurement {
   approximateTokenProxy: number;
   firstPageFieldNames: string[];
   firstPageQueryMatchCounts: number[] | null;
+  firstPageQueryMatchBases: QueryMatchBasis[] | null;
+  firstPageAmbiguousQueries: boolean[] | null;
+  firstPageDiscoveryFallback: string | null;
   firstPageMatchMethod: string | null;
+  humanVerificationFieldNames: string[];
+  discoveryMatchedFieldNames: string[];
+  maxResponseUtf8Bytes: number;
+  responseBudgetBytes: number;
+  responseBudgetRespected: true;
+  discoveryAliasLeakAssessment: DiscoveryAliasLeakAssessment;
+}
+
+interface EvidenceMeasurement {
+  calls: number;
+  initialBatchFieldCount: number;
+  narrowerRetryCount: number;
+  requestedBatchSizes: number[];
+  returnedBatchSizes: number[];
+  inputUtf8Bytes: number;
+  outputUtf8Bytes: number;
+  totalUtf8Bytes: number;
+  approximateTokenProxy: number;
+  maxResponseUtf8Bytes: number;
+  responseBudgetBytes: number;
+  responseBudgetRespected: true;
+  discoveryAliasLeakAssessment: DiscoveryAliasLeakAssessment;
+  fields: Record<string, DiscoveryEvidenceField>;
 }
 
 function utf8Bytes(value: unknown): number {
@@ -208,10 +272,108 @@ function requireString(value: unknown, message: string): string {
   return value;
 }
 
-function createContextTool(
+function requireQueryIndexSet(
+  value: unknown,
+  queryCount: number,
+  label: string,
+): Set<number> {
+  if (value === undefined) return new Set();
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${label} is not an array.`);
+  }
+  const indexes = value.map((index) => {
+    if (
+      !Number.isSafeInteger(index) ||
+      (index as number) < 0 ||
+      (index as number) >= queryCount
+    ) {
+      throw new TypeError(`${label} contains an invalid query index.`);
+    }
+    return index as number;
+  });
+  if (new Set(indexes).size !== indexes.length) {
+    throw new TypeError(`${label} repeats a query index.`);
+  }
+  return new Set(indexes);
+}
+
+function assertDiscoveryAliasTextNotLeaked(
+  value: unknown,
+  probe: DiscoveryAliasLeakProbe,
+  queries: readonly string[],
+  path = '$response',
+): void {
+  if (typeof value === 'string') {
+    const reflectedQuery =
+      path.endsWith('.query') || /\.matchedQueries\[\d+\]$/u.test(path);
+    for (const alias of probe.distinguishableTexts) {
+      if (!value.includes(alias)) continue;
+      if (!(queries.includes(alias) && reflectedQuery)) {
+        throw new TypeError(
+          `Distinguishable discovery alias text leaked outside an explicit query reflection at ${path}`,
+        );
+      }
+    }
+    for (const alias of probe.trustedMetadataCollisionTexts) {
+      if (!value.includes(alias)) continue;
+      const trustedMetadataPath =
+        path.endsWith('.name') ||
+        path.endsWith('.label') ||
+        path.endsWith('.tooltip');
+      if (
+        !trustedMetadataPath &&
+        !(queries.includes(alias) && reflectedQuery)
+      ) {
+        throw new TypeError(
+          `Trusted-metadata collision text appeared outside a trusted metadata or query path at ${path}`,
+        );
+      }
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) =>
+      assertDiscoveryAliasTextNotLeaked(
+        child,
+        probe,
+        queries,
+        `${path}[${index}]`,
+      ),
+    );
+    return;
+  }
+  if (value === null || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'discoveryAliases' || key === 'discoverySpeak') {
+      throw new TypeError(`Internal discovery alias data leaked at ${path}`);
+    }
+    assertDiscoveryAliasTextNotLeaked(child, probe, queries, `${path}.${key}`);
+  }
+}
+
+function discoveryAliasLeakAssessment(
+  probe: DiscoveryAliasLeakProbe,
+): DiscoveryAliasLeakAssessment {
+  return {
+    structuralAliasDataExposed: false,
+    distinguishableTextCount: probe.distinguishableTexts.length,
+    distinguishableTextLeakDetected: false,
+    trustedMetadataCollisionTextCount:
+      probe.trustedMetadataCollisionTexts.length,
+    trustedMetadataCollisionTextAssessment:
+      probe.trustedMetadataCollisionTexts.length === 0
+        ? 'not_applicable'
+        : 'indeterminate_trusted_metadata_paths_only',
+  };
+}
+
+function createBenchmarkTools(
   state: FormState,
   inspection: PdfInspection,
-): WebMcpToolDefinition {
+): {
+  contextTool: WebMcpToolDefinition;
+  evidenceTool: WebMcpToolDefinition;
+} {
   const adapter: FormProofWebMcpAdapter = {
     getFormContext(input) {
       const parsed =
@@ -246,8 +408,19 @@ function createContextTool(
         ),
       };
     },
-    getFieldEvidence: async () => {
-      throw new TypeError('The benchmark only measures context discovery.');
+    getFieldEvidence(input) {
+      if (
+        input.expectedStateVersion !== state.stateVersion ||
+        input.expectedSourceHash !== state.source.sourceHash
+      ) {
+        throw new TypeError('The benchmark evidence request lost its binding.');
+      }
+      return {
+        ok: true,
+        stateVersion: state.stateVersion,
+        sourceHash: state.source.sourceHash,
+        data: createFieldEvidenceToolData(state, inspection, input.fieldNames),
+      };
     },
     stageFormValues: async () => {
       throw new TypeError('The benchmark never stages personal data.');
@@ -259,29 +432,41 @@ function createContextTool(
       throw new TypeError('The benchmark never opens review.');
     },
   };
-  const tool = createFormProofToolDefinitions(
+  const tools = createFormProofToolDefinitions(
     adapter,
     () => undefined,
     new AbortController().signal,
-  ).find(({ name }) => name === 'get_form_context');
-  if (tool === undefined) {
-    throw new TypeError('get_form_context is not registered.');
+  );
+  const contextTool = tools.find(({ name }) => name === 'get_form_context');
+  const evidenceTool = tools.find(({ name }) => name === 'get_field_evidence');
+  if (contextTool === undefined || evidenceTool === undefined) {
+    throw new TypeError('The benchmark WebMCP tools are not registered.');
   }
-  return tool;
+  return { contextTool, evidenceTool };
 }
 
 async function measureContext(
   tool: WebMcpToolDefinition,
   scope: FormContextScope,
   stopAfterFirstPage: boolean,
+  aliasLeakProbe: DiscoveryAliasLeakProbe = {
+    distinguishableTexts: [],
+    trustedMetadataCollisionTexts: [],
+  },
 ): Promise<ContextMeasurement> {
   let cursor: string | undefined;
   let calls = 0;
   let inputUtf8Bytes = 0;
   let outputUtf8Bytes = 0;
+  let maxResponseUtf8Bytes = 0;
   const fieldNames: string[] = [];
+  const humanVerificationFieldNames: string[] = [];
+  const discoveryMatchedFieldNames: string[] = [];
   let firstPageFieldNames: string[] = [];
   let firstPageQueryMatchCounts: number[] | null = null;
+  let firstPageQueryMatchBases: QueryMatchBasis[] | null = null;
+  let firstPageAmbiguousQueries: boolean[] | null = null;
+  let firstPageDiscoveryFallback: string | null = null;
   let firstPageMatchMethod: string | null = null;
 
   do {
@@ -295,7 +480,19 @@ async function measureContext(
     };
     inputUtf8Bytes += utf8Bytes(input);
     const response: FormProofToolResponse = await tool.execute(input);
-    outputUtf8Bytes += utf8Bytes(response);
+    const responseUtf8Bytes = utf8Bytes(response);
+    if (responseUtf8Bytes > FORMPROOF_RECOMMENDED_RESPONSE_BYTES) {
+      throw new TypeError(
+        `get_form_context used ${responseUtf8Bytes} bytes (budget ${FORMPROOF_RECOMMENDED_RESPONSE_BYTES})`,
+      );
+    }
+    assertDiscoveryAliasTextNotLeaked(
+      response,
+      aliasLeakProbe,
+      scope.queries ?? [],
+    );
+    outputUtf8Bytes += responseUtf8Bytes;
+    maxResponseUtf8Bytes = Math.max(maxResponseUtf8Bytes, responseUtf8Bytes);
     calls += 1;
     if (!response.ok) {
       throw new TypeError(
@@ -308,7 +505,32 @@ async function measureContext(
     }
     const pageFieldNames = data.fields.map((value, index) => {
       const field = requireRecord(value, `Context field ${index} is invalid.`);
-      return requireString(field.name, `Context field ${index} has no name.`);
+      const name = requireString(
+        field.name,
+        `Context field ${index} has no name.`,
+      );
+      if (field.requiresHumanVerification === true) {
+        humanVerificationFieldNames.push(name);
+        if (Array.isArray(field.identityReviewReasons)) {
+          field.identityReviewReasons.forEach((reason) => {
+            if (
+              reason !== 'xfa_disabled_speak' &&
+              reason !== 'standard_initialism'
+            ) {
+              throw new TypeError(
+                `Context field ${index} has an unknown identity-review reason.`,
+              );
+            }
+          });
+        }
+      }
+      if (
+        field.matchBasis === 'discovery_alias' ||
+        field.matchBasis === 'mixed'
+      ) {
+        discoveryMatchedFieldNames.push(name);
+      }
+      return name;
     });
     if (calls === 1) {
       firstPageFieldNames = pageFieldNames;
@@ -317,27 +539,110 @@ async function measureContext(
           data.search,
           'Query context search metadata is not an object.',
         );
-        if (!Array.isArray(search.queries)) {
-          throw new TypeError(
-            'Query context search metadata has no per-query results.',
-          );
-        }
         firstPageMatchMethod = requireString(
           search.matchMethod,
           'Query context search metadata has no match method.',
         );
-        firstPageQueryMatchCounts = search.queries.map((value, index) => {
-          const query = requireRecord(
-            value,
-            `Query context search result ${index} is invalid.`,
-          );
-          if (typeof query.matchCount !== 'number') {
+        firstPageDiscoveryFallback =
+          typeof search.discoveryFallback === 'string'
+            ? search.discoveryFallback
+            : null;
+        if (Array.isArray(search.queries)) {
+          firstPageQueryMatchCounts = search.queries.map((value, index) => {
+            const query = requireRecord(
+              value,
+              `Query context search result ${index} is invalid.`,
+            );
+            if (typeof query.matchCount !== 'number') {
+              throw new TypeError(
+                `Query context search result ${index} has no matchCount.`,
+              );
+            }
+            return query.matchCount;
+          });
+          firstPageQueryMatchBases = search.queries.map((value, index) => {
+            const query = requireRecord(
+              value,
+              `Query context search result ${index} is invalid.`,
+            );
+            if (query.unmatched === true) return 'unmatched';
+            return query.matchBasis === 'discovery_alias'
+              ? 'discovery_alias'
+              : 'field_metadata';
+          });
+          firstPageAmbiguousQueries = search.queries.map((value, index) => {
+            const query = requireRecord(
+              value,
+              `Query context search result ${index} is invalid.`,
+            );
+            return query.ambiguous === true;
+          });
+        } else {
+          if (!Array.isArray(search.queryMatchCounts)) {
             throw new TypeError(
-              `Query context search result ${index} has no matchCount.`,
+              'Compact query context has no per-query match counts.',
             );
           }
-          return query.matchCount;
-        });
+          firstPageQueryMatchCounts = search.queryMatchCounts.map(
+            (count, index) => {
+              if (!Number.isSafeInteger(count) || (count as number) < 0) {
+                throw new TypeError(
+                  `Compact query result ${index} has an invalid match count.`,
+                );
+              }
+              return count as number;
+            },
+          );
+          if (firstPageQueryMatchCounts.length !== scope.queries.length) {
+            throw new TypeError('Compact query result count changed.');
+          }
+          const unmatchedQueryIndexes = requireQueryIndexSet(
+            search.unmatchedQueryIndexes,
+            firstPageQueryMatchCounts.length,
+            'Compact unmatchedQueryIndexes',
+          );
+          const ambiguousQueryIndexes = requireQueryIndexSet(
+            search.ambiguousQueryIndexes,
+            firstPageQueryMatchCounts.length,
+            'Compact ambiguousQueryIndexes',
+          );
+          const queryMatchBases = Array.isArray(search.queryMatchBases)
+            ? search.queryMatchBases
+            : [];
+          for (const index of ambiguousQueryIndexes) {
+            if (firstPageQueryMatchCounts[index] <= 1) {
+              throw new TypeError(
+                'Compact ambiguous query does not have multiple matches.',
+              );
+            }
+          }
+          if (
+            queryMatchBases.length !== firstPageQueryMatchCounts.length ||
+            queryMatchBases.some(
+              (basis) =>
+                basis !== 'field_metadata' &&
+                basis !== 'discovery_alias' &&
+                basis !== 'unmatched',
+            )
+          ) {
+            throw new TypeError('Compact query match bases are invalid.');
+          }
+          firstPageQueryMatchCounts.forEach((count, index) => {
+            const unmatched = unmatchedQueryIndexes.has(index);
+            if (
+              (count === 0) !== unmatched ||
+              (count === 0) !== (queryMatchBases[index] === 'unmatched')
+            ) {
+              throw new TypeError(
+                'Compact unmatched query count, index, and basis diverged.',
+              );
+            }
+          });
+          firstPageQueryMatchBases = queryMatchBases as QueryMatchBasis[];
+          firstPageAmbiguousQueries = firstPageQueryMatchCounts.map(
+            (_count, index) => ambiguousQueryIndexes.has(index),
+          );
+        }
       }
     }
     fieldNames.push(...pageFieldNames);
@@ -374,7 +679,187 @@ async function measureContext(
     approximateTokenProxy: approximateTokens(totalUtf8Bytes),
     firstPageFieldNames,
     firstPageQueryMatchCounts,
+    firstPageQueryMatchBases,
+    firstPageAmbiguousQueries,
+    firstPageDiscoveryFallback,
     firstPageMatchMethod,
+    humanVerificationFieldNames: [...new Set(humanVerificationFieldNames)],
+    discoveryMatchedFieldNames: [...new Set(discoveryMatchedFieldNames)],
+    maxResponseUtf8Bytes,
+    responseBudgetBytes: FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+    responseBudgetRespected: true,
+    discoveryAliasLeakAssessment: discoveryAliasLeakAssessment(aliasLeakProbe),
+  };
+}
+
+async function measureFieldEvidence(
+  state: FormState,
+  tool: WebMcpToolDefinition,
+  fieldNames: readonly string[],
+  aliasLeakProbe: DiscoveryAliasLeakProbe,
+): Promise<EvidenceMeasurement> {
+  if (new Set(fieldNames).size !== fieldNames.length) {
+    throw new TypeError('Evidence measurement repeats a requested field.');
+  }
+  let calls = 0;
+  let narrowerRetryCount = 0;
+  let inputUtf8Bytes = 0;
+  let outputUtf8Bytes = 0;
+  let maxResponseUtf8Bytes = 0;
+  const requestedBatchSizes: number[] = [];
+  const returnedBatchSizes: number[] = [];
+  const fields: Record<string, DiscoveryEvidenceField> = {};
+  const pendingFieldNames = [...fieldNames];
+
+  while (pendingFieldNames.length > 0) {
+    const requestedFieldNames = pendingFieldNames.slice(0, 3);
+    const input = {
+      expectedStateVersion: state.stateVersion,
+      expectedSourceHash: state.source.sourceHash,
+      fieldNames: requestedFieldNames,
+    };
+    requestedBatchSizes.push(requestedFieldNames.length);
+    inputUtf8Bytes += utf8Bytes(input);
+    const response: FormProofToolResponse = await tool.execute(input);
+    calls += 1;
+    const responseUtf8Bytes = utf8Bytes(response);
+    if (responseUtf8Bytes > FORMPROOF_RECOMMENDED_RESPONSE_BYTES) {
+      throw new TypeError(
+        `get_field_evidence used ${responseUtf8Bytes} bytes (budget ${FORMPROOF_RECOMMENDED_RESPONSE_BYTES})`,
+      );
+    }
+    assertDiscoveryAliasTextNotLeaked(response, aliasLeakProbe, []);
+    outputUtf8Bytes += responseUtf8Bytes;
+    maxResponseUtf8Bytes = Math.max(maxResponseUtf8Bytes, responseUtf8Bytes);
+    if (!response.ok) {
+      throw new TypeError(
+        `get_field_evidence failed during measurement: ${response.error.code}`,
+      );
+    }
+    const data = requireRecord(
+      response.data,
+      'Evidence data is not an object.',
+    );
+    if (!Array.isArray(data.fields) || data.fields.length === 0) {
+      throw new TypeError('Evidence did not return a whole requested field.');
+    }
+    if (data.fields.length > requestedFieldNames.length) {
+      throw new TypeError('Evidence returned more fields than requested.');
+    }
+    const returnedFieldNames = data.fields.map((value, index) => {
+      const field = requireRecord(value, `Evidence field ${index} is invalid.`);
+      return requireString(
+        field.name,
+        `Evidence field ${index} has no exact name.`,
+      );
+    });
+    assertEqual(
+      returnedFieldNames,
+      requestedFieldNames.slice(0, returnedFieldNames.length),
+      'Evidence atomic projection changed field order',
+    );
+    returnedBatchSizes.push(returnedFieldNames.length);
+    const omittedFieldCount =
+      requestedFieldNames.length - returnedFieldNames.length;
+    if (omittedFieldCount > 0) {
+      assertEqual(
+        {
+          outputTruncated: response.outputTruncated,
+          nextAction: response.nextAction,
+          omittedFieldCount: data.omittedFieldCount,
+        },
+        {
+          outputTruncated: true,
+          nextAction: 'retry_with_narrower_scope',
+          omittedFieldCount,
+        },
+        'Evidence omitted fields without an explicit narrower retry',
+      );
+      narrowerRetryCount += 1;
+    } else if (Object.hasOwn(data, 'omittedFieldCount')) {
+      throw new TypeError(
+        'Evidence reported an omitted field that was returned.',
+      );
+    }
+
+    for (const [index, value] of data.fields.entries()) {
+      const field = requireRecord(value, `Evidence field ${index} is invalid.`);
+      const fieldName = returnedFieldNames[index];
+      if (field.requiresHumanVerification !== true) {
+        throw new TypeError(`Evidence lost identity review: ${fieldName}`);
+      }
+      if (!Array.isArray(field.identityReviewReasons)) {
+        throw new TypeError(
+          `Evidence has no identity-review reasons: ${fieldName}`,
+        );
+      }
+      const identityReviewReasons = field.identityReviewReasons.map(
+        (reason) => {
+          if (
+            reason !== 'xfa_disabled_speak' &&
+            reason !== 'standard_initialism'
+          ) {
+            throw new TypeError(
+              `Evidence has an unknown identity-review reason.`,
+            );
+          }
+          return reason;
+        },
+      );
+      if (!Number.isSafeInteger(field.page) || (field.page as number) <= 0) {
+        throw new TypeError(`Evidence has no usable page: ${fieldName}`);
+      }
+      const rect = requireRecord(
+        field.rect,
+        `Evidence has no rectangle: ${fieldName}`,
+      );
+      for (const coordinate of ['x', 'y', 'width', 'height']) {
+        if (
+          typeof rect[coordinate] !== 'number' ||
+          !Number.isFinite(rect[coordinate])
+        ) {
+          throw new TypeError(`Evidence rectangle is invalid: ${fieldName}`);
+        }
+      }
+      fields[fieldName] = {
+        requiresHumanVerification: true,
+        identityReviewReasons,
+        page: field.page as number,
+        rect: {
+          x: rect.x as number,
+          y: rect.y as number,
+          width: rect.width as number,
+          height: rect.height as number,
+        },
+      };
+    }
+    pendingFieldNames.splice(0, returnedFieldNames.length);
+    if (calls > fieldNames.length) {
+      throw new TypeError('Evidence narrower retries made no progress.');
+    }
+  }
+
+  assertEqual(
+    Object.keys(fields),
+    fieldNames,
+    'Evidence did not cover the complete candidate set',
+  );
+  const totalUtf8Bytes = inputUtf8Bytes + outputUtf8Bytes;
+  return {
+    calls,
+    initialBatchFieldCount: Math.min(fieldNames.length, 3),
+    narrowerRetryCount,
+    requestedBatchSizes,
+    returnedBatchSizes,
+    inputUtf8Bytes,
+    outputUtf8Bytes,
+    totalUtf8Bytes,
+    approximateTokenProxy: approximateTokens(totalUtf8Bytes),
+    maxResponseUtf8Bytes,
+    responseBudgetBytes: FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
+    responseBudgetRespected: true,
+    discoveryAliasLeakAssessment: discoveryAliasLeakAssessment(aliasLeakProbe),
+    fields,
   };
 }
 
@@ -486,6 +971,32 @@ function semanticCoverage(state: FormState, inspection: PdfInspection) {
     semanticLabelSources.acroformTooltip +
     semanticLabelSources.xfaSpeak +
     semanticLabelSources.xfaCaption;
+  const discoveryAliases = inspection.fields.flatMap(
+    ({ discoveryAliases: aliases = [] }) => aliases,
+  );
+  const discoveryAliasSources = {
+    xfaDisabledSpeak: discoveryAliases.filter(
+      ({ source }) => source === 'xfa_disabled_speak',
+    ).length,
+    standardInitialism: discoveryAliases.filter(
+      ({ source }) => source === 'standard_initialism',
+    ).length,
+  };
+  const trustedOutputTexts = inspection.fields.flatMap((field) => [
+    field.name,
+    resolvePdfFieldLabel(field).label,
+    ...(field.tooltip === null ? [] : [field.tooltip]),
+  ]);
+  const discoveryAliasTrustedMetadataCollisionCount = discoveryAliases.filter(
+    ({ value }) => trustedOutputTexts.some((text) => text.includes(value)),
+  ).length;
+  const discoveryAliasTrustedMetadataCollisionTextCount = new Set(
+    discoveryAliases
+      .filter(({ value }) =>
+        trustedOutputTexts.some((text) => text.includes(value)),
+      )
+      .map(({ value }) => value),
+  ).size;
   return {
     meaningfulTooltipCount,
     semanticLabelAvailableCount,
@@ -504,6 +1015,30 @@ function semanticCoverage(state: FormState, inspection: PdfInspection) {
     xfaCaptionFieldCount: inspection.fields.filter(
       ({ xfaCaption }) => xfaCaption !== null && xfaCaption !== undefined,
     ).length,
+    discoveryAliasFieldCount: inspection.fields.filter(
+      ({ discoveryAliases: aliases }) => (aliases?.length ?? 0) > 0,
+    ).length,
+    discoveryAliasCount: discoveryAliases.length,
+    discoveryAliasSources,
+    discoveryAliasTrust: 'candidate_discovery_only',
+    discoveryAliasLeakAssessment: {
+      structuralAliasDataExposed: false,
+      distinguishableAliasObjectCount:
+        discoveryAliases.length - discoveryAliasTrustedMetadataCollisionCount,
+      distinguishableTextLeakDetected: false,
+      trustedMetadataCollisionObjectCount:
+        discoveryAliasTrustedMetadataCollisionCount,
+      trustedMetadataCollisionTextCount:
+        discoveryAliasTrustedMetadataCollisionTextCount,
+      trustedMetadataCollisionTextAssessment:
+        discoveryAliasTrustedMetadataCollisionTextCount === 0
+          ? 'not_applicable'
+          : 'indeterminate_trusted_metadata_paths_only',
+    },
+    discoveryAliasLimitation:
+      discoveryAliases.length === 0
+        ? null
+        : 'Discovery aliases can recover candidates only when no trusted field metadata matches the same query. They never become labels or evidence, and affected fields require human identity verification before export.',
     xfaFallbackOnly: inspection.protection.evidence.xfaPresent,
     xfaSemanticLimitation: inspection.protection.evidence.xfaPresent
       ? 'AcroForm /TU remains authoritative. Bounded XFA speak/caption text is used only after an exact full-SOM-name match; XFA choices, scripts, calculations, validation, and layout were not evaluated, and PDF rewriting remains disabled.'
@@ -517,6 +1052,7 @@ async function measureSemanticLabelGoldens(
   inspection: PdfInspection,
   contextTool: WebMcpToolDefinition,
   goldens: readonly SemanticLabelGolden[],
+  aliasLeakProbe: DiscoveryAliasLeakProbe,
 ) {
   const measurements: Array<
     Omit<SemanticLabelGolden, 'expectedMatchCount'> & {
@@ -556,6 +1092,7 @@ async function measureSemanticLabelGoldens(
       contextTool,
       { queries: [golden.query] },
       false,
+      aliasLeakProbe,
     );
     assertEqual(
       queryMeasurement.firstPageMatchMethod,
@@ -593,6 +1130,117 @@ async function measureSemanticLabelGoldens(
   }
 
   return measurements;
+}
+
+async function measureDiscoveryFallbackExperiment(
+  documentId: string,
+  state: FormState,
+  contextTool: WebMcpToolDefinition,
+  evidenceTool: WebMcpToolDefinition,
+  experiment: DiscoveryFallbackExperiment | undefined,
+  aliasLeakProbe: DiscoveryAliasLeakProbe,
+) {
+  if (experiment === undefined) return null;
+
+  const names = new Set<string>();
+  const cases = [];
+  for (const candidate of experiment.cases) {
+    if (names.has(candidate.name)) {
+      throw new TypeError(
+        `${documentId} repeats discovery fallback case ${candidate.name}`,
+      );
+    }
+    names.add(candidate.name);
+    assertEqual(
+      Object.keys(candidate.expectedEvidenceByField),
+      candidate.expectedHumanVerificationFieldNames,
+      `${documentId} discovery evidence fields diverge from the review set: ${candidate.name}`,
+    );
+    const contextMeasurement = await measureContext(
+      contextTool,
+      { queries: candidate.queries },
+      false,
+      aliasLeakProbe,
+    );
+    assertEqual(
+      contextMeasurement.firstPageFieldNames,
+      candidate.expectedFirstPageFieldNames,
+      `${documentId} discovery fallback representatives changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.firstPageQueryMatchCounts,
+      candidate.expectedMatchCounts,
+      `${documentId} discovery fallback counts changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.returnedFields,
+      candidate.expectedTotalMatchedFields,
+      `${documentId} discovery fallback total changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.uniqueReturnedFields,
+      candidate.expectedTotalMatchedFields,
+      `${documentId} discovery fallback repeated candidates: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.firstPageQueryMatchBases,
+      candidate.expectedQueryMatchBases,
+      `${documentId} discovery fallback trust basis changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.firstPageAmbiguousQueries,
+      candidate.expectedAmbiguousQueries,
+      `${documentId} discovery fallback ambiguity changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.firstPageDiscoveryFallback,
+      candidate.expectedQueryMatchBases.includes('discovery_alias')
+        ? 'only_when_no_field_metadata_match'
+        : null,
+      `${documentId} discovery fallback policy marker changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.humanVerificationFieldNames,
+      candidate.expectedHumanVerificationFieldNames,
+      `${documentId} discovery fallback human-verification set changed: ${candidate.name}`,
+    );
+    assertEqual(
+      contextMeasurement.discoveryMatchedFieldNames,
+      candidate.expectedQueryMatchBases.includes('discovery_alias')
+        ? candidate.expectedHumanVerificationFieldNames
+        : [],
+      `${documentId} discovery fallback field basis changed: ${candidate.name}`,
+    );
+    const evidenceMeasurement = await measureFieldEvidence(
+      state,
+      evidenceTool,
+      candidate.expectedHumanVerificationFieldNames,
+      aliasLeakProbe,
+    );
+    assertEqual(
+      evidenceMeasurement.fields,
+      candidate.expectedEvidenceByField,
+      `${documentId} discovery fallback evidence changed: ${candidate.name}`,
+    );
+
+    cases.push({
+      name: candidate.name,
+      verified: true,
+      reason: candidate.reason,
+      candidateSetComplete: true,
+      agentSelectedField: false,
+      contextMeasurement,
+      evidenceMeasurement,
+    });
+  }
+
+  return {
+    verified: true,
+    trustPolicy: 'trusted_metadata_globally_precedes_discovery_aliases',
+    discoveryAliasLeakAssessment: discoveryAliasLeakAssessment(aliasLeakProbe),
+    agentSelectedField: false,
+    cases,
+  };
 }
 
 async function measureWriteRoundTrip(
@@ -766,6 +1414,11 @@ async function measureFillPackage(
         sourceValue: descriptor.current,
         proposedValue,
         provenance,
+        ...(definition.identityReviewReasons === undefined
+          ? {}
+          : {
+              identityReviewReasons: [...definition.identityReviewReasons],
+            }),
       },
       `Fill-package staged field changed: ${fieldName}`,
     );
@@ -1106,15 +1759,47 @@ for (const document of manifest.documents) {
     [actualHash, true],
     `${document.id} source bytes changed during the experiment`,
   );
-  const contextTool = createContextTool(state, inspection);
+  const allDiscoveryAliasTexts = [
+    ...new Set(
+      inspection.fields.flatMap(({ discoveryAliases: aliases = [] }) =>
+        aliases.map(({ value }) => value),
+      ),
+    ),
+  ];
+  const trustedOutputTexts = inspection.fields.flatMap((field) => [
+    field.name,
+    resolvePdfFieldLabel(field).label,
+    ...(field.tooltip === null ? [] : [field.tooltip]),
+  ]);
+  const trustedMetadataCollisionTexts = allDiscoveryAliasTexts.filter((alias) =>
+    trustedOutputTexts.some((text) => text.includes(alias)),
+  );
+  const aliasLeakProbe: DiscoveryAliasLeakProbe = {
+    distinguishableTexts: allDiscoveryAliasTexts.filter(
+      (alias) => !trustedOutputTexts.some((text) => text.includes(alias)),
+    ),
+    trustedMetadataCollisionTexts,
+  };
+  const contextStateSnapshot = {
+    stateVersion: state.stateVersion,
+    planHash: state.planHash,
+    draft: structuredClone(state.draft),
+  };
+  const { contextTool, evidenceTool } = createBenchmarkTools(state, inspection);
   const semanticLabelGoldens = await measureSemanticLabelGoldens(
     document.id,
     state,
     inspection,
     contextTool,
     document.semanticLabelGoldens ?? [],
+    aliasLeakProbe,
   );
-  const fullTraversal = await measureContext(contextTool, {}, false);
+  const fullTraversal = await measureContext(
+    contextTool,
+    {},
+    false,
+    aliasLeakProbe,
+  );
   assertEqual(
     fullTraversal.returnedFields,
     inspection.fieldCount,
@@ -1126,7 +1811,12 @@ for (const document of manifest.documents) {
     `${document.id} full traversal repeated fields`,
   );
   const queryScope = { queries: document.queryExperiment.queries };
-  const targetedFirstPage = await measureContext(contextTool, queryScope, true);
+  const targetedFirstPage = await measureContext(
+    contextTool,
+    queryScope,
+    true,
+    aliasLeakProbe,
+  );
   assertEqual(
     targetedFirstPage.firstPageFieldNames,
     document.queryExperiment.expectedFirstPageFieldNames,
@@ -1142,7 +1832,12 @@ for (const document of manifest.documents) {
     'lexical',
     `${document.id} query match method changed`,
   );
-  const allQueryMatches = await measureContext(contextTool, queryScope, false);
+  const allQueryMatches = await measureContext(
+    contextTool,
+    queryScope,
+    false,
+    aliasLeakProbe,
+  );
   assertEqual(
     allQueryMatches.returnedFields,
     allQueryMatches.uniqueReturnedFields,
@@ -1153,46 +1848,23 @@ for (const document of manifest.documents) {
     document.queryExperiment.expectedTotalMatchedFields,
     `${document.id} query traversal match total changed`,
   );
-  let naturalLanguageCoverageLoss: {
-    confirmed: true;
-    queries: string[];
-    firstPageFieldNames: string[];
-    matchCounts: number[] | null;
-    totalMatchedFields: number;
-    reason: string;
-  } | null = null;
-  const expectedCoverageLoss =
-    document.queryExperiment.naturalLanguageCoverageLoss;
-  if (expectedCoverageLoss !== undefined) {
-    const measuredCoverageLoss = await measureContext(
-      contextTool,
-      { queries: expectedCoverageLoss.queries },
-      false,
-    );
-    assertEqual(
-      measuredCoverageLoss.firstPageFieldNames,
-      expectedCoverageLoss.expectedFirstPageFieldNames,
-      `${document.id} known natural-language coverage-loss representatives changed`,
-    );
-    assertEqual(
-      measuredCoverageLoss.firstPageQueryMatchCounts,
-      expectedCoverageLoss.expectedMatchCounts,
-      `${document.id} known natural-language coverage-loss counts changed`,
-    );
-    assertEqual(
-      measuredCoverageLoss.returnedFields,
-      expectedCoverageLoss.expectedTotalMatchedFields,
-      `${document.id} known natural-language coverage-loss total changed`,
-    );
-    naturalLanguageCoverageLoss = {
-      confirmed: true,
-      queries: expectedCoverageLoss.queries,
-      firstPageFieldNames: measuredCoverageLoss.firstPageFieldNames,
-      matchCounts: measuredCoverageLoss.firstPageQueryMatchCounts,
-      totalMatchedFields: measuredCoverageLoss.returnedFields,
-      reason: expectedCoverageLoss.reason,
-    };
-  }
+  const discoveryFallbackExperiment = await measureDiscoveryFallbackExperiment(
+    document.id,
+    state,
+    contextTool,
+    evidenceTool,
+    document.queryExperiment.discoveryFallbackExperiment,
+    aliasLeakProbe,
+  );
+  assertEqual(
+    {
+      stateVersion: state.stateVersion,
+      planHash: state.planHash,
+      draft: state.draft,
+    },
+    contextStateSnapshot,
+    `${document.id} read-only discovery changed the fill plan`,
+  );
 
   results.push({
     id: document.id,
@@ -1233,7 +1905,7 @@ for (const document of manifest.documents) {
       semanticSearchClaimed: false,
       expectedQueryRepresentativesVerified: true,
       expectedQueryMatchCountsVerified: true,
-      naturalLanguageCoverageLoss,
+      discoveryFallbackExperiment,
       ...semanticCoverage(state, inspection),
       semanticLabelGoldenCount: semanticLabelGoldens.length,
       semanticLabelGoldens,

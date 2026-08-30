@@ -9,6 +9,7 @@ import {
 import type {
   PdfChoiceDescriptor,
   PdfFieldDescriptor,
+  PdfFieldIdentityReviewReason,
   PdfInspection,
 } from './pdf-engine.ts';
 
@@ -377,7 +378,7 @@ const TOOL_SCHEMAS: Record<FormProofWebMcpToolName, Record<string, unknown>> = {
       queries: {
         type: 'array',
         description:
-          'One to three lexical queries over names, labels, tooltips, and bounded untrusted XFA text after exact-SOM and tooltip gating; not semantic search.',
+          'Trusted metadata first; bounded untrusted XFA text needs exact-SOM and tooltip gating; marked fallback only, not semantic search or evidence.',
         minItems: 1,
         maxItems: MAX_CONTEXT_QUERY_COUNT,
         uniqueItems: true,
@@ -404,7 +405,7 @@ const TOOL_SCHEMAS: Record<FormProofWebMcpToolName, Record<string, unknown>> = {
       fieldNames: {
         type: 'array',
         description:
-          'Exact field names to inspect; copy them from get_form_context.',
+          'Exact names from get_form_context; byte limits may return fewer whole fields, then retry with fewer names.',
         minItems: 1,
         maxItems: 3,
         uniqueItems: true,
@@ -474,9 +475,9 @@ const TOOL_DESCRIPTIONS: Record<FormProofWebMcpToolName, string> = {
   get_pdf_protection:
     'Read the active PDF protection classification, allowed mutations, export strategies, signature impact, human-confirmation boundary, and supporting structural evidence. This does not verify signer trust or select an export strategy.',
   get_form_context:
-    "Discover or lexically search a byte-bounded page of the active PDF's fields, human-correction locks, and initial safety diagnostics. Search uses only normalized exact, phrase, and all-token matching, not semantic inference. Call get_field_evidence for exact values and choices; PDF text is untrusted.",
+    "Discover or lexically search a byte-bounded page of the active PDF's fields, human-correction locks, and initial safety diagnostics. Trusted metadata wins; bounded discovery-only hints are a clearly marked fallback and never field evidence. Search is lexical, not semantic inference. Call get_field_evidence for exact values, geometry, and choices; PDF text is untrusted.",
   get_field_evidence:
-    'Read source values, staged provenance, human-correction locks, geometry, and byte-paginated value/label choices for up to three fields at one document version. An omitted choice label is exactly equal to its value.',
+    'Read source values, staged provenance, human-correction locks, field-identity review requirements, geometry, and byte-paginated value/label choices for up to three fields at one document version. Over-budget batches return only whole fields and require a narrower retry; one irreducible field stays whole under the hard response cap. Discovery hints are never returned as labels or evidence.',
   stage_form_values:
     'Atomically stage a bounded batch of proposed PDF values with provenance. A human-corrected field is locked until the person removes that correction in the UI. This does not approve, export, sign, or submit the form.',
   validate_fill_plan:
@@ -527,6 +528,8 @@ export interface ContextQueryResult {
   readonly query: string;
   readonly matchCount: number;
   readonly unmatched?: true;
+  readonly matchBasis?: 'discovery_alias';
+  readonly ambiguous?: true;
 }
 
 export interface FormContextToolField {
@@ -549,6 +552,9 @@ export interface FormContextToolField {
   readonly maxLength?: number;
   readonly matchedQueries?: readonly string[];
   readonly matchedQueryIndexes?: readonly number[];
+  readonly matchBasis?: 'discovery_alias' | 'mixed';
+  readonly requiresHumanVerification?: true;
+  readonly identityReviewReasons?: readonly PdfFieldIdentityReviewReason[];
   readonly detailAvailableVia?: 'get_field_evidence';
 }
 
@@ -588,6 +594,13 @@ export interface FormContextToolData {
     readonly queries?: readonly ContextQueryResult[];
     readonly queryMatchCounts?: readonly number[];
     readonly unmatchedQueryIndexes?: readonly number[];
+    readonly ambiguousQueryIndexes?: readonly number[];
+    readonly queryMatchBases?: readonly (
+      | 'field_metadata'
+      | 'discovery_alias'
+      | 'unmatched'
+    )[];
+    readonly discoveryFallback?: 'only_when_no_field_metadata_match';
   };
   readonly humanCorrections?: {
     readonly count: number;
@@ -685,8 +698,13 @@ export function createFormContextToolData(
   const selection = contextFieldCandidates(state, inspection, scope);
   const { candidates } = selection;
   const fields: ReturnType<typeof projectContextField>[] = [];
+  const hasAmbiguousDiscovery =
+    selection.queryResults?.some(
+      ({ matchBasis, ambiguous }) =>
+        matchBasis === 'discovery_alias' && ambiguous === true,
+    ) ?? false;
   const pageLimit =
-    offset === 0 && (scope.queries?.length ?? 0) > 0
+    offset === 0 && (scope.queries?.length ?? 0) > 0 && !hasAmbiguousDiscovery
       ? Math.min(limit, selection.representativeCount)
       : limit;
 
@@ -703,6 +721,7 @@ export function createFormContextToolData(
         entry.field,
         entry.matchedQueries,
         (scope.queries?.length ?? 0) > 0,
+        entry.matchBasis,
       ),
     ];
     const candidateData = formContextData(
@@ -734,11 +753,22 @@ export function createFormContextToolData(
     offset === 0,
     selection.queryResults,
   );
-  if (serializedJsonByteLength(data) <= MAX_CONTEXT_DATA_BYTES) return data;
+  if (
+    serializedJsonByteLength(data) <= MAX_CONTEXT_DATA_BYTES &&
+    (!hasAmbiguousDiscovery || fields.length === pageLimit)
+  ) {
+    return data;
+  }
 
   const compactFields = candidates
-    .slice(offset, offset + fields.length)
-    .map((entry) => projectCompactContextField(state, entry));
+    .slice(offset, offset + pageLimit)
+    .map((entry) =>
+      projectCompactContextField(
+        state,
+        entry,
+        (scope.queries?.length ?? 0) > 1,
+      ),
+    );
   let compactData = compactFormContextData(
     state,
     inspection,
@@ -774,8 +804,11 @@ interface ContextFieldCandidate {
   matchedQueries?: string[];
   bestMatchRank?: number;
   firstMatchedQuery?: number;
-  matchRanks?: readonly (0 | 1 | 2 | null)[];
+  matchRanks?: readonly ContextMatchRank[];
+  matchBasis?: 'discovery_alias' | 'mixed';
 }
+
+type ContextMatchRank = 0 | 1 | 2 | 3 | 4 | null;
 
 interface ContextFieldSelection {
   candidates: ContextFieldCandidate[];
@@ -793,6 +826,8 @@ interface CompactContextField {
   readonly humanOnly?: true;
   readonly humanPinned?: true;
   readonly matchedQueryIndexes?: readonly number[];
+  readonly matchBasis?: 'discovery_alias' | 'mixed';
+  readonly requiresHumanVerification?: true;
   readonly detailAvailableVia?: 'get_field_evidence';
 }
 
@@ -806,13 +841,19 @@ function contextFieldCandidates(
     normalizeContextSearchText(query),
   );
   const candidates: ContextFieldCandidate[] = [];
+  const assessed: Array<{
+    field: PdfFieldDescriptor;
+    sourceIndex: number;
+    eligible: boolean;
+    metadataMatches: readonly (0 | 1 | 2 | null)[];
+    discoveryMatches: readonly (3 | 4 | null)[];
+  }> = [];
 
   for (const [sourceIndex, field] of inspection.fields.entries()) {
-    if (scope.agentWritableOnly === true && !isAgentWritable(state, field)) {
-      continue;
-    }
+    const eligible =
+      scope.agentWritableOnly !== true || isAgentWritable(state, field);
     if (queries.length === 0) {
-      candidates.push({ field, sourceIndex });
+      if (eligible) candidates.push({ field, sourceIndex });
       continue;
     }
 
@@ -827,27 +868,69 @@ function contextFieldCandidates(
         : []),
     ].map(normalizeContextSearchText);
     const tokens = new Set(texts.flatMap((text) => contextSearchTokens(text)));
-    const matches = normalizedQueries.map((query) =>
+    const metadataMatches = normalizedQueries.map((query) =>
       contextMatchRank(texts, tokens, query),
     );
-    const matchedQueries = queries.filter(
-      (_, index) => matches[index] !== null,
+    const discoveryMatches = normalizedQueries.map((query) =>
+      contextDiscoveryMatchRank(field.discoveryAliases ?? [], query),
     );
-    if (matchedQueries.length === 0) continue;
-
-    candidates.push({
+    assessed.push({
       field,
       sourceIndex,
-      matchedQueries,
-      matchRanks: matches,
-      bestMatchRank: Math.min(
-        ...matches.filter((rank): rank is 0 | 1 | 2 => rank !== null),
-      ),
-      firstMatchedQuery: matches.findIndex((rank) => rank !== null),
+      eligible,
+      metadataMatches,
+      discoveryMatches,
     });
   }
 
   if (queries.length > 0) {
+    const metadataAvailable = normalizedQueries.map((_, queryIndex) =>
+      assessed.some(
+        ({ metadataMatches }) => metadataMatches[queryIndex] !== null,
+      ),
+    );
+
+    for (const {
+      field,
+      sourceIndex,
+      eligible,
+      metadataMatches,
+      discoveryMatches,
+    } of assessed) {
+      if (!eligible) continue;
+      const matches = metadataMatches.map((rank, queryIndex) =>
+        metadataAvailable[queryIndex] ? rank : discoveryMatches[queryIndex],
+      );
+      const matchedQueries = queries.filter(
+        (_, index) => matches[index] !== null,
+      );
+      if (matchedQueries.length === 0) continue;
+      const matchedDiscovery = matches.some(
+        (rank) => rank !== null && rank >= 3,
+      );
+      const matchedMetadata = matches.some((rank) => rank !== null && rank < 3);
+
+      candidates.push({
+        field,
+        sourceIndex,
+        matchedQueries,
+        matchRanks: matches,
+        bestMatchRank: Math.min(
+          ...matches.filter(
+            (rank): rank is Exclude<ContextMatchRank, null> => rank !== null,
+          ),
+        ),
+        firstMatchedQuery: matches.findIndex((rank) => rank !== null),
+        ...(matchedDiscovery
+          ? {
+              matchBasis: matchedMetadata
+                ? ('mixed' as const)
+                : ('discovery_alias' as const),
+            }
+          : {}),
+      });
+    }
+
     candidates.sort(
       (left, right) =>
         left.bestMatchRank! - right.bestMatchRank! ||
@@ -885,6 +968,12 @@ function contextFieldCandidates(
           query,
           matchCount,
           ...(matchCount === 0 ? { unmatched: true as const } : {}),
+          ...(!metadataAvailable[queryIndex] && matchCount > 0
+            ? {
+                matchBasis: 'discovery_alias' as const,
+                ...(matchCount > 1 ? { ambiguous: true as const } : {}),
+              }
+            : {}),
         };
       }),
     };
@@ -916,6 +1005,29 @@ function contextMatchRank(
     queryTokens.every((token) => tokens.has(token))
     ? 2
     : null;
+}
+
+function contextDiscoveryMatchRank(
+  aliases: readonly {
+    readonly value: string;
+    readonly source: PdfFieldIdentityReviewReason;
+  }[],
+  query: string,
+): 3 | 4 | null {
+  const queryTokenCount = contextSearchTokens(query).length;
+  let best: 3 | 4 | null = null;
+  for (const alias of aliases) {
+    const text = normalizeContextSearchText(alias.value);
+    if (text === query) return 3;
+    const minimumPhraseTokens = alias.source === 'standard_initialism' ? 2 : 3;
+    if (
+      queryTokenCount >= minimumPhraseTokens &&
+      containsContextPhrase(text, query)
+    ) {
+      best = 4;
+    }
+  }
+  return best;
 }
 
 function containsContextPhrase(text: string, query: string): boolean {
@@ -959,7 +1071,10 @@ export function createFieldEvidenceToolData(
     let nextOffset = offset;
     let unavailableChoiceCount = 0;
 
-    while (nextOffset < sourceChoices.length) {
+    while (
+      nextOffset < sourceChoices.length &&
+      choices.length < MAX_OUTPUT_ARRAY_ITEMS
+    ) {
       const sourceChoice = sourceChoices[nextOffset];
       if (
         takeCodePointPrefix(sourceChoice.value, MAX_OUTPUT_STRING_LENGTH)
@@ -1064,6 +1179,8 @@ interface EvidenceFieldProjection {
   effectiveValueAvailable?: true;
   provenance?: EvidenceProvenanceProjection;
   humanPinned?: true;
+  requiresHumanVerification?: true;
+  identityReviewReasons?: readonly PdfFieldIdentityReviewReason[];
   page: number | null;
   rect: PdfFieldDescriptor['rect'] | null;
   tooltip?: string;
@@ -1111,6 +1228,12 @@ function projectEvidenceField(
             : { effectiveValue }),
           provenance: projectEvidenceProvenance(staged.provenance),
           ...(staged.actor === 'human' ? { humanPinned: true as const } : {}),
+        }),
+    ...(definition.identityReviewReasons === undefined
+      ? {}
+      : {
+          requiresHumanVerification: true as const,
+          identityReviewReasons: definition.identityReviewReasons,
         }),
     page: descriptor?.page ?? null,
     rect: descriptor?.rect ?? null,
@@ -1171,6 +1294,9 @@ function evidenceValue(
   omitBlank = true,
 ): FormFieldValue | undefined {
   if (omitBlank && isBlankFieldValue(value)) return undefined;
+  if (Array.isArray(value) && value.length > MAX_OUTPUT_ARRAY_ITEMS) {
+    return undefined;
+  }
   return serializedJsonByteLength(value) <= 200 ? value : undefined;
 }
 
@@ -1301,6 +1427,14 @@ function formContextData(
                     ? { agentWritableOnly: true }
                     : {}),
                   queries: queryResults,
+                  ...(queryResults.some(
+                    ({ matchBasis }) => matchBasis === 'discovery_alias',
+                  )
+                    ? {
+                        discoveryFallback:
+                          'only_when_no_field_metadata_match' as const,
+                      }
+                    : {}),
                 },
               }),
           ...(humanCorrections === undefined ? {} : { humanCorrections }),
@@ -1369,6 +1503,29 @@ function compactFormContextData(
                   unmatchedQueryIndexes: queryResults.flatMap(
                     ({ unmatched }, index) => (unmatched ? [index] : []),
                   ),
+                  ...(queryResults.some(({ ambiguous }) => ambiguous === true)
+                    ? {
+                        ambiguousQueryIndexes: queryResults.flatMap(
+                          ({ ambiguous }, index) => (ambiguous ? [index] : []),
+                        ),
+                      }
+                    : {}),
+                  ...(queryResults.some(
+                    ({ matchBasis }) => matchBasis === 'discovery_alias',
+                  )
+                    ? {
+                        queryMatchBases: queryResults.map(
+                          ({ matchBasis, unmatched }) =>
+                            unmatched
+                              ? 'unmatched'
+                              : matchBasis === 'discovery_alias'
+                                ? 'discovery_alias'
+                                : 'field_metadata',
+                        ),
+                        discoveryFallback:
+                          'only_when_no_field_metadata_match' as const,
+                      }
+                    : {}),
                 },
               }),
           ...(humanCorrections === undefined ? {} : { humanCorrections }),
@@ -1397,8 +1554,10 @@ function compactFormContextData(
 function projectCompactContextField(
   state: FormState,
   candidate: ContextFieldCandidate,
+  includeMatchedQueryIndexes = true,
 ): CompactContextField {
-  const { field, matchRanks } = candidate;
+  const { field, matchRanks, matchBasis } = candidate;
+  const identityReviewReasons = state.fields[field.name].identityReviewReasons;
   const agentAddressable =
     field.name.length <= MAX_FIELD_NAME_LENGTH &&
     serializedJsonByteLength(field.name) <= MAX_FIELD_NAME_SERIALIZED_BYTES;
@@ -1406,7 +1565,9 @@ function projectCompactContextField(
     ...(agentAddressable
       ? {
           name: field.name,
-          detailAvailableVia: 'get_field_evidence' as const,
+          ...(matchBasis === undefined
+            ? { detailAvailableVia: 'get_field_evidence' as const }
+            : {}),
         }
       : { agentAddressable: false as const, nameLength: field.name.length }),
     type: field.type,
@@ -1416,12 +1577,18 @@ function projectCompactContextField(
     ...(state.draft[field.name]?.actor === 'human'
       ? { humanPinned: true as const }
       : {}),
-    ...(matchRanks === undefined
+    ...(matchRanks === undefined || !includeMatchedQueryIndexes
       ? {}
       : {
           matchedQueryIndexes: matchRanks.flatMap((rank, index) =>
             rank === null ? [] : [index],
           ),
+        }),
+    ...(matchBasis === undefined ? {} : { matchBasis }),
+    ...(identityReviewReasons === undefined
+      ? {}
+      : {
+          requiresHumanVerification: true as const,
         }),
   };
 }
@@ -1441,6 +1608,7 @@ function projectContextField(
   field: PdfFieldDescriptor,
   matchedQueries?: readonly string[],
   compactSearchResult = false,
+  matchBasis?: 'discovery_alias' | 'mixed',
 ) {
   const definition = state.fields[field.name];
   const staged = state.draft[field.name];
@@ -1475,6 +1643,13 @@ function projectContextField(
           humanOnly: field.humanOnly,
         }),
     ...(matchedQueries === undefined ? {} : { matchedQueries }),
+    ...(matchBasis === undefined ? {} : { matchBasis }),
+    ...(definition.identityReviewReasons === undefined
+      ? {}
+      : {
+          requiresHumanVerification: true as const,
+          identityReviewReasons: definition.identityReviewReasons,
+        }),
     ...(compactSearchResult
       ? {}
       : {
@@ -1502,6 +1677,9 @@ function contextValue(
   omitBlank = true,
 ): FormFieldValue | undefined {
   if (omitBlank && isBlankFieldValue(value)) return undefined;
+  if (Array.isArray(value) && value.length > MAX_OUTPUT_ARRAY_ITEMS) {
+    return undefined;
+  }
   return serializedJsonByteLength(value) <= 200 ? value : undefined;
 }
 
@@ -1519,6 +1697,7 @@ function takeStringListWithinBudget(
 ): { values: string[]; omitted: number } {
   const included: string[] = [];
   for (const value of values) {
+    if (included.length >= MAX_OUTPUT_ARRAY_ITEMS) break;
     const candidate = [...included, value];
     if (serializedJsonByteLength(candidate) > maximumSerializedBytes) break;
     included.push(value);
@@ -2020,7 +2199,9 @@ function normalizeAdapterResult(
     const bounded =
       toolName === 'get_form_context'
         ? boundContextDataAtomically(publicData)
-        : boundJson(publicData);
+        : toolName === 'get_field_evidence'
+          ? boundEvidenceDataAtomically(publicData)
+          : boundJson(publicData);
     const outputTruncated =
       result.outputTruncated === true || bounded.truncated;
     return successResponse(
@@ -2064,6 +2245,13 @@ function successNextAction(
     case 'get_pdf_protection':
       return 'get_form_context';
     case 'get_form_context':
+      if (
+        isPlainObject(data) &&
+        isPlainObject(data.pagination) &&
+        typeof data.pagination.nextCursor === 'string'
+      ) {
+        return 'get_form_context';
+      }
       if (
         isPlainObject(data) &&
         Array.isArray(data.fields) &&
@@ -2436,6 +2624,66 @@ function boundContextDataAtomically(value: unknown): {
     : hardLimit;
 }
 
+function boundEvidenceDataAtomically(value: unknown): {
+  value: JsonValue;
+  truncated: boolean;
+} {
+  const recommended = boundJson(value, MAX_EVIDENCE_DATA_BYTES);
+  if (!recommended.truncated) return recommended;
+  if (!isPlainObject(value) || !Array.isArray(value.fields)) {
+    return { value: '[truncated]', truncated: true };
+  }
+  if (value.fields.length === 1) {
+    const atomicField = boundJson(value, MAX_OUTPUT_SERIALIZED_BYTES);
+    return atomicField.truncated
+      ? { value: '[truncated]', truncated: true }
+      : atomicField;
+  }
+
+  const fields: JsonValue[] = [];
+  for (const rawField of value.fields) {
+    if (!isPlainObject(rawField)) break;
+    const boundedField = boundJson(rawField, MAX_EVIDENCE_DATA_BYTES);
+    if (boundedField.truncated) {
+      if (fields.length > 0) break;
+      const atomicField = boundJson(rawField, MAX_OUTPUT_SERIALIZED_BYTES);
+      if (atomicField.truncated) break;
+      const atomicPage = boundJson(
+        {
+          untrustedPdfContent: true,
+          fields: [atomicField.value],
+          omittedFieldCount: value.fields.length - 1,
+        },
+        MAX_OUTPUT_SERIALIZED_BYTES,
+      );
+      return atomicPage.truncated
+        ? { value: '[truncated]', truncated: true }
+        : { value: atomicPage.value, truncated: true };
+    }
+    const candidateFields = [...fields, boundedField.value];
+    const omittedFieldCount = value.fields.length - candidateFields.length;
+    const candidate = {
+      untrustedPdfContent: true,
+      fields: candidateFields,
+      ...(omittedFieldCount === 0 ? {} : { omittedFieldCount }),
+    };
+    if (serializedJsonByteLength(candidate) > MAX_EVIDENCE_DATA_BYTES) break;
+    fields.push(boundedField.value);
+  }
+
+  if (fields.length === 0) {
+    return { value: '[truncated]', truncated: true };
+  }
+  return {
+    value: {
+      untrustedPdfContent: true,
+      fields,
+      omittedFieldCount: value.fields.length - fields.length,
+    },
+    truncated: true,
+  };
+}
+
 function visitJson(
   value: unknown,
   depth: number,
@@ -2633,6 +2881,7 @@ function contextScopeFingerprint(scope: FormContextScope): string {
     JSON.stringify({
       queries: (scope.queries ?? []).map(normalizeContextSearchText),
       agentWritableOnly: scope.agentWritableOnly === true,
+      discoveryPolicy: 'trusted_then_discovery_v1',
     }),
   );
 }

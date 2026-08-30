@@ -1204,10 +1204,7 @@ void test('reports human-pinned corrections in context and evidence while exclud
 });
 
 void test('bounds the first-page human-correction diagnostic without hiding its total', async () => {
-  const names = Array.from(
-    { length: 8 },
-    (_, index) => `corrected_${index}_${'x'.repeat(48)}`,
-  );
+  const names = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn'.split('');
   const { state: initial, inspection } = await createContextFixture(
     names.map((name) => ({ name, label: name })),
   );
@@ -1240,11 +1237,7 @@ void test('bounds the first-page human-correction diagnostic without hiding its 
 
   const initialPage = createFormContextToolData(state, inspection, 0, 1);
   assert.equal(initialPage.humanCorrections?.count, names.length);
-  assert.ok((initialPage.humanCorrections?.fieldNames.length ?? 0) > 0);
-  assert.ok(
-    (initialPage.humanCorrections?.fieldNames.length ?? names.length) <
-      names.length,
-  );
+  assert.equal(initialPage.humanCorrections?.fieldNames.length, 30);
   assert.equal(
     initialPage.humanCorrections?.omittedFieldCount,
     names.length - (initialPage.humanCorrections?.fieldNames.length ?? 0),
@@ -1255,6 +1248,19 @@ void test('bounds the first-page human-correction diagnostic without hiding its 
   assert.ok(
     serializedBytes(initialPage) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,
   );
+
+  const { tools } = await captureTools(
+    createAdapter({
+      getFormContext: async () => success(initialPage, state.stateVersion),
+    }),
+  );
+  const response = await byName(tools, 'get_form_context').execute({
+    limit: 1,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.outputTruncated, false);
+  assert.notEqual(response.data, '[truncated]');
+  assert.ok(serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES);
 
   const continuation = createFormContextToolData(state, inspection, 1, 1);
   assert.equal(Object.hasOwn(continuation, 'humanCorrections'), false);
@@ -1442,7 +1448,8 @@ void test('keeps a complete escaped UTF-8 context response under the recommended
 
   assert.equal(response.ok, true);
   assert.equal(response.outputTruncated, false);
-  assert.equal(response.nextAction, 'get_field_evidence');
+  assert.equal(typeof data.pagination.nextCursor, 'string');
+  assert.equal(response.nextAction, 'get_form_context');
   assert.deepEqual(response.data, data);
   assert.ok(
     serializedBytes(response) <= FORMPROOF_RECOMMENDED_RESPONSE_BYTES,

@@ -190,12 +190,77 @@
         ],
         "expectedMatchCounts": [1],
         "expectedTotalMatchedFields": 1,
-        "naturalLanguageCoverageLoss": {
-          "queries": ["first name and middle initial"],
-          "expectedFirstPageFieldNames": [],
-          "expectedMatchCounts": [0],
-          "expectedTotalMatchedFields": 0,
-          "reason": "All 48 W-4 XFA speak entries are disabled (disable=1), and f1_01 has no usable XFA caption. Disabled assist text is not trusted as field evidence."
+        "discoveryFallbackExperiment": {
+          "cases": [
+            {
+              "name": "bounded_disabled_xfa_speak_candidate",
+              "queries": ["first name and middle initial"],
+              "expectedFirstPageFieldNames": [
+                "topmostSubform[0].Page1[0].Step1a[0].f1_01[0]"
+              ],
+              "expectedMatchCounts": [1],
+              "expectedTotalMatchedFields": 1,
+              "expectedQueryMatchBases": ["discovery_alias"],
+              "expectedAmbiguousQueries": [false],
+              "expectedHumanVerificationFieldNames": [
+                "topmostSubform[0].Page1[0].Step1a[0].f1_01[0]"
+              ],
+              "expectedEvidenceByField": {
+                "topmostSubform[0].Page1[0].Step1a[0].f1_01[0]": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["xfa_disabled_speak"],
+                  "page": 1,
+                  "rect": {
+                    "x": 94.6,
+                    "y": 683.968,
+                    "width": 178.25000000000003,
+                    "height": 14.00100000000009
+                  }
+                }
+              },
+              "reason": "A short disabled XFA speak entry can recover this candidate only after exact SOM binding. It remains non-authoritative and requires per-field identity verification."
+            },
+            {
+              "name": "trusted_metadata_globally_precedes_aliases",
+              "queries": ["social security number"],
+              "expectedFirstPageFieldNames": [
+                "topmostSubform[0].Page1[0].f1_05[0]"
+              ],
+              "expectedMatchCounts": [1],
+              "expectedTotalMatchedFields": 1,
+              "expectedQueryMatchBases": ["field_metadata"],
+              "expectedAmbiguousQueries": [false],
+              "expectedHumanVerificationFieldNames": [
+                "topmostSubform[0].Page1[0].f1_05[0]"
+              ],
+              "expectedEvidenceByField": {
+                "topmostSubform[0].Page1[0].f1_05[0]": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["xfa_disabled_speak"],
+                  "page": 1,
+                  "rect": {
+                    "x": 476.2,
+                    "y": 683.968,
+                    "width": 99.80000000000001,
+                    "height": 14.00100000000009
+                  }
+                }
+              },
+              "reason": "The authoritative XFA caption yields one trusted match. Discovery aliases must not add the page-4 amount field whose instructions also mention a spouse's Social Security number."
+            },
+            {
+              "name": "no_fabricated_signature_field",
+              "queries": ["employee signature"],
+              "expectedFirstPageFieldNames": [],
+              "expectedMatchCounts": [0],
+              "expectedTotalMatchedFields": 0,
+              "expectedQueryMatchBases": ["unmatched"],
+              "expectedAmbiguousQueries": [false],
+              "expectedHumanVerificationFieldNames": [],
+              "expectedEvidenceByField": {},
+              "reason": "The visible signature line is not an addressable AcroForm field, so discovery must remain empty instead of inventing a writable target."
+            }
+          ]
         }
       },
       "fillPackageExperiment": {
@@ -360,14 +425,131 @@
           "List all other name you have used",
           "Gender"
         ],
-        "expectedMatchCounts": [13, 3, 0],
-        "expectedTotalMatchedFields": 16,
-        "naturalLanguageCoverageLoss": {
-          "queries": ["social security"],
-          "expectedFirstPageFieldNames": [],
-          "expectedMatchCounts": [0],
-          "expectedTotalMatchedFields": 0,
-          "reason": "The visible page says Social Security Number, but page text is not indexed and the AcroForm exposes only SSN-named fields with no tooltip. Lexical WebMCP search does not infer that synonym."
+        "expectedMatchCounts": [13, 3, 3],
+        "expectedTotalMatchedFields": 19,
+        "discoveryFallbackExperiment": {
+          "cases": [
+            {
+              "name": "controlled_ssn_initialism_expansion",
+              "queries": ["social security number"],
+              "expectedFirstPageFieldNames": [
+                "Applicant SSN 1",
+                "Applicant SSN 3",
+                "Applicant SSN 2"
+              ],
+              "expectedMatchCounts": [3],
+              "expectedTotalMatchedFields": 3,
+              "expectedQueryMatchBases": ["discovery_alias"],
+              "expectedAmbiguousQueries": [true],
+              "expectedHumanVerificationFieldNames": [
+                "Applicant SSN 1",
+                "Applicant SSN 3",
+                "Applicant SSN 2"
+              ],
+              "expectedEvidenceByField": {
+                "Applicant SSN 1": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["standard_initialism"],
+                  "page": 5,
+                  "rect": {
+                    "x": 70.9643,
+                    "y": 546.017,
+                    "width": 46.58170000000001,
+                    "height": 22
+                  }
+                },
+                "Applicant SSN 3": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["standard_initialism"],
+                  "page": 5,
+                  "rect": {
+                    "x": 154.498,
+                    "y": 544.901,
+                    "width": 62.291,
+                    "height": 22
+                  }
+                },
+                "Applicant SSN 2": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["standard_initialism"],
+                  "page": 5,
+                  "rect": {
+                    "x": 120.58,
+                    "y": 546.057,
+                    "width": 31.528000000000006,
+                    "height": 22
+                  }
+                }
+              },
+              "reason": "The controlled whole-token SSN expansion returns all three 3/4/2-digit segments as an ambiguous candidate set. No segment is selected automatically."
+            },
+            {
+              "name": "controlled_ssn_phrase_match",
+              "queries": ["social security"],
+              "expectedFirstPageFieldNames": [
+                "Applicant SSN 1",
+                "Applicant SSN 3",
+                "Applicant SSN 2"
+              ],
+              "expectedMatchCounts": [3],
+              "expectedTotalMatchedFields": 3,
+              "expectedQueryMatchBases": ["discovery_alias"],
+              "expectedAmbiguousQueries": [true],
+              "expectedHumanVerificationFieldNames": [
+                "Applicant SSN 1",
+                "Applicant SSN 3",
+                "Applicant SSN 2"
+              ],
+              "expectedEvidenceByField": {
+                "Applicant SSN 1": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["standard_initialism"],
+                  "page": 5,
+                  "rect": {
+                    "x": 70.9643,
+                    "y": 546.017,
+                    "width": 46.58170000000001,
+                    "height": 22
+                  }
+                },
+                "Applicant SSN 3": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["standard_initialism"],
+                  "page": 5,
+                  "rect": {
+                    "x": 154.498,
+                    "y": 544.901,
+                    "width": 62.291,
+                    "height": 22
+                  }
+                },
+                "Applicant SSN 2": {
+                  "requiresHumanVerification": true,
+                  "identityReviewReasons": ["standard_initialism"],
+                  "page": 5,
+                  "rect": {
+                    "x": 120.58,
+                    "y": 546.057,
+                    "width": 31.528000000000006,
+                    "height": 22
+                  }
+                }
+              },
+              "reason": "A two-token phrase may use the same controlled initialism expansion, but it must preserve the complete ambiguous three-segment candidate set."
+            },
+            {
+              "name": "no_broad_identification_synonym",
+              "queries": ["taxpayer identification number"],
+              "expectedFirstPageFieldNames": [],
+              "expectedMatchCounts": [0],
+              "expectedTotalMatchedFields": 0,
+              "expectedQueryMatchBases": ["unmatched"],
+              "expectedAmbiguousQueries": [false],
+              "expectedHumanVerificationFieldNames": [],
+              "expectedEvidenceByField": {},
+              "reason": "Discovery expands only the exact SSN initialism and must not infer a broader taxpayer-identification synonym."
+            }
+          ]
         }
       },
       "writeExperiment": {

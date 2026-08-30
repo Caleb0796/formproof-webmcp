@@ -1,6 +1,7 @@
 import type {
   ApplyResult,
   PdfFieldDescriptor,
+  PdfFieldIdentityReviewReason,
   PdfFieldValue,
   PdfInspection,
   PdfSignatureImpact,
@@ -42,6 +43,7 @@ export interface FormFieldDefinition {
   readonly options?: readonly string[];
   readonly multiSelect?: boolean;
   readonly maxLength?: number;
+  readonly identityReviewReasons?: readonly PdfFieldIdentityReviewReason[];
   readonly sourceValue: FormFieldValue;
 }
 
@@ -124,6 +126,9 @@ export function createFormFieldDefinitionFromPdf(
 ): FormFieldDefinition {
   const { label } = resolvePdfFieldLabel(field);
   const unsupported = field.type === 'unsupported';
+  const identityReviewReasons = [
+    ...new Set(field.discoveryAliases?.map(({ source }) => source) ?? []),
+  ];
   return {
     name: field.name,
     label,
@@ -141,6 +146,7 @@ export function createFormFieldDefinitionFromPdf(
       : {}),
     ...(field.options.length > 0 ? { options: [...field.options] } : {}),
     ...(field.maxLength === null ? {} : { maxLength: field.maxLength }),
+    ...(identityReviewReasons.length === 0 ? {} : { identityReviewReasons }),
     sourceValue: Array.isArray(field.current)
       ? [...field.current]
       : field.current,
@@ -162,12 +168,14 @@ export interface FieldUpdate {
 
 export interface StagedFieldValue extends FieldUpdate {
   readonly actor: UpdateActor;
+  readonly identityReviewReasons?: readonly PdfFieldIdentityReviewReason[];
 }
 
 export interface ValidationIssue {
   readonly code:
     | 'required_missing'
     | 'human_completion_required'
+    | 'field_identity_requires_review'
     | 'inference_requires_review'
     | 'low_confidence_requires_review';
   readonly severity: 'error' | 'review';
@@ -354,6 +362,7 @@ export interface FillPackageField {
   readonly sourceValue: FormFieldValue;
   readonly proposedValue: FormFieldValue;
   readonly provenance: Readonly<FieldProvenance>;
+  readonly identityReviewReasons?: readonly PdfFieldIdentityReviewReason[];
 }
 
 export interface FillPackageHumanStep {
@@ -460,6 +469,11 @@ const PROVENANCE_KINDS = new Set<ProvenanceKind>([
   'human_entry',
 ]);
 
+const IDENTITY_REVIEW_REASONS = new Set<PdfFieldIdentityReviewReason>([
+  'xfa_disabled_speak',
+  'standard_initialism',
+]);
+
 const trustedApprovedStates = new WeakSet<FormState>();
 const trustedReleasedStates = new WeakSet<FormState>();
 
@@ -528,6 +542,9 @@ function cloneDefinition(field: FormFieldDefinition): FormFieldDefinition {
       ? {}
       : { multiSelect: field.multiSelect }),
     ...(field.maxLength === undefined ? {} : { maxLength: field.maxLength }),
+    ...(field.identityReviewReasons === undefined
+      ? {}
+      : { identityReviewReasons: [...field.identityReviewReasons] }),
     sourceValue: cloneValue(field.sourceValue),
   };
 }
@@ -613,10 +630,18 @@ async function calculatePlanHash(
           options: field.options ?? null,
           multiSelect: field.multiSelect ?? null,
           maxLength: field.maxLength ?? null,
+          ...(field.identityReviewReasons === undefined
+            ? {}
+            : { identityReviewReasons: field.identityReviewReasons }),
           effectiveValue:
             staged === undefined ? field.sourceValue : staged.value,
           provenance: staged?.provenance ?? null,
           actor: staged?.actor ?? null,
+          ...(staged?.identityReviewReasons === undefined
+            ? {}
+            : {
+                stagedIdentityReviewReasons: staged.identityReviewReasons,
+              }),
         };
       }),
   });
@@ -844,6 +869,15 @@ function buildValidationReport(
       });
     }
 
+    if ((staged?.identityReviewReasons?.length ?? 0) > 0) {
+      issues.push({
+        code: 'field_identity_requires_review',
+        severity: 'review',
+        fieldName,
+        message: `${field.label} was mapped with a non-authoritative discovery hint. Verify the field identity in the original PDF before export.`,
+      });
+    }
+
     if (
       staged !== undefined &&
       staged.provenance.kind !== 'human_entry' &&
@@ -957,6 +991,19 @@ function configurationErrors(
     }
     if (field.type === 'signature' && !field.humanOnly) {
       errors.push(`${field.name}: signature fields must be humanOnly`);
+    }
+    if (
+      field.identityReviewReasons !== undefined &&
+      (field.identityReviewReasons.length === 0 ||
+        new Set(field.identityReviewReasons).size !==
+          field.identityReviewReasons.length ||
+        field.identityReviewReasons.some(
+          (reason) => !IDENTITY_REVIEW_REASONS.has(reason),
+        ))
+    ) {
+      errors.push(
+        `${field.name}: identityReviewReasons must contain unique supported reasons`,
+      );
     }
 
     const valueError = validateValue(field, field.sourceValue);
@@ -1182,6 +1229,7 @@ export async function stageFieldUpdates(
   }
   const changedFields: string[] = [];
   for (const update of request.updates) {
+    const field = requiredOwnValue(state.fields, update.fieldName);
     const next = deepFreeze({
       fieldName: update.fieldName,
       value: normalizeDraftValue(
@@ -1190,6 +1238,9 @@ export async function stageFieldUpdates(
       ),
       provenance: cloneProvenance(update.provenance),
       actor: request.actor,
+      ...(field.identityReviewReasons === undefined
+        ? {}
+        : { identityReviewReasons: [...field.identityReviewReasons] }),
     });
     const current = ownValue(state.draft, update.fieldName);
     if (current === undefined || canonicalize(current) !== canonicalize(next)) {
@@ -1746,6 +1797,11 @@ export async function exportFillPackageFromUi(
         sourceValue: cloneValue(definition.sourceValue),
         proposedValue: cloneValue(staged.value),
         provenance: cloneProvenance(staged.provenance),
+        ...(staged.identityReviewReasons === undefined
+          ? {}
+          : {
+              identityReviewReasons: [...staged.identityReviewReasons],
+            }),
       };
     });
   const humanStepNames = [
@@ -1809,6 +1865,13 @@ export async function exportFillPackageFromUi(
     ...(stagedFields.some((field) => !field.semanticLabelAvailable)
       ? [
           'At least one staged field has no bounded semantic label; use its exact name, page, and rectangle to verify it in the original PDF.',
+        ]
+      : []),
+    ...(stagedFields.some(
+      (field) => (field.identityReviewReasons?.length ?? 0) > 0,
+    )
+      ? [
+          'At least one staged field was mapped with a non-authoritative discovery hint. Its alias text is not a label or evidence; use the original PDF page and rectangle to verify field identity before using this package.',
         ]
       : []),
   ];

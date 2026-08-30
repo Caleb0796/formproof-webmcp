@@ -204,6 +204,15 @@ export interface PdfChoiceDescriptor {
   label: string;
 }
 
+export type PdfFieldIdentityReviewReason =
+  | 'xfa_disabled_speak'
+  | 'standard_initialism';
+
+export interface PdfFieldDiscoveryAlias {
+  readonly value: string;
+  readonly source: PdfFieldIdentityReviewReason;
+}
+
 export interface PdfFieldDescriptor {
   name: string;
   type: PdfFieldType;
@@ -222,6 +231,7 @@ export interface PdfFieldDescriptor {
   xfaSignatureWidget?: boolean;
   xfaSpeak?: string | null;
   xfaCaption?: string | null;
+  discoveryAliases?: readonly PdfFieldDiscoveryAlias[];
   widgetCount: number;
   widgets: PdfWidgetDescriptor[];
 }
@@ -3805,6 +3815,34 @@ function effectiveXfaSecurityLabel(
   return conciseXfaSecurityLabel(speak) ?? conciseXfaSecurityLabel(caption);
 }
 
+function fieldDiscoveryAliases(
+  fieldName: string,
+  tooltip: string | null,
+  xfaDiscoverySpeak: string | undefined,
+): PdfFieldDiscoveryAlias[] {
+  if (normalizedSemanticFieldLabel(tooltip) !== null) return [];
+
+  const aliases: PdfFieldDiscoveryAlias[] = [];
+  if (xfaDiscoverySpeak !== undefined) {
+    aliases.push({
+      value: xfaDiscoverySpeak,
+      source: 'xfa_disabled_speak',
+    });
+  }
+  if (
+    fieldName
+      .normalize('NFKC')
+      .split(/[^\p{L}\p{N}]+/u)
+      .includes('SSN')
+  ) {
+    aliases.push({
+      value: 'social security number',
+      source: 'standard_initialism',
+    });
+  }
+  return aliases;
+}
+
 function isSignatureSemanticTextField(
   field: PDFField,
   tooltip: string | null,
@@ -4002,6 +4040,11 @@ function describeField(
     xfa?.speak,
     xfa?.caption,
   );
+  const discoveryAliases = fieldDiscoveryAliases(
+    field.getName(),
+    tooltip,
+    xfa?.discoverySpeak,
+  );
 
   return {
     name: field.getName(),
@@ -4025,6 +4068,7 @@ function describeField(
     ...(xfaSignatureWidget ? { xfaSignatureWidget: true } : {}),
     xfaSpeak: xfa?.speak ?? null,
     xfaCaption: xfa?.caption ?? null,
+    ...(discoveryAliases.length === 0 ? {} : { discoveryAliases }),
     widgetCount: widgets.length,
     widgets,
   };

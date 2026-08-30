@@ -107,3 +107,35 @@ void test('sentinel tooltips permit XFA fallback but visual punctuation does not
     xfaSearchAllowed: true,
   });
 });
+
+void test('keeps discovery aliases out of labels and retains only system review reasons', () => {
+  const rawDisabledSpeak = 'Nearby instruction that is not authoritative';
+  const field = descriptor({
+    xfaCaption: '(a) First name',
+    discoveryAliases: [
+      { value: rawDisabledSpeak, source: 'xfa_disabled_speak' },
+      {
+        value: 'Another non-authoritative hint',
+        source: 'xfa_disabled_speak',
+      },
+      {
+        value: 'social security number',
+        source: 'standard_initialism',
+      },
+    ],
+  });
+
+  const definition = createFormFieldDefinitionFromPdf(field);
+
+  assert.equal(definition.label, '(a) First name');
+  assert.deepEqual(definition.identityReviewReasons, [
+    'xfa_disabled_speak',
+    'standard_initialism',
+  ]);
+  assert.equal('discoveryAliases' in definition, false);
+  assert.equal(JSON.stringify(definition).includes(rawDisabledSpeak), false);
+  assert.equal(
+    JSON.stringify(definition).includes('social security number'),
+    false,
+  );
+});
