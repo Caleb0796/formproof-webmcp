@@ -768,6 +768,11 @@ export function FormProofWorkbench() {
       kind: LoadedDocument['kind'],
     ) => {
       try {
+        if (bytes.byteLength === 0) {
+          throw new Error(
+            'The selected file is empty. Choose a non-empty PDF.',
+          );
+        }
         if (bytes.byteLength > MAX_PDF_BYTES) {
           throw new Error(
             'Choose a PDF smaller than 15 MB for this browser demo.',
@@ -2799,360 +2804,368 @@ export function FormProofWorkbench() {
             </span>
           </div>
 
-          {importedProposalNames.length > 0 && (
-            <div className="dialog-safety-note">
-              <FileJson aria-hidden="true" />
-              <span>
-                This plan contains {importedProposalNames.length} untrusted
-                package proposals. The exact source and recorded plan matched,
-                but creator identity was not verified. Confirm each value as if
-                it were a new external suggestion.
-              </span>
-            </div>
-          )}
+          <div className="review-dialog-body">
+            {importedProposalNames.length > 0 && (
+              <div className="dialog-safety-note">
+                <FileJson aria-hidden="true" />
+                <span>
+                  This plan contains {importedProposalNames.length} untrusted
+                  package proposals. The exact source and recorded plan matched,
+                  but creator identity was not verified. Confirm each value as
+                  if it were a new external suggestion.
+                </span>
+              </div>
+            )}
 
-          <div>
-            <p className="section-kicker">Choose the artifact yourself</p>
-            <p className="button-note">
-              WebMCP reports the available strategies but cannot select one or
-              trigger export.
-            </p>
-          </div>
-          <div className="review-checklist" aria-label="Artifact choice">
-            {documentState?.inspection.protection.exportStrategies.map(
-              (strategy) => {
-                const copy = exportStrategyCopy(strategy);
-                const createsPdf = strategy !== 'fill_package';
-                const unavailable =
-                  createsPdf &&
-                  (!validation?.canApprove || hasBlockedPdfContent);
-                const strategyId = `export-strategy-${strategy}`;
+            <div>
+              <p className="section-kicker">Choose the artifact yourself</p>
+              <p className="button-note">
+                WebMCP reports the available strategies but cannot select one or
+                trigger export.
+              </p>
+            </div>
+            <div className="review-checklist" aria-label="Artifact choice">
+              {documentState?.inspection.protection.exportStrategies.map(
+                (strategy) => {
+                  const copy = exportStrategyCopy(strategy);
+                  const createsPdf = strategy !== 'fill_package';
+                  const unavailable =
+                    createsPdf &&
+                    (!validation?.canApprove || hasBlockedPdfContent);
+                  const strategyId = `export-strategy-${strategy}`;
+                  return (
+                    <div className="review-check" key={strategy}>
+                      <input
+                        id={strategyId}
+                        name="export-strategy"
+                        type="radio"
+                        checked={selectedExportStrategy === strategy}
+                        onChange={() => {
+                          setSelectedExportStrategy(strategy);
+                          setActiveContentAcknowledged(false);
+                          setProtectionLossAcknowledged(false);
+                        }}
+                        disabled={exporting || reviewMutating || unavailable}
+                      />
+                      <div className="review-check-copy">
+                        <span className="review-check-heading">
+                          <label htmlFor={strategyId}>
+                            <strong>{copy.title}</strong>
+                          </label>
+                          <Badge variant="outline">
+                            {strategy === 'confirmed_plain_derivative_pdf'
+                              ? 'Explicit confirmation'
+                              : strategy === 'fill_package'
+                                ? 'No PDF rewrite'
+                                : 'PDF output'}
+                          </Badge>
+                        </span>
+                        <span className="human-only-note">
+                          {copy.detail}
+                          {unavailable
+                            ? ' This PDF option is unavailable until its validation or native-action blockers are resolved.'
+                            : ''}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                },
+              )}
+            </div>
+
+            <div className="review-checklist">
+              {reviewNames.map((fieldName, index) => {
+                const field = formState?.fields[fieldName];
+                const staged = formState?.draft[fieldName];
+                const descriptor = descriptorByName.get(fieldName);
+                const isMultiline = descriptor?.multiline === true;
+                const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
+                  descriptor?.choices ?? [],
+                );
+                const checkboxId = `review-field-${index}`;
+                const isHumanCompletion = !staged;
+                const importedProposal = importedProposalSet.has(fieldName);
+                const isHumanPinned =
+                  staged?.actor === 'human' && !importedProposal;
+                const requiresIdentityReview =
+                  (staged?.identityReviewReasons?.length ?? 0) > 0;
+                const canCorrect =
+                  (staged?.actor === 'agent' || importedProposal) &&
+                  field !== undefined &&
+                  !field.readOnly &&
+                  !field.humanOnly &&
+                  field.type !== 'signature';
+                const sourceIsBlank = isBlankValue(field?.sourceValue ?? null);
+                const requiresHumanCompletion =
+                  formState?.validation.issues.some(
+                    (issue) =>
+                      issue.fieldName === fieldName &&
+                      issue.code === 'human_completion_required',
+                  ) ?? false;
+                const isRequiredMissing =
+                  formState?.validation.issues.some(
+                    (issue) =>
+                      issue.fieldName === fieldName &&
+                      issue.code === 'required_missing',
+                  ) ?? false;
                 return (
-                  <div className="review-check" key={strategy}>
+                  <div className="review-check" key={fieldName}>
                     <input
-                      id={strategyId}
-                      name="export-strategy"
-                      type="radio"
-                      checked={selectedExportStrategy === strategy}
-                      onChange={() => {
-                        setSelectedExportStrategy(strategy);
-                        setActiveContentAcknowledged(false);
-                        setProtectionLossAcknowledged(false);
+                      id={checkboxId}
+                      type="checkbox"
+                      checked={confirmedFields.has(fieldName)}
+                      onChange={(event) => {
+                        setConfirmedFields((current) => {
+                          const next = new Set(current);
+                          if (event.target.checked) next.add(fieldName);
+                          else next.delete(fieldName);
+                          return next;
+                        });
                       }}
-                      disabled={exporting || reviewMutating || unavailable}
+                      disabled={exporting || reviewMutating}
                     />
                     <div className="review-check-copy">
                       <span className="review-check-heading">
-                        <label htmlFor={strategyId}>
-                          <strong>{copy.title}</strong>
+                        <label htmlFor={checkboxId}>
+                          <strong>
+                            {requiresIdentityReview
+                              ? `Verify field identity — ${field?.label ?? fieldName}`
+                              : (field?.label ?? fieldName)}
+                          </strong>
                         </label>
                         <Badge variant="outline">
-                          {strategy === 'confirmed_plain_derivative_pdf'
-                            ? 'Explicit confirmation'
-                            : strategy === 'fill_package'
-                              ? 'No PDF rewrite'
-                              : 'PDF output'}
+                          {importedProposal
+                            ? 'Imported · review required'
+                            : isHumanPinned
+                              ? 'Human correction · agent locked'
+                              : requiresIdentityReview
+                                ? 'Identity check required'
+                                : isRequiredMissing
+                                  ? 'Required field is blank'
+                                  : isHumanCompletion
+                                    ? requiresHumanCompletion
+                                      ? 'Complete after export'
+                                      : 'Preserved unchanged'
+                                    : staged
+                                      ? claimedBasisLabel(
+                                          staged.provenance.kind,
+                                        )
+                                      : 'Agent proposal'}
                         </Badge>
                       </span>
-                      <span className="human-only-note">
-                        {copy.detail}
-                        {unavailable
-                          ? ' This PDF option is unavailable until its validation or native-action blockers are resolved.'
-                          : ''}
-                      </span>
+                      {isHumanCompletion ? (
+                        <span className="human-only-note">
+                          {isRequiredMissing
+                            ? 'This PDF marks the field as required and it is still blank. Confirm that the fill package remains incomplete and complete the field manually.'
+                            : requiresHumanCompletion
+                              ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
+                              : sourceIsBlank
+                                ? 'FormProof will preserve this blank field. Complete it personally in a trusted PDF reader if needed.'
+                                : 'FormProof will preserve the existing value and will not rewrite this field.'}
+                        </span>
+                      ) : (
+                        <span
+                          className={`full-diff${isMultiline ? ' is-multiline' : ''}`}
+                        >
+                          <span>
+                            <small>Before</small>
+                            {formatValue(
+                              field?.sourceValue ?? null,
+                              descriptor?.choices,
+                            )}
+                          </span>
+                          <ArrowRight aria-hidden="true" />
+                          <span>
+                            <small>After</small>
+                            <b>
+                              {formatValue(
+                                staged?.value ?? null,
+                                descriptor?.choices,
+                              )}
+                            </b>
+                          </span>
+                        </span>
+                      )}
+                      {requiresIdentityReview && (
+                        <span className="human-only-note">
+                          This candidate can be recalled by a non-authoritative
+                          discovery hint. That hint is not the field label and
+                          is not evidence. Open the untouched original PDF and
+                          verify the displayed field at{' '}
+                          {formatFieldLocation(descriptor)}
+                          before checking this box.
+                        </span>
+                      )}
+                      {choiceLabelReviewNotice && (
+                        <span className="human-only-note">
+                          {choiceLabelReviewNotice}
+                        </span>
+                      )}
+                      {!isHumanCompletion && isRequiredMissing && (
+                        <span className="human-only-note">
+                          This staged value leaves a PDF-required field blank.
+                          Confirm that the fill package remains incomplete and
+                          complete the field manually.
+                        </span>
+                      )}
+                      {staged?.provenance.rationale && (
+                        <em>{staged.provenance.rationale}</em>
+                      )}
+                      {staged?.provenance.evidence && (
+                        <div className="evidence-block">
+                          <small>Evidence</small>
+                          <ul className="evidence-list">
+                            {staged.provenance.evidence
+                              .slice(0, 5)
+                              .map((item) => (
+                                <li key={item}>{item}</li>
+                              ))}
+                          </ul>
+                          {staged.provenance.evidence.length > 5 && (
+                            <small>
+                              {staged.provenance.evidence.length - 5} additional
+                              evidence items were omitted from this view.
+                            </small>
+                          )}
+                        </div>
+                      )}
+                      {correctionFieldName === fieldName &&
+                      canCorrect &&
+                      staged &&
+                      field ? (
+                        <HumanCorrectionEditor
+                          field={field}
+                          choices={descriptor?.choices ?? []}
+                          multiline={isMultiline}
+                          initialValue={staged.value}
+                          disabled={exporting || reviewMutating}
+                          onCancel={() => setCorrectionFieldName(null)}
+                          onSave={(value) =>
+                            void correctProposal(fieldName, value)
+                          }
+                        />
+                      ) : isHumanPinned ? (
+                        <Button
+                          type="button"
+                          className="self-start"
+                          variant="destructive"
+                          size="xs"
+                          onClick={() =>
+                            void rejectProposals([fieldName], 'unlock')
+                          }
+                          disabled={exporting || reviewMutating}
+                        >
+                          Remove correction &amp; let agent suggest
+                        </Button>
+                      ) : staged ? (
+                        <div className="flex flex-wrap gap-2">
+                          {canCorrect && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="xs"
+                              onClick={() => {
+                                setCorrectionFieldName(fieldName);
+                                setConfirmedFields((current) => {
+                                  const next = new Set(current);
+                                  next.delete(fieldName);
+                                  return next;
+                                });
+                              }}
+                              disabled={exporting || reviewMutating}
+                            >
+                              <Pencil aria-hidden="true" /> Correct value
+                            </Button>
+                          )}
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            size="xs"
+                            onClick={() => void rejectProposals([fieldName])}
+                            disabled={exporting || reviewMutating}
+                          >
+                            Reject proposal
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 );
-              },
-            )}
-          </div>
-
-          <div className="review-checklist">
-            {reviewNames.map((fieldName, index) => {
-              const field = formState?.fields[fieldName];
-              const staged = formState?.draft[fieldName];
-              const descriptor = descriptorByName.get(fieldName);
-              const isMultiline = descriptor?.multiline === true;
-              const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
-                descriptor?.choices ?? [],
-              );
-              const checkboxId = `review-field-${index}`;
-              const isHumanCompletion = !staged;
-              const importedProposal = importedProposalSet.has(fieldName);
-              const isHumanPinned =
-                staged?.actor === 'human' && !importedProposal;
-              const requiresIdentityReview =
-                (staged?.identityReviewReasons?.length ?? 0) > 0;
-              const canCorrect =
-                (staged?.actor === 'agent' || importedProposal) &&
-                field !== undefined &&
-                !field.readOnly &&
-                !field.humanOnly &&
-                field.type !== 'signature';
-              const sourceIsBlank = isBlankValue(field?.sourceValue ?? null);
-              const requiresHumanCompletion =
-                formState?.validation.issues.some(
-                  (issue) =>
-                    issue.fieldName === fieldName &&
-                    issue.code === 'human_completion_required',
-                ) ?? false;
-              const isRequiredMissing =
-                formState?.validation.issues.some(
-                  (issue) =>
-                    issue.fieldName === fieldName &&
-                    issue.code === 'required_missing',
-                ) ?? false;
-              return (
-                <div className="review-check" key={fieldName}>
+              })}
+              {requiresActiveContentAcknowledgment && (
+                <div className="review-check">
                   <input
-                    id={checkboxId}
+                    id="review-active-content"
                     type="checkbox"
-                    checked={confirmedFields.has(fieldName)}
-                    onChange={(event) => {
-                      setConfirmedFields((current) => {
-                        const next = new Set(current);
-                        if (event.target.checked) next.add(fieldName);
-                        else next.delete(fieldName);
-                        return next;
-                      });
-                    }}
+                    checked={activeContentAcknowledged}
+                    onChange={(event) =>
+                      setActiveContentAcknowledged(event.target.checked)
+                    }
                     disabled={exporting || reviewMutating}
                   />
                   <div className="review-check-copy">
                     <span className="review-check-heading">
-                      <label htmlFor={checkboxId}>
-                        <strong>
-                          {requiresIdentityReview
-                            ? `Verify field identity — ${field?.label ?? fieldName}`
-                            : (field?.label ?? fieldName)}
-                        </strong>
+                      <label htmlFor="review-active-content">
+                        <strong>Unvalidated PDF behaviors</strong>
                       </label>
-                      <Badge variant="outline">
-                        {importedProposal
-                          ? 'Imported · review required'
-                          : isHumanPinned
-                            ? 'Human correction · agent locked'
-                            : requiresIdentityReview
-                              ? 'Identity check required'
-                              : isRequiredMissing
-                                ? 'Required field is blank'
-                                : isHumanCompletion
-                                  ? requiresHumanCompletion
-                                    ? 'Complete after export'
-                                    : 'Preserved unchanged'
-                                  : staged
-                                    ? claimedBasisLabel(staged.provenance.kind)
-                                    : 'Agent proposal'}
-                      </Badge>
+                      <Badge variant="outline">Source risk</Badge>
                     </span>
-                    {isHumanCompletion ? (
-                      <span className="human-only-note">
-                        {isRequiredMissing
-                          ? 'This PDF marks the field as required and it is still blank. Confirm that the fill package remains incomplete and complete the field manually.'
-                          : requiresHumanCompletion
-                            ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
-                            : sourceIsBlank
-                              ? 'FormProof will preserve this blank field. Complete it personally in a trusted PDF reader if needed.'
-                              : 'FormProof will preserve the existing value and will not rewrite this field.'}
-                      </span>
-                    ) : (
-                      <span
-                        className={`full-diff${isMultiline ? ' is-multiline' : ''}`}
-                      >
-                        <span>
-                          <small>Before</small>
-                          {formatValue(
-                            field?.sourceValue ?? null,
-                            descriptor?.choices,
-                          )}
-                        </span>
-                        <ArrowRight aria-hidden="true" />
-                        <span>
-                          <small>After</small>
-                          <b>
-                            {formatValue(
-                              staged?.value ?? null,
-                              descriptor?.choices,
-                            )}
-                          </b>
-                        </span>
-                      </span>
-                    )}
-                    {requiresIdentityReview && (
-                      <span className="human-only-note">
-                        This candidate can be recalled by a non-authoritative
-                        discovery hint. That hint is not the field label and is
-                        not evidence. Open the untouched original PDF and verify
-                        the displayed field at {formatFieldLocation(descriptor)}
-                        before checking this box.
-                      </span>
-                    )}
-                    {choiceLabelReviewNotice && (
-                      <span className="human-only-note">
-                        {choiceLabelReviewNotice}
-                      </span>
-                    )}
-                    {!isHumanCompletion && isRequiredMissing && (
-                      <span className="human-only-note">
-                        This staged value leaves a PDF-required field blank.
-                        Confirm that the fill package remains incomplete and
-                        complete the field manually.
-                      </span>
-                    )}
-                    {staged?.provenance.rationale && (
-                      <em>{staged.provenance.rationale}</em>
-                    )}
-                    {staged?.provenance.evidence && (
-                      <div className="evidence-block">
-                        <small>Evidence</small>
-                        <ul className="evidence-list">
-                          {staged.provenance.evidence
-                            .slice(0, 5)
-                            .map((item) => (
-                              <li key={item}>{item}</li>
-                            ))}
-                        </ul>
-                        {staged.provenance.evidence.length > 5 && (
-                          <small>
-                            {staged.provenance.evidence.length - 5} additional
-                            evidence items were omitted from this view.
-                          </small>
-                        )}
-                      </div>
-                    )}
-                    {correctionFieldName === fieldName &&
-                    canCorrect &&
-                    staged &&
-                    field ? (
-                      <HumanCorrectionEditor
-                        field={field}
-                        choices={descriptor?.choices ?? []}
-                        multiline={isMultiline}
-                        initialValue={staged.value}
-                        disabled={exporting || reviewMutating}
-                        onCancel={() => setCorrectionFieldName(null)}
-                        onSave={(value) =>
-                          void correctProposal(fieldName, value)
-                        }
-                      />
-                    ) : isHumanPinned ? (
-                      <Button
-                        type="button"
-                        className="self-start"
-                        variant="destructive"
-                        size="xs"
-                        onClick={() =>
-                          void rejectProposals([fieldName], 'unlock')
-                        }
-                        disabled={exporting || reviewMutating}
-                      >
-                        Remove correction &amp; let agent suggest
-                      </Button>
-                    ) : staged ? (
-                      <div className="flex flex-wrap gap-2">
-                        {canCorrect && (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="xs"
-                            onClick={() => {
-                              setCorrectionFieldName(fieldName);
-                              setConfirmedFields((current) => {
-                                const next = new Set(current);
-                                next.delete(fieldName);
-                                return next;
-                              });
-                            }}
-                            disabled={exporting || reviewMutating}
-                          >
-                            <Pencil aria-hidden="true" /> Correct value
-                          </Button>
-                        )}
-                        <Button
-                          type="button"
-                          variant="destructive"
-                          size="xs"
-                          onClick={() => void rejectProposals([fieldName])}
-                          disabled={exporting || reviewMutating}
-                        >
-                          Reject proposal
-                        </Button>
-                      </div>
-                    ) : null}
+                    <span className="human-only-note">
+                      Detected markers: {activeContentDescription}. Categories
+                      can overlap. FormProof preserves these behaviors but does
+                      not execute or validate them; the exported copy may run
+                      them in another PDF reader. Continue only if you trust the
+                      source.
+                    </span>
                   </div>
                 </div>
-              );
-            })}
-            {requiresActiveContentAcknowledgment && (
-              <div className="review-check">
-                <input
-                  id="review-active-content"
-                  type="checkbox"
-                  checked={activeContentAcknowledged}
-                  onChange={(event) =>
-                    setActiveContentAcknowledged(event.target.checked)
-                  }
-                  disabled={exporting || reviewMutating}
-                />
-                <div className="review-check-copy">
-                  <span className="review-check-heading">
-                    <label htmlFor="review-active-content">
-                      <strong>Unvalidated PDF behaviors</strong>
-                    </label>
-                    <Badge variant="outline">Source risk</Badge>
-                  </span>
-                  <span className="human-only-note">
-                    Detected markers: {activeContentDescription}. Categories can
-                    overlap. FormProof preserves these behaviors but does not
-                    execute or validate them; the exported copy may run them in
-                    another PDF reader. Continue only if you trust the source.
-                  </span>
+              )}
+              {requiresProtectionLossAcknowledgment && (
+                <div className="review-check">
+                  <input
+                    id="review-protection-loss"
+                    type="checkbox"
+                    checked={protectionLossAcknowledged}
+                    onChange={(event) =>
+                      setProtectionLossAcknowledged(event.target.checked)
+                    }
+                    disabled={exporting || reviewMutating}
+                  />
+                  <div className="review-check-copy">
+                    <span className="review-check-heading">
+                      <label htmlFor="review-protection-loss">
+                        <strong>
+                          Reader Extensions rights will be removed
+                        </strong>
+                      </label>
+                      <Badge variant="outline">Required confirmation</Badge>
+                    </span>
+                    <span className="human-only-note">
+                      I understand this creates an ordinary derivative PDF,
+                      removes the recognized UR/UR3 rights entry, its signature
+                      dictionary, and its declared CMS container. CMS integrity
+                      and signer trust were not verified here; the original PDF
+                      stays unchanged.
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
-            {requiresProtectionLossAcknowledgment && (
-              <div className="review-check">
-                <input
-                  id="review-protection-loss"
-                  type="checkbox"
-                  checked={protectionLossAcknowledged}
-                  onChange={(event) =>
-                    setProtectionLossAcknowledged(event.target.checked)
-                  }
-                  disabled={exporting || reviewMutating}
-                />
-                <div className="review-check-copy">
-                  <span className="review-check-heading">
-                    <label htmlFor="review-protection-loss">
-                      <strong>Reader Extensions rights will be removed</strong>
-                    </label>
-                    <Badge variant="outline">Required confirmation</Badge>
-                  </span>
-                  <span className="human-only-note">
-                    I understand this creates an ordinary derivative PDF,
-                    removes the recognized UR/UR3 rights entry, its signature
-                    dictionary, and its declared CMS container. CMS integrity
-                    and signer trust were not verified here; the original PDF
-                    stays unchanged.
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
 
-          <div className="dialog-safety-note">
-            {selectedExportStrategy === 'fill_package' ? (
-              <FileJson aria-hidden="true" />
-            ) : (
-              <ShieldCheck aria-hidden="true" />
-            )}
-            <span>
-              {selectedExportStrategy === 'filled_pdf'
-                ? 'Filled PDF: the original bytes stay unchanged. A new PDF is reopened, its staged values are verified, and normal appearance streams are confirmed present. Visual rendering is not independently checked. Human-only fields remain untouched.'
-                : selectedExportStrategy === 'confirmed_plain_derivative_pdf'
-                  ? 'Confirmed derivative: the original stays unchanged, but the new PDF intentionally loses its recognized Reader Extensions rights. No signature-preservation claim is made.'
-                  : 'Original-untouched fill package: no PDF bytes are written. The JSON package is round-trip checked and bound to this source and plan; it is not a completed PDF form.'}
-            </span>
+            <div className="dialog-safety-note">
+              {selectedExportStrategy === 'fill_package' ? (
+                <FileJson aria-hidden="true" />
+              ) : (
+                <ShieldCheck aria-hidden="true" />
+              )}
+              <span>
+                {selectedExportStrategy === 'filled_pdf'
+                  ? 'Filled PDF: the original bytes stay unchanged. A new PDF is reopened, its staged values are verified, and normal appearance streams are confirmed present. Visual rendering is not independently checked. Human-only fields remain untouched.'
+                  : selectedExportStrategy === 'confirmed_plain_derivative_pdf'
+                    ? 'Confirmed derivative: the original stays unchanged, but the new PDF intentionally loses its recognized Reader Extensions rights. No signature-preservation claim is made.'
+                    : 'Original-untouched fill package: no PDF bytes are written. The JSON package is round-trip checked and bound to this source and plan; it is not a completed PDF form.'}
+              </span>
+            </div>
           </div>
 
           <DialogFooter>

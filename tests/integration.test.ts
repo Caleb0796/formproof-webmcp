@@ -551,6 +551,13 @@ void test('delegates upload identity to PDF inspection and renders multiline rev
   );
   assert.ok(loadSourceStart >= 0 && loadSourceEnd > loadSourceStart);
   const loadSource = workbench.slice(loadSourceStart, loadSourceEnd);
+  const emptyCheck = loadSource.indexOf('bytes.byteLength === 0');
+  const workerStart = loadSource.indexOf('new Worker(');
+  assert.ok(emptyCheck >= 0 && workerStart > emptyCheck);
+  assert.match(
+    loadSource,
+    /The selected file is empty\. Choose a non-empty PDF\./u,
+  );
   assert.match(loadSource, /new Worker\(/u);
   assert.match(loadSource, /worker\.postMessage\(transferableBytes/u);
 
@@ -589,6 +596,36 @@ void test('delegates upload identity to PDF inspection and renders multiline rev
   const fullMultiline = styles.slice(fullMultilineStart, fullMultilineEnd);
   assert.match(fullMultiline, /overflow-wrap: anywhere/u);
   assert.match(fullMultiline, /white-space: pre-wrap/u);
+
+  const reviewBodyStart = workbench.indexOf(
+    '<div className="review-dialog-body">',
+  );
+  const reviewBodyEnd = workbench.indexOf('<DialogFooter>', reviewBodyStart);
+  assert.ok(reviewBodyStart >= 0 && reviewBodyEnd > reviewBodyStart);
+  const reviewBody = workbench.slice(reviewBodyStart, reviewBodyEnd);
+  assert.match(reviewBody, /This plan contains/u);
+  assert.match(reviewBody, /Choose the artifact yourself/u);
+  assert.match(reviewBody, /aria-label="Artifact choice"/u);
+  assert.match(reviewBody, /Original-untouched fill package:/u);
+
+  const reviewDialogStart = styles.indexOf('.review-dialog {');
+  const reviewDialogEnd = styles.indexOf(
+    ".review-dialog [data-slot='dialog-title']",
+    reviewDialogStart,
+  );
+  assert.ok(reviewDialogStart >= 0 && reviewDialogEnd > reviewDialogStart);
+  const reviewDialog = styles.slice(reviewDialogStart, reviewDialogEnd);
+  assert.match(
+    reviewDialog,
+    /grid-template-rows: auto auto minmax\(0, 1fr\) auto/u,
+  );
+  assert.match(reviewDialog, /\.review-dialog-body \{/u);
+  assert.match(reviewDialog, /min-height: 0/u);
+  assert.match(reviewDialog, /overflow-y: auto/u);
+  assert.match(
+    reviewDialog,
+    /\.review-dialog-body > \.review-checklist \{[\s\S]*?overflow: visible/u,
+  );
 });
 
 void test('denies framing without constraining the PDF preview or inspection worker', async () => {
