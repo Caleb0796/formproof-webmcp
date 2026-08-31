@@ -104,6 +104,7 @@ interface ActualCall {
 }
 
 const SOURCE_HASH = 'a'.repeat(64);
+const EVAL_DOCUMENT_SESSION_ID = 'e'.repeat(32);
 const DEMO_SOURCE_HASH = createHash('sha256')
   .update(await readFile(new URL('../public/demo-form.pdf', import.meta.url)))
   .digest('hex');
@@ -176,7 +177,6 @@ const MOCK_DATA_KEYS: Record<string, readonly string[]> = {
     'readyForReview',
     'reviewArtifacts',
     'exportStrategySelection',
-    'exportBlockedByPdfActions',
     'stagedFieldCount',
     ...VALIDATION_KEYS,
   ],
@@ -213,6 +213,7 @@ function success(): FormProofAdapterResult {
     ok: true,
     stateVersion: 4,
     sourceHash: SOURCE_HASH,
+    documentSessionId: '3'.repeat(32),
     data: {},
   };
 }
@@ -945,7 +946,14 @@ function assertJourneyBindings(
         );
         const parsedCursor = parseFormContextCursor(
           args.cursor as string,
-          { sourceHash: DEMO_SOURCE_HASH, stateVersion },
+          {
+            documentSessionId: assertString(
+              (args.cursor as string).split(':')[1],
+              `${path}.cursor document session`,
+            ),
+            sourceHash: DEMO_SOURCE_HASH,
+            stateVersion,
+          },
           args,
         );
         assert.equal(parsedCursor.ok, true);
@@ -1123,6 +1131,11 @@ function assertNonNegativeInteger(value: unknown, path: string): number {
   return value as number;
 }
 
+function assertString(value: unknown, path: string): string {
+  assert.equal(typeof value, 'string', `${path} must be text`);
+  return value as string;
+}
+
 function assertStringArray(value: unknown, path: string): string[] {
   assert.ok(Array.isArray(value), `${path} must be an array`);
   value.forEach((item, index) =>
@@ -1165,6 +1178,7 @@ function assertValidationReportShape(value: unknown, path: string): void {
         'inference_requires_review',
         'low_confidence_requires_review',
         'field_identity_requires_review',
+        'agent_assertion_requires_review',
       ].includes(issue.code as string),
       `${path}.issues[${index}].code is invalid`,
     );
@@ -1177,11 +1191,13 @@ function assertValidationReportShape(value: unknown, path: string): void {
       'string',
       `${path}.issues[${index}].fieldName must be text`,
     );
-    assert.equal(
-      typeof issue.message,
-      'string',
-      `${path}.issues[${index}].message must be text`,
-    );
+    if (hasOwn(issue, 'message')) {
+      assert.equal(
+        typeof issue.message,
+        'string',
+        `${path}.issues[${index}].message must be text`,
+      );
+    }
     if (issue.severity === 'error') blockerCount += 1;
     if (issue.severity === 'review') {
       reviewCount += 1;
@@ -2084,12 +2100,6 @@ function assertMockOutputDataShape(call: FunctionCall, path: string): void {
     );
     assertStringArray(data.reviewArtifacts, `${dataPath}.reviewArtifacts`);
     assert.equal(data.exportStrategySelection, 'human_ui_only');
-    if (hasOwn(data, 'exportBlockedByPdfActions')) {
-      assertNonNegativeInteger(
-        data.exportBlockedByPdfActions,
-        `${dataPath}.exportBlockedByPdfActions`,
-      );
-    }
     assertValidationReportShape(data, dataPath);
   } else if (call.functionName === 'start_fill_review') {
     for (const key of ['reviewOpened', 'planHash', 'humanActionRequired']) {
@@ -2482,6 +2492,7 @@ void test('publishes agent evals that preserve DS-11 ambiguity and its negative 
     ['get_field_evidence'],
   );
   assert.deepEqual(ambiguousCalls[0].arguments, {
+    expectedDocumentSessionId: EVAL_DOCUMENT_SESSION_ID,
     expectedStateVersion: 0,
     expectedSourceHash: DS11_SOURCE_HASH,
     fieldNames: ['Applicant SSN 1', 'Applicant SSN 3', 'Applicant SSN 2'],
@@ -2607,10 +2618,14 @@ void test('binds authored context continuations to the demo source', async () =>
   for (const call of cursorCalls) {
     const args = requireRecord(call.arguments, 'context continuation args');
     const cursor = args.cursor as string;
-    assert.match(cursor, /^ctxq?:0:\d+:[a-f0-9]{32}(?::[a-f0-9]{16})?$/u);
+    assert.match(
+      cursor,
+      /^ctxq?:[a-f0-9]{32}:0:\d+:[a-f0-9]{32}(?::[a-f0-9]{16})?$/u,
+    );
+    const documentSessionId = cursor.split(':')[1];
     const parsedCursor = parseFormContextCursor(
       cursor,
-      { sourceHash: DEMO_SOURCE_HASH, stateVersion: 0 },
+      { documentSessionId, sourceHash: DEMO_SOURCE_HASH, stateVersion: 0 },
       args,
     );
     assert.equal(parsedCursor.ok, true);
@@ -2647,7 +2662,14 @@ void test('binds authored context continuations to the demo source', async () =>
   assert.deepEqual(
     parseFormContextCursor(
       failedQueryArgs.cursor as string,
-      { sourceHash: DEMO_SOURCE_HASH, stateVersion: 0 },
+      {
+        documentSessionId: assertString(
+          (failedQueryArgs.cursor as string).split(':')[1],
+          'queryMismatch.cursor document session',
+        ),
+        sourceHash: DEMO_SOURCE_HASH,
+        stateVersion: 0,
+      },
       failedQueryArgs,
     ),
     { ok: false, code: 'invalid_input' },
@@ -2718,6 +2740,10 @@ void test('binds authored context continuations to the demo source', async () =>
   assert.deepEqual(
     parseFieldChoiceCursor(
       choiceCall.arguments.choiceCursor as string,
+      assertString(
+        priorResponse.documentSessionId,
+        'choiceContinuation.response.documentSessionId',
+      ),
       SOURCE_HASH,
       'frm.r4d6',
     ),
@@ -3186,7 +3212,12 @@ void test('replays every concrete journey stage against the demo state', async (
       assert.equal(mockOutput.sourceHash, staged.state.source.sourceHash);
       assert.deepEqual(data.changedFields, staged.changedFields);
       assert.equal(data.planHash, staged.state.planHash);
-      assert.deepEqual(data.validation, staged.state.validation);
+      assert.deepEqual(data.validation, {
+        ...staged.state.validation,
+        issues: staged.state.validation.issues.map(
+          ({ message: _message, ...issue }) => issue,
+        ),
+      });
     }
   }
 
@@ -3326,6 +3357,7 @@ void test('isolates an injected PDF value behind exact field evidence', async ()
     ],
   );
   assert.deepEqual(evidenceCall.arguments, {
+    expectedDocumentSessionId: EVAL_DOCUMENT_SESSION_ID,
     expectedStateVersion: 0,
     expectedSourceHash: SYNTHETIC_INJECTION_SOURCE_HASH,
     fieldNames: ['frm.s1u2'],
@@ -3362,7 +3394,16 @@ void test('maps a VA-derived synthetic choice fixture without impersonating the 
       message.type === 'functioncall' && message.name === 'get_field_evidence',
   );
   assert.ok(evidenceRequest);
-  assert.deepEqual(evidenceRequest.arguments, {
+  const evidenceArguments = requireRecord(
+    evidenceRequest.arguments,
+    'va.evidence.arguments',
+  );
+  assert.match(
+    String(evidenceArguments.expectedDocumentSessionId),
+    /^[a-f0-9]{32}$/u,
+  );
+  assert.deepEqual(evidenceArguments, {
+    expectedDocumentSessionId: evidenceArguments.expectedDocumentSessionId,
     expectedStateVersion: 0,
     expectedSourceHash: SYNTHETIC_VA_CHOICE_SOURCE_HASH,
     fieldNames: [VA_MEDICARE_FIELD_NAME],
@@ -3696,13 +3737,13 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
   );
   assert.equal(
     outcomes.filter(({ artifactType }) => artifactType === 'filled_pdf').length,
-    2,
+    0,
   );
   assert.equal(
     outcomes.filter(
       ({ artifactType }) => artifactType === 'original_untouched_fill_package',
     ).length,
-    3,
+    5,
   );
   assert.equal(
     documents.filter(({ queryExperiment }) => queryExperiment !== undefined)
@@ -3712,19 +3753,21 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
   assert.equal(
     documents.filter(({ writeExperiment }) => writeExperiment !== undefined)
       .length,
-    2,
+    0,
   );
   assert.equal(
     documents.filter(
       ({ fillPackageExperiment }) => fillPackageExperiment !== undefined,
     ).length,
-    3,
+    5,
   );
 
-  const protectedOutcomes = outcomes.filter(
-    ({ artifactType }) => artifactType === 'original_untouched_fill_package',
+  const usageRightsOutcomes = outcomes.filter(
+    ({ protection }) =>
+      isRecord(protection) && protection.protectionType === 'usage_rights',
   );
-  for (const outcome of protectedOutcomes) {
+  assert.equal(usageRightsOutcomes.length, 3);
+  for (const outcome of usageRightsOutcomes) {
     assert.equal(outcome.expectedPdfRewriteError, 'PDF_XFA_UNSUPPORTED');
     const protection = requireRecord(
       outcome.protection,
@@ -3742,6 +3785,16 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
     assert.equal(protection.docMdpPermission, null);
     assert.equal(protection.xfaPresent, true);
     assert.deepEqual(protection.exportStrategies, ['fill_package']);
+  }
+  for (const outcome of outcomes) {
+    const contentRisk = requireRecord(
+      outcome.contentRisk,
+      'corpus.outcome.contentRisk',
+    );
+    assert.equal(contentRisk.blocksPdfExport, true);
+    assert.equal(contentRisk.blocksInteractivePreview, true);
+    assert.ok(Array.isArray(contentRisk.reasons));
+    assert.ok(contentRisk.reasons.length > 0);
   }
 
   const expectedCompatibility = new Map([
@@ -3762,14 +3815,14 @@ void test('defines an offline five-document official PDF benchmark corpus', asyn
     [
       'uscis-i9-2025',
       {
-        filledPdfAvailable: true,
+        filledPdfAvailable: false,
         originalUntouchedFillPackageAvailable: true,
       },
     ],
     [
       'state-ds11-2025',
       {
-        filledPdfAvailable: true,
+        filledPdfAvailable: false,
         originalUntouchedFillPackageAvailable: true,
       },
     ],

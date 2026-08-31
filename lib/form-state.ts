@@ -25,6 +25,12 @@ export type ProvenanceKind =
 
 export type UpdateActor = 'agent' | 'human';
 
+export const MAX_FILL_PACKAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_PROVENANCE_EVIDENCE_ITEMS = 5;
+export const MAX_PROVENANCE_TEXT_LENGTH = 500;
+export const MAX_PLAN_PROVENANCE_ITEMS = 2_048;
+export const MAX_PLAN_PROVENANCE_UTF8_BYTES = 512 * 1024;
+
 export interface SourceMetadata {
   readonly fileName: string;
   readonly sourceHash: string;
@@ -176,6 +182,7 @@ export interface ValidationIssue {
     | 'required_missing'
     | 'human_completion_required'
     | 'field_identity_requires_review'
+    | 'agent_assertion_requires_review'
     | 'inference_requires_review'
     | 'low_confidence_requires_review';
   readonly severity: 'error' | 'review';
@@ -197,6 +204,7 @@ export interface ValidationReport {
 }
 
 export interface ApprovalRecord {
+  readonly documentSessionId: string;
   readonly sourceHash: string;
   readonly planHash: string;
   readonly stateVersion: number;
@@ -206,6 +214,7 @@ export interface ApprovalRecord {
 }
 
 export interface OutputRecord {
+  readonly documentSessionId: string;
   readonly sourceHash: string;
   readonly planHash: string;
   readonly stateVersion: number;
@@ -221,9 +230,11 @@ export interface VerificationRecord extends OutputRecord {
 }
 
 export interface FormState {
+  readonly documentSessionId: string;
   readonly source: Readonly<SourceMetadata>;
   readonly fields: Readonly<Record<string, Readonly<FormFieldDefinition>>>;
   readonly draft: Readonly<Record<string, Readonly<StagedFieldValue>>>;
+  readonly importedProposalFieldNames?: readonly string[];
   readonly stateVersion: number;
   readonly planHash: string;
   readonly validation: Readonly<ValidationReport>;
@@ -246,6 +257,9 @@ export type StateErrorCode =
   | 'invalid_type'
   | 'invalid_option'
   | 'invalid_provenance'
+  | 'invalid_package'
+  | 'package_too_large'
+  | 'unsupported_package_schema'
   | 'validation_failed'
   | 'review_unconfirmed'
   | 'approval_missing'
@@ -440,6 +454,31 @@ export interface ExportFillPackageRequest {
   readonly createdAt?: string;
 }
 
+export interface FillPackageImportReceipt {
+  readonly packageHash: string;
+  readonly sourceHash: string;
+  readonly recordedPlanHash: string;
+  readonly restoredPlanHash: string;
+  readonly sourceHashVerified: true;
+  readonly planHashVerified: true;
+  readonly authenticityVerified: false;
+  readonly packageDisplayMetadataUsed: false;
+  readonly sourcePdfModified: false;
+  readonly importedFieldNames: readonly string[];
+}
+
+export type ImportFillPackageResult =
+  | {
+      readonly ok: true;
+      readonly state: FormState;
+      readonly receipt: Readonly<FillPackageImportReceipt>;
+    }
+  | {
+      readonly ok: false;
+      readonly state: FormState;
+      readonly errors: readonly StateError[];
+    };
+
 export interface GateResult {
   readonly open: boolean;
   readonly errors: readonly StateError[];
@@ -449,12 +488,14 @@ export interface FormContextField {
   readonly definition: Readonly<FormFieldDefinition>;
   readonly effectiveValue: FormFieldValue;
   readonly staged: Readonly<StagedFieldValue> | null;
+  readonly importedProposal: boolean;
 }
 
 export interface FormContext {
   readonly source: Readonly<SourceMetadata>;
   readonly stateVersion: number;
   readonly planHash: string;
+  readonly importedProposalFieldNames: readonly string[];
   readonly fields: readonly FormContextField[];
   readonly validation: Readonly<ValidationReport>;
   readonly exportGate: Readonly<GateResult>;
@@ -509,6 +550,14 @@ function requiredOwnValue<T>(
     throw new TypeError(`Missing own record entry: ${key}.`);
   }
   return value;
+}
+
+function importedProposalNames(state: FormState): readonly string[] {
+  return state.importedProposalFieldNames ?? [];
+}
+
+function isImportedProposal(state: FormState, fieldName: string): boolean {
+  return importedProposalNames(state).includes(fieldName);
 }
 
 function deepFreeze<T>(value: T): T {
@@ -786,9 +835,16 @@ function validateProvenance(
     provenance.confidence > 1 ||
     (provenance.evidence !== undefined &&
       (!Array.isArray(provenance.evidence) ||
-        provenance.evidence.some((item) => !isNonEmptyString(item)))) ||
+        provenance.evidence.length === 0 ||
+        provenance.evidence.length > MAX_PROVENANCE_EVIDENCE_ITEMS ||
+        new Set(provenance.evidence).size !== provenance.evidence.length ||
+        provenance.evidence.some(
+          (item) =>
+            !isNonEmptyString(item) || item.length > MAX_PROVENANCE_TEXT_LENGTH,
+        ))) ||
     (provenance.rationale !== undefined &&
-      !isNonEmptyString(provenance.rationale))
+      (!isNonEmptyString(provenance.rationale) ||
+        provenance.rationale.length > MAX_PROVENANCE_TEXT_LENGTH))
   ) {
     return {
       code: 'invalid_provenance',
@@ -838,6 +894,33 @@ function validateProvenance(
   return null;
 }
 
+function validatePlanProvenanceBudget(
+  provenances: readonly FieldProvenance[],
+): StateError | null {
+  let itemCount = 0;
+  let utf8Bytes = 0;
+  const encoder = new TextEncoder();
+  for (const provenance of provenances) {
+    const evidence = provenance.evidence ?? [];
+    itemCount += evidence.length;
+    for (const item of evidence) utf8Bytes += encoder.encode(item).byteLength;
+    if (provenance.rationale !== undefined) {
+      utf8Bytes += encoder.encode(provenance.rationale).byteLength;
+    }
+    if (
+      itemCount > MAX_PLAN_PROVENANCE_ITEMS ||
+      utf8Bytes > MAX_PLAN_PROVENANCE_UTF8_BYTES
+    ) {
+      return {
+        code: 'invalid_provenance',
+        message:
+          'The staged plan exceeds the cumulative provenance evidence budget.',
+      };
+    }
+  }
+  return null;
+}
+
 function buildValidationReport(
   stateVersion: number,
   fields: Readonly<Record<string, Readonly<FormFieldDefinition>>>,
@@ -870,12 +953,12 @@ function buildValidationReport(
       );
     }
 
-    if (staged?.provenance.kind === 'agent_inference') {
+    if (staged?.actor === 'agent') {
       issues.push({
-        code: 'inference_requires_review',
+        code: 'agent_assertion_requires_review',
         severity: 'review',
         fieldName,
-        message: `${field.label} contains an agent inference.`,
+        message: `${field.label} contains an agent assertion. Its claimed basis is not independently verified.`,
       });
     }
 
@@ -1067,13 +1150,25 @@ function preconditionErrors(
 }
 
 function sameBinding(
-  binding: Pick<ApprovalRecord, 'sourceHash' | 'planHash' | 'stateVersion'>,
+  binding: Pick<
+    ApprovalRecord,
+    'documentSessionId' | 'sourceHash' | 'planHash' | 'stateVersion'
+  >,
   state: FormState,
 ): boolean {
   return (
+    binding.documentSessionId === state.documentSessionId &&
     binding.sourceHash === state.source.sourceHash &&
     binding.planHash === state.planHash &&
     binding.stateVersion === state.stateVersion
+  );
+}
+
+function createDocumentSessionId(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
   );
 }
 
@@ -1099,9 +1194,11 @@ export async function createFormState(
   const validation = buildValidationReport(stateVersion, fields, draft);
 
   return freezeState({
+    documentSessionId: createDocumentSessionId(),
     source,
     fields,
     draft,
+    importedProposalFieldNames: deepFreeze([]),
     stateVersion,
     planHash,
     validation,
@@ -1210,7 +1307,8 @@ export async function stageFieldUpdates(
     }
     if (
       request.actor === 'agent' &&
-      ownValue(state.draft, update.fieldName)?.actor === 'human'
+      ownValue(state.draft, update.fieldName)?.actor === 'human' &&
+      !isImportedProposal(state, update.fieldName)
     ) {
       errors.push({
         code: 'human_pinned',
@@ -1229,6 +1327,20 @@ export async function stageFieldUpdates(
     if (provenanceError !== null) errors.push(provenanceError);
   }
 
+  const nextProvenanceByField = new Map(
+    Object.entries(state.draft).map(([fieldName, staged]) => [
+      fieldName,
+      staged.provenance,
+    ]),
+  );
+  for (const update of request.updates) {
+    nextProvenanceByField.set(update.fieldName, update.provenance);
+  }
+  const provenanceBudgetError = validatePlanProvenanceBudget([
+    ...nextProvenanceByField.values(),
+  ]);
+  if (provenanceBudgetError !== null) errors.push(provenanceBudgetError);
+
   if (errors.length > 0) {
     return deepFreeze({ ok: false, state, errors: stateErrors(...errors) });
   }
@@ -1237,6 +1349,7 @@ export async function stageFieldUpdates(
   for (const fieldName of Object.keys(state.draft)) {
     nextDraft[fieldName] = requiredOwnValue(state.draft, fieldName);
   }
+  const nextImportedProposalFieldNames = new Set(importedProposalNames(state));
   const changedFields: string[] = [];
   for (const update of request.updates) {
     const field = requiredOwnValue(state.fields, update.fieldName);
@@ -1253,7 +1366,14 @@ export async function stageFieldUpdates(
         : { identityReviewReasons: [...field.identityReviewReasons] }),
     });
     const current = ownValue(state.draft, update.fieldName);
-    if (current === undefined || canonicalize(current) !== canonicalize(next)) {
+    const clearedImportedProposal = nextImportedProposalFieldNames.delete(
+      update.fieldName,
+    );
+    if (
+      current === undefined ||
+      canonicalize(current) !== canonicalize(next) ||
+      clearedImportedProposal
+    ) {
       nextDraft[update.fieldName] = next;
       changedFields.push(update.fieldName);
     }
@@ -1276,9 +1396,13 @@ export async function stageFieldUpdates(
     nextDraft,
   );
   const nextState = freezeState({
+    documentSessionId: state.documentSessionId,
     source: state.source,
     fields: state.fields,
     draft: nextDraft,
+    importedProposalFieldNames: deepFreeze(
+      [...nextImportedProposalFieldNames].sort(),
+    ),
     stateVersion,
     planHash,
     validation,
@@ -1343,7 +1467,10 @@ export async function correctDraftFieldFromUi(
       fieldName: request.fieldName,
       message: `No staged agent proposal exists for ${request.fieldName}.`,
     });
-  } else if (staged.actor !== 'agent') {
+  } else if (
+    staged.actor !== 'agent' &&
+    !isImportedProposal(state, request.fieldName)
+  ) {
     errors.push({
       code: 'invalid_request',
       fieldName: request.fieldName,
@@ -1392,9 +1519,11 @@ export async function discardDraft(
   return deepFreeze({
     ok: true,
     state: freezeState({
+      documentSessionId: state.documentSessionId,
       source: state.source,
       fields: state.fields,
       draft,
+      importedProposalFieldNames: deepFreeze([]),
       stateVersion,
       planHash,
       validation: buildValidationReport(stateVersion, state.fields, draft),
@@ -1450,6 +1579,9 @@ export async function discardDraftFields(
     }
   }
   deepFreeze(draft);
+  const remainingImportedProposalFieldNames = importedProposalNames(
+    state,
+  ).filter((fieldName) => !requested.has(fieldName));
   const stateVersion = state.stateVersion + 1;
   const planHash = await calculatePlanHash(
     state.source.sourceHash,
@@ -1459,9 +1591,13 @@ export async function discardDraftFields(
   return deepFreeze({
     ok: true,
     state: freezeState({
+      documentSessionId: state.documentSessionId,
       source: state.source,
       fields: state.fields,
       draft,
+      importedProposalFieldNames: deepFreeze(
+        remainingImportedProposalFieldNames,
+      ),
       stateVersion,
       planHash,
       validation: buildValidationReport(stateVersion, state.fields, draft),
@@ -1592,6 +1728,7 @@ export function approveDraftFromUi(
   if (errors.length > 0) return workflowFailure(state, ...errors);
 
   const approval = deepFreeze({
+    documentSessionId: state.documentSessionId,
     sourceHash: state.source.sourceHash,
     planHash: state.planHash,
     stateVersion: state.stateVersion,
@@ -1910,6 +2047,16 @@ export async function exportFillPackageFromUi(
   const bytes = new TextEncoder().encode(
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
+  if (bytes.byteLength > MAX_FILL_PACKAGE_BYTES) {
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'package_too_large',
+        message: `The fill package would exceed the ${MAX_FILL_PACKAGE_BYTES}-byte import limit. Reduce staged field data before exporting.`,
+      }),
+    });
+  }
   const decoded = JSON.parse(new TextDecoder().decode(bytes)) as Record<
     string,
     unknown
@@ -1943,6 +2090,326 @@ export async function exportFillPackageFromUi(
       roundTripVerified: true as const,
     },
   };
+}
+
+function importFailure(
+  state: FormState,
+  ...errors: StateError[]
+): ImportFillPackageResult {
+  return deepFreeze({ ok: false, state, errors: stateErrors(...errors) });
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isFormFieldValue(value: unknown): value is FormFieldValue {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (Array.isArray(value) && value.every((item) => typeof item === 'string'))
+  );
+}
+
+export async function importFillPackageFromUi(
+  state: FormState,
+  sourceBytes: Uint8Array,
+  packageBytes: Uint8Array,
+  inspection: PdfInspection,
+): Promise<ImportFillPackageResult> {
+  if (
+    Object.keys(state.draft).length > 0 ||
+    importedProposalNames(state).length > 0
+  ) {
+    return importFailure(state, {
+      code: 'invalid_request',
+      message:
+        'Discard the current staged plan before importing a fill package; packages are never merged or allowed to overwrite a draft.',
+    });
+  }
+  if (packageBytes.byteLength > MAX_FILL_PACKAGE_BYTES) {
+    return importFailure(state, {
+      code: 'package_too_large',
+      message: `Choose a fill package no larger than ${MAX_FILL_PACKAGE_BYTES} bytes.`,
+    });
+  }
+  if (packageBytes.byteLength === 0) {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message: 'The fill package is empty.',
+    });
+  }
+
+  const packageCopy = Uint8Array.from(packageBytes);
+  let decoded: unknown;
+  try {
+    const json = new TextDecoder('utf-8', { fatal: true }).decode(packageCopy);
+    decoded = JSON.parse(json) as unknown;
+  } catch {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message: 'The fill package is not valid UTF-8 JSON.',
+    });
+  }
+  if (!isJsonRecord(decoded)) {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message: 'The fill package root must be a JSON object.',
+    });
+  }
+  if (decoded.artifactType !== 'original_untouched_fill_package') {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message:
+        'This JSON file is not a FormProof original-untouched fill package.',
+    });
+  }
+  if (decoded.schemaVersion !== 4) {
+    return importFailure(state, {
+      code: 'unsupported_package_schema',
+      message: 'Only FormProof fill-package schema version 4 is supported.',
+    });
+  }
+  if (decoded.sourcePdfModified !== false) {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message: 'The package does not declare an untouched source PDF.',
+    });
+  }
+
+  const packageSource = decoded.source;
+  const packagePlan = decoded.plan;
+  if (
+    !isJsonRecord(packageSource) ||
+    typeof packageSource.sourceHash !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(packageSource.sourceHash) ||
+    !Number.isSafeInteger(packageSource.byteLength) ||
+    (packageSource.byteLength as number) < 0 ||
+    !Number.isSafeInteger(packageSource.pageCount) ||
+    (packageSource.pageCount as number) < 1 ||
+    !isJsonRecord(packagePlan) ||
+    typeof packagePlan.planHash !== 'string' ||
+    !/^sha256:[a-f0-9]{64}$/u.test(packagePlan.planHash) ||
+    !Array.isArray(packagePlan.stagedFields) ||
+    packagePlan.stagedFields.length === 0
+  ) {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message:
+        'The fill package has a malformed source or staged-plan binding.',
+    });
+  }
+
+  const source = Uint8Array.from(sourceBytes);
+  const sourceHash = await sha256Bytes(source);
+  if (
+    sourceHash !== state.source.sourceHash ||
+    source.byteLength !== state.source.byteLength ||
+    packageSource.sourceHash !== state.source.sourceHash ||
+    packageSource.byteLength !== source.byteLength ||
+    packageSource.pageCount !== state.source.pageCount
+  ) {
+    return importFailure(state, {
+      code: 'source_mismatch',
+      message:
+        'The fill package and currently loaded PDF are not bound to the same exact source bytes.',
+    });
+  }
+
+  const inspectedFields = createRecord<Readonly<FormFieldDefinition>>();
+  for (const descriptor of inspection.fields) {
+    inspectedFields[descriptor.name] =
+      createFormFieldDefinitionFromPdf(descriptor);
+  }
+  const currentPlanHash = await calculatePlanHash(
+    state.source.sourceHash,
+    state.fields,
+    state.draft,
+  );
+  if (
+    inspection.sourceHash !== state.source.sourceHash ||
+    inspection.pageCount !== state.source.pageCount ||
+    canonicalize(inspectedFields) !== canonicalize(state.fields) ||
+    currentPlanHash !== state.planHash
+  ) {
+    return importFailure(state, {
+      code: 'plan_mismatch',
+      message:
+        'The loaded form state does not match a fresh inspection of the selected PDF.',
+    });
+  }
+  if (!inspection.protection.exportStrategies.includes('fill_package')) {
+    return importFailure(state, {
+      code: 'artifact_unavailable',
+      message:
+        'This PDF does not currently permit a fill-package workflow under its protection classification.',
+    });
+  }
+  if (packagePlan.stagedFields.length > Object.keys(state.fields).length) {
+    return importFailure(state, {
+      code: 'invalid_package',
+      message: 'The fill package contains more staged fields than the PDF.',
+    });
+  }
+
+  const errors: StateError[] = [];
+  const restoredDraft = createRecord<Readonly<StagedFieldValue>>();
+  const seen = new Set<string>();
+  for (const [index, candidate] of packagePlan.stagedFields.entries()) {
+    if (!isJsonRecord(candidate) || !isNonEmptyString(candidate.fieldName)) {
+      errors.push({
+        code: 'invalid_package',
+        message: `Staged field ${index + 1} has no valid exact field name.`,
+      });
+      continue;
+    }
+    const fieldName = candidate.fieldName;
+    if (seen.has(fieldName)) {
+      errors.push({
+        code: 'duplicate_update',
+        fieldName,
+        message: `${fieldName} appears more than once in the fill package.`,
+      });
+      continue;
+    }
+    seen.add(fieldName);
+    const field = ownValue(state.fields, fieldName);
+    if (field === undefined) {
+      errors.push({
+        code: 'unknown_field',
+        fieldName,
+        message: `The fill package references an unknown field: ${fieldName}.`,
+      });
+      continue;
+    }
+    if (field.readOnly) {
+      errors.push({
+        code: 'read_only',
+        fieldName,
+        message: `${fieldName} is read-only in the freshly inspected PDF.`,
+      });
+    }
+    if (field.humanOnly) {
+      errors.push({
+        code: 'human_only',
+        fieldName,
+        message: `${fieldName} is human-only in the freshly inspected PDF.`,
+      });
+    }
+    if (field.type === 'signature') {
+      errors.push({
+        code: 'signature_locked',
+        fieldName,
+        message: `${fieldName} is a signature field and cannot be restored as a proposal.`,
+      });
+    }
+    if (!isFormFieldValue(candidate.proposedValue)) {
+      errors.push({
+        code: 'invalid_type',
+        fieldName,
+        message: `${fieldName} has a malformed proposed value in the fill package.`,
+      });
+      continue;
+    }
+    const valueError = validateValue(field, candidate.proposedValue);
+    if (valueError !== null) errors.push(valueError);
+
+    if (!isJsonRecord(candidate.provenance)) {
+      errors.push({
+        code: 'invalid_provenance',
+        fieldName,
+        message: `${fieldName} has no valid provenance object.`,
+      });
+      continue;
+    }
+    const provenance = {
+      kind: candidate.provenance.kind,
+      confidence: candidate.provenance.confidence,
+      ...(Object.hasOwn(candidate.provenance, 'evidence')
+        ? { evidence: candidate.provenance.evidence }
+        : {}),
+      ...(Object.hasOwn(candidate.provenance, 'rationale')
+        ? { rationale: candidate.provenance.rationale }
+        : {}),
+    } as unknown as FieldProvenance;
+    const actor: UpdateActor =
+      provenance.kind === 'human_entry' ? 'human' : 'agent';
+    const provenanceError = validateProvenance(provenance, actor, fieldName);
+    if (provenanceError !== null) {
+      errors.push(provenanceError);
+      continue;
+    }
+    if (
+      field.readOnly ||
+      field.humanOnly ||
+      field.type === 'signature' ||
+      valueError !== null
+    ) {
+      continue;
+    }
+    restoredDraft[fieldName] = deepFreeze({
+      fieldName,
+      value: normalizeDraftValue(field, candidate.proposedValue),
+      provenance: cloneProvenance(provenance),
+      actor,
+      ...(field.identityReviewReasons === undefined
+        ? {}
+        : { identityReviewReasons: [...field.identityReviewReasons] }),
+    });
+  }
+  const provenanceBudgetError = validatePlanProvenanceBudget(
+    Object.values(restoredDraft).map(({ provenance }) => provenance),
+  );
+  if (provenanceBudgetError !== null) errors.push(provenanceBudgetError);
+  if (errors.length > 0) return importFailure(state, ...errors);
+
+  deepFreeze(restoredDraft);
+  const restoredPlanHash = await calculatePlanHash(
+    state.source.sourceHash,
+    state.fields,
+    restoredDraft,
+  );
+  if (restoredPlanHash !== packagePlan.planHash) {
+    return importFailure(state, {
+      code: 'plan_mismatch',
+      message:
+        'The package values, provenance, and freshly inspected field constraints do not reproduce its recorded plan hash.',
+    });
+  }
+
+  const importedFieldNames = deepFreeze(Object.keys(restoredDraft).sort());
+  const stateVersion = state.stateVersion + 1;
+  const nextState = freezeState({
+    documentSessionId: state.documentSessionId,
+    source: state.source,
+    fields: state.fields,
+    draft: restoredDraft,
+    importedProposalFieldNames: importedFieldNames,
+    stateVersion,
+    planHash: restoredPlanHash,
+    validation: buildValidationReport(
+      stateVersion,
+      state.fields,
+      restoredDraft,
+    ),
+    approval: null,
+    output: null,
+    verification: null,
+  });
+  const receipt = deepFreeze<FillPackageImportReceipt>({
+    packageHash: await sha256Bytes(packageCopy),
+    sourceHash: state.source.sourceHash,
+    recordedPlanHash: packagePlan.planHash,
+    restoredPlanHash,
+    sourceHashVerified: true,
+    planHashVerified: true,
+    authenticityVerified: false,
+    packageDisplayMetadataUsed: false,
+    sourcePdfModified: false,
+    importedFieldNames,
+  });
+  return deepFreeze({ ok: true, state: nextState, receipt });
 }
 
 function verifiedValueMatches(
@@ -2056,6 +2523,7 @@ async function exportApprovedPdfWithStrategy(
 
   const recordedAt = new Date().toISOString();
   const output = deepFreeze({
+    documentSessionId: state.documentSessionId,
     sourceHash,
     planHash: state.planHash,
     stateVersion: state.stateVersion,
@@ -2117,11 +2585,13 @@ export function getFormContext(state: FormState): FormContext {
       definition: requiredOwnValue(state.fields, fieldName),
       effectiveValue: getEffectiveFieldValue(state, fieldName) ?? null,
       staged: ownValue(state.draft, fieldName) ?? null,
+      importedProposal: isImportedProposal(state, fieldName),
     }));
   return deepFreeze({
     source: state.source,
     stateVersion: state.stateVersion,
     planHash: state.planHash,
+    importedProposalFieldNames: [...importedProposalNames(state)],
     fields,
     validation: validateDraft(state),
     exportGate: getExportGate(state),

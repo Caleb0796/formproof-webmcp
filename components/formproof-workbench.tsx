@@ -21,6 +21,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -54,6 +55,8 @@ import {
   getArtifactReviewFieldNames,
   getChoiceLabelReviewNotice,
   getReleaseGate,
+  importFillPackageFromUi,
+  MAX_FILL_PACKAGE_BYTES,
   stageFieldUpdates,
   validateDraft,
   type FieldUpdate,
@@ -92,14 +95,43 @@ type ToolState =
 interface LoadedDocument {
   fileName: string;
   kind: 'demo' | 'upload';
-  sourceUrl: string;
+  sourceUrl: string | null;
   inspection: PdfInspection;
 }
 
 interface ReviewBinding {
+  documentSessionId: string;
   sourceHash: string;
   planHash: string;
   stateVersion: number;
+}
+
+interface VisibleCommitWaiter {
+  readonly targetRevision: number;
+  readonly resolve: () => void;
+  readonly reject: (reason: unknown) => void;
+  readonly timeoutId: number;
+  readonly signal: AbortSignal;
+  readonly abort: () => void;
+}
+
+type PdfInspectionWorkerResponse =
+  | { ok: true; inspection: PdfInspection }
+  | { ok: false; code: string; message: string };
+
+type OpenReviewResult = 'opened' | 'already_open' | 'dismissed' | 'blocked';
+
+function reviewBindingsMatch(
+  left: ReviewBinding | null,
+  right: ReviewBinding,
+): boolean {
+  return (
+    left !== null &&
+    left.documentSessionId === right.documentSessionId &&
+    left.sourceHash === right.sourceHash &&
+    left.planHash === right.planHash &&
+    left.stateVersion === right.stateVersion
+  );
 }
 
 function copyArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -111,6 +143,10 @@ function copyArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 function shortHash(hash: string | null | undefined): string {
   if (!hash) return '—';
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`;
+}
+
+function claimedBasisLabel(kind: string): string {
+  return `Agent claims: ${kind.replaceAll('_', ' ')}`;
 }
 
 function formatValue(
@@ -153,6 +189,7 @@ function adapterFailure(
     ok: false,
     stateVersion: state?.stateVersion ?? null,
     sourceHash: state?.source.sourceHash ?? null,
+    documentSessionId: state?.documentSessionId ?? null,
     error: {
       code,
       message,
@@ -165,11 +202,11 @@ function bindingFailure(
   state: FormState,
   input: VersionBoundInput,
 ): FormProofAdapterFailure | null {
-  if (input.expectedStateVersion !== state.stateVersion) {
+  if (input.expectedDocumentSessionId !== state.documentSessionId) {
     return adapterFailure(
       state,
-      'stale_state',
-      'The fill plan changed. Refresh form context before continuing.',
+      'document_session_mismatch',
+      'This request belongs to a different PDF load session. Refresh form context before continuing.',
     );
   }
   if (input.expectedSourceHash !== state.source.sourceHash) {
@@ -177,6 +214,13 @@ function bindingFailure(
       state,
       'source_mismatch',
       'The active PDF is not the document referenced by this request.',
+    );
+  }
+  if (input.expectedStateVersion !== state.stateVersion) {
+    return adapterFailure(
+      state,
+      'stale_state',
+      'The fill plan changed. Refresh form context before continuing.',
     );
   }
   return null;
@@ -196,12 +240,6 @@ function stateErrorFailure(
       ...(fieldName === undefined ? {} : { fieldName }),
     })),
   );
-}
-
-function waitForVisibleCommit(): Promise<void> {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
 }
 
 function pdfOutputFileName(
@@ -454,6 +492,7 @@ function HumanCorrectionEditor({
 
 export function FormProofWorkbench() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fillPackageInputRef = useRef<HTMLInputElement>(null);
   const stateRef = useRef<FormState | null>(null);
   const inspectionRef = useRef<PdfInspection | null>(null);
   const sourceBytesRef = useRef<Uint8Array | null>(null);
@@ -462,12 +501,19 @@ export function FormProofWorkbench() {
   const fillPackageUrlRef = useRef<string | null>(null);
   const reviewLockRef = useRef(false);
   const reviewBindingRef = useRef<ReviewBinding | null>(null);
+  const dismissedReviewBindingRef = useRef<ReviewBinding | null>(null);
   const reviewMutationRef = useRef(false);
   const pendingPlanMutationsRef = useRef(0);
   const loadingRef = useRef(true);
   const exportingRef = useRef(false);
   const loadGenerationRef = useRef(0);
+  const pdfInspectionWorkerRef = useRef<Worker | null>(null);
+  const pdfInspectionAbortRef = useRef<AbortController | null>(null);
+  const agentDataConsentSessionRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const uiRevisionRef = useRef(0);
+  const visibleUiRevisionRef = useRef(0);
+  const visibleCommitWaitersRef = useRef(new Set<VisibleCommitWaiter>());
 
   const [formState, setFormState] = useState<FormState | null>(null);
   const [documentState, setDocumentState] = useState<LoadedDocument | null>(
@@ -503,12 +549,63 @@ export function FormProofWorkbench() {
     count: 0,
     message: 'Registering WebMCP tools',
   });
+  const [agentDataAccessGranted, setAgentDataAccessGranted] = useState(false);
+
+  useLayoutEffect(() => {
+    visibleUiRevisionRef.current = uiRevisionRef.current;
+    for (const waiter of visibleCommitWaitersRef.current) {
+      if (waiter.targetRevision > visibleUiRevisionRef.current) continue;
+      visibleCommitWaitersRef.current.delete(waiter);
+      window.clearTimeout(waiter.timeoutId);
+      waiter.signal.removeEventListener('abort', waiter.abort);
+      waiter.resolve();
+    }
+  });
+
+  const waitForVisibleCommit = useCallback(
+    (signal: AbortSignal): Promise<void> => {
+      const targetRevision = uiRevisionRef.current;
+      if (visibleUiRevisionRef.current >= targetRevision) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        const finish = (reason: unknown) => {
+          const waiter = Array.from(visibleCommitWaitersRef.current).find(
+            (candidate) => candidate.resolve === resolve,
+          );
+          if (!waiter) return;
+          visibleCommitWaitersRef.current.delete(waiter);
+          window.clearTimeout(waiter.timeoutId);
+          signal.removeEventListener('abort', waiter.abort);
+          reject(reason);
+        };
+        const abort = () => finish(new DOMException('Aborted', 'AbortError'));
+        const timeoutId = window.setTimeout(
+          () => finish(new Error('ui_commit_unconfirmed')),
+          1_000,
+        );
+        const waiter: VisibleCommitWaiter = {
+          targetRevision,
+          resolve,
+          reject,
+          timeoutId,
+          signal,
+          abort,
+        };
+        visibleCommitWaitersRef.current.add(waiter);
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+      });
+    },
+    [],
+  );
 
   const commitState = useCallback((next: FormState) => {
     const binding = reviewBindingRef.current;
     if (
       reviewLockRef.current &&
       (!binding ||
+        binding.documentSessionId !== next.documentSessionId ||
         binding.sourceHash !== next.source.sourceHash ||
         binding.planHash !== next.planHash ||
         binding.stateVersion !== next.stateVersion)
@@ -523,12 +620,16 @@ export function FormProofWorkbench() {
       setDiscardAllArmed(false);
       setCorrectionFieldName(null);
     }
+    uiRevisionRef.current += 1;
     stateRef.current = next;
     setFormState(next);
   }, []);
 
   const closeReview = useCallback(() => {
     if (exportingRef.current || reviewMutationRef.current) return;
+    if (reviewBindingRef.current) {
+      dismissedReviewBindingRef.current = reviewBindingRef.current;
+    }
     reviewLockRef.current = false;
     reviewBindingRef.current = null;
     setReviewOpen(false);
@@ -540,51 +641,66 @@ export function FormProofWorkbench() {
     setCorrectionFieldName(null);
   }, []);
 
-  const openReview = useCallback(() => {
-    const current = stateRef.current;
-    if (
-      pendingPlanMutationsRef.current > 0 ||
-      loadingRef.current ||
-      exportingRef.current ||
-      reviewMutationRef.current
-    ) {
-      setError('Wait for the current form update to finish before review.');
-      return false;
-    }
-    const inspection = inspectionRef.current;
-    if (!current || !inspection || Object.keys(current.draft).length === 0) {
-      setError('Stage at least one field before starting review.');
-      return false;
-    }
-    const preferredStrategy = initialExportStrategy(inspection);
-    if (preferredStrategy === null) {
-      setError(
-        'This document is inspection-only because no artifact export strategy is available.',
-      );
-      return false;
-    }
-    const strategy =
-      preferredStrategy !== 'fill_package' &&
-      !validateDraft(current).canApprove &&
-      inspection.protection.exportStrategies.includes('fill_package')
-        ? 'fill_package'
-        : preferredStrategy;
-    reviewLockRef.current = true;
-    reviewBindingRef.current = {
-      sourceHash: current.source.sourceHash,
-      planHash: current.planHash,
-      stateVersion: current.stateVersion,
-    };
-    setConfirmedFields(new Set());
-    setActiveContentAcknowledged(false);
-    setProtectionLossAcknowledged(false);
-    setSelectedExportStrategy(strategy);
-    setDiscardAllArmed(false);
-    setCorrectionFieldName(null);
-    setError(null);
-    setReviewOpen(true);
-    return true;
-  }, []);
+  const openReview = useCallback(
+    (origin: 'agent' | 'human'): OpenReviewResult => {
+      const current = stateRef.current;
+      if (
+        pendingPlanMutationsRef.current > 0 ||
+        loadingRef.current ||
+        exportingRef.current ||
+        reviewMutationRef.current
+      ) {
+        setError('Wait for the current form update to finish before review.');
+        return 'blocked';
+      }
+      const inspection = inspectionRef.current;
+      if (!current || !inspection || Object.keys(current.draft).length === 0) {
+        setError('Stage at least one field before starting review.');
+        return 'blocked';
+      }
+      const preferredStrategy = initialExportStrategy(inspection);
+      if (preferredStrategy === null) {
+        setError(
+          'This document is inspection-only because no artifact export strategy is available.',
+        );
+        return 'blocked';
+      }
+      const nextBinding: ReviewBinding = {
+        documentSessionId: current.documentSessionId,
+        sourceHash: current.source.sourceHash,
+        planHash: current.planHash,
+        stateVersion: current.stateVersion,
+      };
+      if (
+        reviewLockRef.current &&
+        reviewBindingsMatch(reviewBindingRef.current, nextBinding)
+      ) {
+        return 'already_open';
+      }
+      if (
+        origin === 'agent' &&
+        reviewBindingsMatch(dismissedReviewBindingRef.current, nextBinding)
+      ) {
+        setError(
+          'You dismissed review for this exact plan. Only you can reopen it until the plan changes.',
+        );
+        return 'dismissed';
+      }
+      reviewLockRef.current = true;
+      reviewBindingRef.current = nextBinding;
+      setConfirmedFields(new Set());
+      setActiveContentAcknowledged(false);
+      setProtectionLossAcknowledged(false);
+      setSelectedExportStrategy(null);
+      setDiscardAllArmed(false);
+      setCorrectionFieldName(null);
+      setError(null);
+      uiRevisionRef.current += 1;
+      setReviewOpen(true);
+      return 'opened';
+    },
+    [],
+  );
 
   const resetOutput = useCallback(() => {
     if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
@@ -601,9 +717,24 @@ export function FormProofWorkbench() {
 
   const beginLoad = useCallback(() => {
     const generation = ++loadGenerationRef.current;
+    pdfInspectionAbortRef.current?.abort();
+    pdfInspectionAbortRef.current = null;
+    pdfInspectionWorkerRef.current?.terminate();
+    pdfInspectionWorkerRef.current = null;
     loadingRef.current = true;
+    stateRef.current = null;
+    inspectionRef.current = null;
+    sourceBytesRef.current = null;
+    agentDataConsentSessionRef.current = null;
+    if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+    sourceUrlRef.current = null;
+    setFormState(null);
+    setDocumentState(null);
+    setAgentDataAccessGranted(false);
+    resetOutput();
     reviewLockRef.current = false;
     reviewBindingRef.current = null;
+    dismissedReviewBindingRef.current = null;
     setLoading(true);
     setReviewOpen(false);
     setConfirmedFields(new Set());
@@ -615,7 +746,7 @@ export function FormProofWorkbench() {
     setError(null);
     setNotice(null);
     return generation;
-  }, []);
+  }, [resetOutput]);
 
   const loadSource = useCallback(
     async (
@@ -631,8 +762,64 @@ export function FormProofWorkbench() {
           );
         }
 
-        const { inspectPdf } = await import('@/lib/pdf-engine');
-        const inspection = await inspectPdf(bytes);
+        const inspectionController = new AbortController();
+        pdfInspectionAbortRef.current = inspectionController;
+        const worker = new Worker(
+          new URL('../lib/pdf-inspection-worker.ts', import.meta.url),
+          { type: 'module', name: 'formproof-pdf-inspection' },
+        );
+        pdfInspectionWorkerRef.current = worker;
+        const inspection = await new Promise<PdfInspection>(
+          (resolve, reject) => {
+            let settled = false;
+            const timeout = { id: 0 };
+            const finish = (
+              result: { inspection: PdfInspection } | { error: Error },
+            ) => {
+              if (settled) return;
+              settled = true;
+              window.clearTimeout(timeout.id);
+              worker.terminate();
+              if (pdfInspectionWorkerRef.current === worker) {
+                pdfInspectionWorkerRef.current = null;
+              }
+              if (pdfInspectionAbortRef.current === inspectionController) {
+                pdfInspectionAbortRef.current = null;
+              }
+              if ('inspection' in result) resolve(result.inspection);
+              else reject(result.error);
+            };
+            const abort = () =>
+              finish({ error: new DOMException('Aborted', 'AbortError') });
+            timeout.id = window.setTimeout(
+              () =>
+                finish({
+                  error: new Error(
+                    'PDF inspection exceeded the 15-second browser limit.',
+                  ),
+                }),
+              15_000,
+            );
+            worker.onmessage = (
+              event: MessageEvent<PdfInspectionWorkerResponse>,
+            ) => {
+              const response = event.data;
+              finish(
+                response.ok
+                  ? { inspection: response.inspection }
+                  : { error: new Error(response.message) },
+              );
+            };
+            worker.onerror = () =>
+              finish({ error: new Error('The PDF inspection worker failed.') });
+            inspectionController.signal.addEventListener('abort', abort, {
+              once: true,
+            });
+            const transferableBytes = copyArrayBuffer(bytes);
+            worker.postMessage(transferableBytes, [transferableBytes]);
+            if (inspectionController.signal.aborted) abort();
+          },
+        );
         const nextState = await createFormState(
           {
             fileName,
@@ -646,9 +833,11 @@ export function FormProofWorkbench() {
 
         if (!mountedRef.current || generation !== loadGenerationRef.current)
           return;
-        const sourceUrl = URL.createObjectURL(
-          new Blob([copyArrayBuffer(bytes)], { type: 'application/pdf' }),
-        );
+        const sourceUrl = inspection.contentRisk.blocksInteractivePreview
+          ? null
+          : URL.createObjectURL(
+              new Blob([copyArrayBuffer(bytes)], { type: 'application/pdf' }),
+            );
         if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
         sourceUrlRef.current = sourceUrl;
         sourceBytesRef.current = Uint8Array.from(bytes);
@@ -716,6 +905,7 @@ export function FormProofWorkbench() {
   useEffect(() => {
     let cancelled = false;
     let registration: FormProofWebMcpRegistration | null = null;
+    const registrationController = new AbortController();
     let mutationTail: Promise<void> = Promise.resolve();
 
     const withMutationLock = async <T,>(
@@ -734,14 +924,21 @@ export function FormProofWorkbench() {
       }
     };
 
+    const inactiveDocumentFailure = (message: string) =>
+      adapterFailure(
+        null,
+        loadingRef.current ? 'document_loading' : 'no_active_document',
+        loadingRef.current
+          ? 'A newly selected PDF is still being inspected.'
+          : message,
+      );
+
     const adapter: FormProofWebMcpAdapter = {
       getPdfProtection() {
         const current = stateRef.current;
         const inspection = inspectionRef.current;
         if (!current || !inspection) {
-          return adapterFailure(
-            null,
-            'no_active_document',
+          return inactiveDocumentFailure(
             'Load a PDF before inspecting its protection.',
           );
         }
@@ -749,6 +946,7 @@ export function FormProofWorkbench() {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
+          documentSessionId: current.documentSessionId,
           data: {
             protectionType: inspection.protection.protectionType,
             allowedMutations: inspection.protection.allowedMutations,
@@ -757,6 +955,7 @@ export function FormProofWorkbench() {
             requiresHumanConfirmation:
               inspection.protection.requiresHumanConfirmation,
             protectionEvidence: inspection.protection.evidence,
+            contentRisk: inspection.contentRisk,
             exportStrategySelection: 'human_ui_only',
             agentMaySelectExportStrategy: false,
           },
@@ -767,10 +966,15 @@ export function FormProofWorkbench() {
         const current = stateRef.current;
         const inspection = inspectionRef.current;
         if (!current || !inspection) {
-          return adapterFailure(
-            null,
-            'no_active_document',
+          return inactiveDocumentFailure(
             'Load a PDF before inspecting fields.',
+          );
+        }
+        if (agentDataConsentSessionRef.current !== current.documentSessionId) {
+          return adapterFailure(
+            current,
+            'consent_required',
+            'A person must explicitly allow field data sharing for this PDF load before the agent can inspect fields.',
           );
         }
 
@@ -779,6 +983,7 @@ export function FormProofWorkbench() {
           const cursor = parseFormContextCursor(
             input.cursor,
             {
+              documentSessionId: current.documentSessionId,
               sourceHash: current.source.sourceHash,
               stateVersion: current.stateVersion,
             },
@@ -817,6 +1022,7 @@ export function FormProofWorkbench() {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
+          documentSessionId: current.documentSessionId,
           data,
         };
       },
@@ -825,10 +1031,13 @@ export function FormProofWorkbench() {
         const current = stateRef.current;
         const inspection = inspectionRef.current;
         if (!current || !inspection) {
+          return inactiveDocumentFailure('Load a PDF before reading evidence.');
+        }
+        if (agentDataConsentSessionRef.current !== current.documentSessionId) {
           return adapterFailure(
-            null,
-            'no_active_document',
-            'Load a PDF before reading evidence.',
+            current,
+            'consent_required',
+            'Field data sharing is off for this PDF load.',
           );
         }
         const mismatch = bindingFailure(current, input);
@@ -850,6 +1059,7 @@ export function FormProofWorkbench() {
         if (input.choiceCursor !== undefined) {
           const cursor = parseFieldChoiceCursor(
             input.choiceCursor,
+            current.documentSessionId,
             current.source.sourceHash,
             input.fieldNames[0],
           );
@@ -879,6 +1089,7 @@ export function FormProofWorkbench() {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
+          documentSessionId: current.documentSessionId,
           data: createFieldEvidenceToolData(
             current,
             inspection,
@@ -895,12 +1106,19 @@ export function FormProofWorkbench() {
             throw new DOMException('Aborted', 'AbortError');
           const current = stateRef.current;
           if (!current) {
+            return inactiveDocumentFailure('Load a PDF before staging values.');
+          }
+          if (
+            agentDataConsentSessionRef.current !== current.documentSessionId
+          ) {
             return adapterFailure(
-              null,
-              'no_active_document',
-              'Load a PDF before staging values.',
+              current,
+              'consent_required',
+              'Field data sharing is off for this PDF load.',
             );
           }
+          const mismatch = bindingFailure(current, input);
+          if (mismatch) return mismatch;
           if (reviewLockRef.current) {
             return adapterFailure(
               current,
@@ -963,6 +1181,7 @@ export function FormProofWorkbench() {
             ok: true as const,
             stateVersion: result.state.stateVersion,
             sourceHash: result.state.source.sourceHash,
+            documentSessionId: result.state.documentSessionId,
             data: {
               changedFields: result.changedFields,
               planHash: result.state.planHash,
@@ -978,30 +1197,29 @@ export function FormProofWorkbench() {
       validateFillPlan(input) {
         const current = stateRef.current;
         if (!current) {
+          return inactiveDocumentFailure('Load a PDF before validation.');
+        }
+        if (agentDataConsentSessionRef.current !== current.documentSessionId) {
           return adapterFailure(
-            null,
-            'no_active_document',
-            'Load a PDF before validation.',
+            current,
+            'consent_required',
+            'Field data sharing is off for this PDF load.',
           );
         }
         const mismatch = bindingFailure(current, input);
         if (mismatch) return mismatch;
         const validation = validateDraft(current);
         const inspection = inspectionRef.current;
-        const exportBlockedByPdfActions =
-          inspection?.activeContent.highRiskActionCount ?? 0;
         const reviewArtifacts = inspection?.protection.exportStrategies ?? [];
         return {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
+          documentSessionId: current.documentSessionId,
           data: {
             readyForReview:
               Object.keys(current.draft).length > 0 &&
               reviewArtifacts.length > 0,
-            ...(exportBlockedByPdfActions === 0
-              ? {}
-              : { exportBlockedByPdfActions }),
             reviewArtifacts,
             exportStrategySelection: 'human_ui_only',
             stagedFieldCount: Object.keys(current.draft).length,
@@ -1013,10 +1231,13 @@ export function FormProofWorkbench() {
       startFillReview(input) {
         const current = stateRef.current;
         if (!current) {
+          return inactiveDocumentFailure('Load a PDF before review.');
+        }
+        if (agentDataConsentSessionRef.current !== current.documentSessionId) {
           return adapterFailure(
-            null,
-            'no_active_document',
-            'Load a PDF before review.',
+            current,
+            'consent_required',
+            'Field data sharing is off for this PDF load.',
           );
         }
         const mismatch = bindingFailure(current, input);
@@ -1037,7 +1258,15 @@ export function FormProofWorkbench() {
             'Stage a non-empty plan before review.',
           );
         }
-        if (!openReview()) {
+        const openResult = openReview('agent');
+        if (openResult === 'dismissed') {
+          return adapterFailure(
+            current,
+            'human_action_required',
+            'A person dismissed review for this exact plan. Only the review UI can reopen it until the plan changes.',
+          );
+        }
+        if (openResult === 'blocked') {
           return adapterFailure(
             current,
             'review_not_ready',
@@ -1048,8 +1277,11 @@ export function FormProofWorkbench() {
           ok: true,
           stateVersion: current.stateVersion,
           sourceHash: current.source.sourceHash,
+          documentSessionId: current.documentSessionId,
           data: {
-            reviewOpened: true,
+            reviewOpened:
+              openResult === 'opened' || openResult === 'already_open',
+            reviewStatePreserved: openResult === 'already_open',
             planHash: current.planHash,
             humanActionRequired: true,
             reviewArtifacts,
@@ -1060,6 +1292,7 @@ export function FormProofWorkbench() {
     };
 
     void registerFormProofWebMcpTools(adapter, {
+      signal: registrationController.signal,
       awaitVisibleCommit: waitForVisibleCommit,
       onRegistrationError: () => {
         if (!cancelled) {
@@ -1099,15 +1332,18 @@ export function FormProofWorkbench() {
 
     return () => {
       cancelled = true;
+      registrationController.abort();
       registration?.cleanup();
     };
-  }, [commitState, openReview, resetOutput]);
+  }, [commitState, openReview, resetOutput, waitForVisibleCommit]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       loadGenerationRef.current += 1;
+      pdfInspectionAbortRef.current?.abort();
+      pdfInspectionWorkerRef.current?.terminate();
       if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
       if (outputUrlRef.current) URL.revokeObjectURL(outputUrlRef.current);
       if (fillPackageUrlRef.current)
@@ -1158,6 +1394,101 @@ export function FormProofWorkbench() {
       }
     },
     [beginLoad, loadSource],
+  );
+
+  const onFillPackageChosen = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      const current = stateRef.current;
+      const source = sourceBytesRef.current;
+      const inspection = inspectionRef.current;
+      if (!current || !source || !inspection) {
+        setError('Load the matching source PDF before opening a fill package.');
+        return;
+      }
+      if (
+        loadingRef.current ||
+        exportingRef.current ||
+        reviewMutationRef.current ||
+        reviewLockRef.current ||
+        pendingPlanMutationsRef.current > 0
+      ) {
+        setError(
+          'Wait for the current form update or review to finish before opening a fill package.',
+        );
+        return;
+      }
+      if (Object.keys(current.draft).length > 0) {
+        setError(
+          'Discard the current staged plan before opening a fill package. FormProof never merges packages into an existing draft.',
+        );
+        return;
+      }
+      if (
+        file.type !== 'application/json' &&
+        !file.name.toLowerCase().endsWith('.json')
+      ) {
+        setError('Choose a FormProof fill package JSON file.');
+        return;
+      }
+      if (file.size > MAX_FILL_PACKAGE_BYTES) {
+        setError('Choose a fill package no larger than 4 MB.');
+        return;
+      }
+
+      const generation = loadGenerationRef.current;
+      reviewMutationRef.current = true;
+      pendingPlanMutationsRef.current += 1;
+      setReviewMutating(true);
+      setError(null);
+      try {
+        const result = await importFillPackageFromUi(
+          current,
+          source,
+          new Uint8Array(await file.arrayBuffer()),
+          inspection,
+        );
+        if (
+          !mountedRef.current ||
+          generation !== loadGenerationRef.current ||
+          stateRef.current !== current ||
+          sourceBytesRef.current !== source ||
+          reviewLockRef.current ||
+          loadingRef.current
+        ) {
+          return;
+        }
+        if (!result.ok) {
+          setError(result.errors.map((item) => item.message).join(' '));
+          return;
+        }
+
+        commitState(result.state);
+        resetOutput();
+        setConfirmedFields(new Set());
+        setActiveContentAcknowledged(false);
+        setProtectionLossAcknowledged(false);
+        setSelectedExportStrategy(null);
+        setCorrectionFieldName(null);
+        setNotice(
+          `${result.receipt.importedFieldNames.length} proposals restored from the matching fill package. The exact PDF and recorded plan hash matched; that proves consistency, not who created the package. Review every imported value before choosing an artifact.`,
+        );
+      } catch (caught) {
+        if (!mountedRef.current) return;
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : 'The fill package could not be opened.',
+        );
+      } finally {
+        pendingPlanMutationsRef.current -= 1;
+        reviewMutationRef.current = false;
+        if (mountedRef.current) setReviewMutating(false);
+      }
+    },
+    [commitState, resetOutput],
   );
 
   const stageDemoPlan = async () => {
@@ -1274,8 +1605,8 @@ export function FormProofWorkbench() {
     selectedExportStrategy === 'confirmed_plain_derivative_pdf';
   const requiresActiveContentAcknowledgment =
     selectedCreatesPdf && activeContentDescription.length > 0;
-  const hasBlockedHighRiskActions =
-    (activeContent?.highRiskActionCount ?? 0) > 0;
+  const hasBlockedPdfContent =
+    documentState?.inspection.contentRisk.blocksPdfExport ?? false;
   const requiresProtectionLossAcknowledgment =
     selectedExportStrategy === 'confirmed_plain_derivative_pdf';
 
@@ -1294,6 +1625,7 @@ export function FormProofWorkbench() {
         !current ||
         !binding ||
         !reviewLockRef.current ||
+        binding.documentSessionId !== current.documentSessionId ||
         binding.sourceHash !== current.source.sourceHash ||
         binding.planHash !== current.planHash ||
         binding.stateVersion !== current.stateVersion
@@ -1365,6 +1697,7 @@ export function FormProofWorkbench() {
         !binding ||
         !reviewLockRef.current ||
         fieldNames.length === 0 ||
+        binding.documentSessionId !== current.documentSessionId ||
         binding.sourceHash !== current.source.sourceHash ||
         binding.planHash !== current.planHash ||
         binding.stateVersion !== current.stateVersion
@@ -1377,7 +1710,9 @@ export function FormProofWorkbench() {
       if (
         intent === 'unlock' &&
         fieldNames.some(
-          (fieldName) => current.draft[fieldName]?.actor !== 'human',
+          (fieldName) =>
+            current.draft[fieldName]?.actor !== 'human' ||
+            (current.importedProposalFieldNames ?? []).includes(fieldName),
         )
       ) {
         setError('Only a human correction can be unlocked in this UI.');
@@ -1450,6 +1785,7 @@ export function FormProofWorkbench() {
       !binding ||
       selectedExportStrategy === null ||
       !allReviewFieldsConfirmed ||
+      binding.documentSessionId !== current.documentSessionId ||
       binding.sourceHash !== current.source.sourceHash ||
       binding.planHash !== current.planHash ||
       binding.stateVersion !== current.stateVersion
@@ -1623,6 +1959,11 @@ export function FormProofWorkbench() {
   }, [documentState, fillPackageResult, fillPackageUrl]);
 
   const draftEntries = formState ? Object.values(formState.draft) : [];
+  const importedProposalSet = useMemo(
+    () => new Set(formState?.importedProposalFieldNames ?? []),
+    [formState?.importedProposalFieldNames],
+  );
+  const importedProposalNames = [...importedProposalSet];
   const descriptorByName = useMemo(
     () =>
       new Map(
@@ -1720,8 +2061,9 @@ export function FormProofWorkbench() {
           </p>
           <h1 id="page-title">The agent drafts. You decide.</h1>
           <p>
-            WebMCP shares requested structured field data with the active agent
-            for drafting. Approval and export stay outside its tool surface.
+            PDF protection metadata is available to WebMCP. Field names and
+            values stay private until you enable sharing for the current PDF
+            load. Approval and export stay outside its tool surface.
           </p>
         </div>
         <div className="intro-actions">
@@ -1732,12 +2074,33 @@ export function FormProofWorkbench() {
             accept="application/pdf,.pdf"
             onChange={(event) => void onFileChosen(event)}
           />
+          <input
+            ref={fillPackageInputRef}
+            className="sr-only"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => void onFillPackageChosen(event)}
+          />
           <Button
             variant="outline"
             size="lg"
             onClick={() => fileInputRef.current?.click()}
           >
             <Upload aria-hidden="true" /> Choose PDF
+          </Button>
+          <Button
+            variant="outline"
+            size="lg"
+            onClick={() => fillPackageInputRef.current?.click()}
+            disabled={
+              !formState ||
+              loading ||
+              exporting ||
+              reviewMutating ||
+              draftEntries.length > 0
+            }
+          >
+            <FileJson aria-hidden="true" /> Open fill package
           </Button>
           <Button size="lg" onClick={() => void loadDemo()} disabled={loading}>
             {loading ? (
@@ -1748,6 +2111,34 @@ export function FormProofWorkbench() {
             Reload demo
           </Button>
         </div>
+      </section>
+
+      <section className="notice-bar" aria-label="Agent data access">
+        <LockKeyhole aria-hidden="true" />
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={agentDataAccessGranted}
+            disabled={!formState || loading}
+            onChange={(event) => {
+              const current = stateRef.current;
+              const granted = event.target.checked && current !== null;
+              agentDataConsentSessionRef.current = granted
+                ? current.documentSessionId
+                : null;
+              setAgentDataAccessGranted(granted);
+            }}
+          />
+          <span>
+            <strong>Share this PDF&apos;s field data with the agent</strong>
+            <br />
+            Off by default and reset on every load. When enabled, WebMCP may
+            return field names, existing values, choices, and staged proposals
+            for this document session. Approval and export are not WebMCP tools;
+            browser automation outside that tool boundary could still operate
+            the visible UI.
+          </span>
+        </label>
       </section>
 
       {(notice || error) && (
@@ -1762,6 +2153,18 @@ export function FormProofWorkbench() {
           )}
           <span>{error ?? notice}</span>
         </div>
+      )}
+
+      {importedProposalNames.length > 0 && (
+        <output className="notice-bar">
+          <ShieldCheck aria-hidden="true" />
+          <span>
+            <strong>Imported proposals are untrusted.</strong> The package
+            matched this exact PDF and reproduced its recorded plan hash. That
+            checks consistency, not creator identity. Review all{' '}
+            {importedProposalNames.length} imported values before export.
+          </span>
+        </output>
       )}
 
       <section
@@ -2034,8 +2437,19 @@ export function FormProofWorkbench() {
                 <strong>
                   {loading
                     ? 'Inspecting the demo PDF…'
-                    : 'Choose a fillable PDF'}
+                    : documentState?.inspection.contentRisk
+                          .blocksInteractivePreview
+                      ? 'Interactive preview disabled for this PDF'
+                      : 'Choose a fillable PDF'}
                 </strong>
+                {documentState?.inspection.contentRisk
+                  .blocksInteractivePreview && (
+                  <span>
+                    The original remains untouched. FormProof found unvalidated
+                    active content, an external link, or an embedded payload and
+                    will not mount it in the browser PDF viewer.
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -2070,6 +2484,9 @@ export function FormProofWorkbench() {
               {draftEntries.map((entry) => {
                 const field = formState?.fields[entry.fieldName];
                 const descriptor = descriptorByName.get(entry.fieldName);
+                const importedProposal = importedProposalSet.has(
+                  entry.fieldName,
+                );
                 const requiresIdentityReview =
                   (entry.identityReviewReasons?.length ?? 0) > 0;
                 const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
@@ -2080,11 +2497,13 @@ export function FormProofWorkbench() {
                     <div className="draft-card-heading">
                       <strong>{field?.label ?? entry.fieldName}</strong>
                       <Badge variant="outline">
-                        {entry.actor === 'human'
-                          ? 'Human locked'
-                          : requiresIdentityReview
-                            ? 'Verify field identity'
-                            : `${Math.round(entry.provenance.confidence * 100)}%`}
+                        {importedProposal
+                          ? 'Imported · review required'
+                          : entry.actor === 'human'
+                            ? 'Human locked'
+                            : requiresIdentityReview
+                              ? 'Verify field identity'
+                              : `${Math.round(entry.provenance.confidence * 100)}%`}
                       </Badge>
                     </div>
                     <div className="mini-diff">
@@ -2098,9 +2517,11 @@ export function FormProofWorkbench() {
                       <b>{formatValue(entry.value, descriptor?.choices)}</b>
                     </div>
                     <small>
-                      {entry.actor === 'human'
-                        ? 'human correction · agent locked for this session'
-                        : entry.provenance.kind.replaceAll('_', ' ')}
+                      {importedProposal
+                        ? 'untrusted package proposal · creator not verified'
+                        : entry.actor === 'human'
+                          ? 'human correction · agent locked for this session'
+                          : claimedBasisLabel(entry.provenance.kind)}
                     </small>
                     {requiresIdentityReview && (
                       <small className="human-only-note">
@@ -2169,7 +2590,7 @@ export function FormProofWorkbench() {
             <Button
               className="w-full"
               size="lg"
-              onClick={openReview}
+              onClick={() => openReview('human')}
               disabled={
                 !documentState ||
                 documentState.inspection.protection.exportStrategies.length ===
@@ -2185,8 +2606,8 @@ export function FormProofWorkbench() {
               ? documentState.inspection.protection.protectionType === 'unknown'
                 ? 'Unknown protection remains inspection-only; no artifact export is offered.'
                 : 'No artifact export is available because this PDF has no agent-writable addressable fields.'
-              : hasBlockedHighRiskActions
-                ? 'PDF rewriting is not offered because of high-risk native actions; an original-untouched fill package remains available.'
+              : hasBlockedPdfContent
+                ? 'PDF rewriting is not offered because unvalidated active or embedded content is present; an original-untouched fill package remains available.'
                 : validation && validation.blockerCount > 0
                   ? `${validation.blockerCount} PDF validation blocker(s) remain; an original-untouched fill package can still be reviewed.`
                   : 'A person chooses the artifact here; WebMCP cannot select or export it.'}
@@ -2339,7 +2760,7 @@ export function FormProofWorkbench() {
 
       <Dialog
         open={reviewOpen}
-        onOpenChange={(open) => (open ? openReview() : closeReview())}
+        onOpenChange={(open) => (open ? openReview('human') : closeReview())}
       >
         <DialogContent
           className="review-dialog"
@@ -2370,6 +2791,18 @@ export function FormProofWorkbench() {
             </span>
           </div>
 
+          {importedProposalNames.length > 0 && (
+            <div className="dialog-safety-note">
+              <FileJson aria-hidden="true" />
+              <span>
+                This plan contains {importedProposalNames.length} untrusted
+                package proposals. The exact source and recorded plan matched,
+                but creator identity was not verified. Confirm each value as if
+                it were a new external suggestion.
+              </span>
+            </div>
+          )}
+
           <div>
             <p className="section-kicker">Choose the artifact yourself</p>
             <p className="button-note">
@@ -2384,7 +2817,7 @@ export function FormProofWorkbench() {
                 const createsPdf = strategy !== 'fill_package';
                 const unavailable =
                   createsPdf &&
-                  (!validation?.canApprove || hasBlockedHighRiskActions);
+                  (!validation?.canApprove || hasBlockedPdfContent);
                 const strategyId = `export-strategy-${strategy}`;
                 return (
                   <div className="review-check" key={strategy}>
@@ -2436,11 +2869,13 @@ export function FormProofWorkbench() {
               );
               const checkboxId = `review-field-${index}`;
               const isHumanCompletion = !staged;
-              const isHumanPinned = staged?.actor === 'human';
+              const importedProposal = importedProposalSet.has(fieldName);
+              const isHumanPinned =
+                staged?.actor === 'human' && !importedProposal;
               const requiresIdentityReview =
                 (staged?.identityReviewReasons?.length ?? 0) > 0;
               const canCorrect =
-                staged?.actor === 'agent' &&
+                (staged?.actor === 'agent' || importedProposal) &&
                 field !== undefined &&
                 !field.readOnly &&
                 !field.humanOnly &&
@@ -2484,17 +2919,21 @@ export function FormProofWorkbench() {
                         </strong>
                       </label>
                       <Badge variant="outline">
-                        {isHumanPinned
-                          ? 'Human correction · agent locked'
-                          : requiresIdentityReview
-                            ? 'Identity check required'
-                            : isRequiredMissing
-                              ? 'Required field is blank'
-                              : isHumanCompletion
-                                ? requiresHumanCompletion
-                                  ? 'Complete after export'
-                                  : 'Preserved unchanged'
-                                : staged.provenance.kind.replaceAll('_', ' ')}
+                        {importedProposal
+                          ? 'Imported · review required'
+                          : isHumanPinned
+                            ? 'Human correction · agent locked'
+                            : requiresIdentityReview
+                              ? 'Identity check required'
+                              : isRequiredMissing
+                                ? 'Required field is blank'
+                                : isHumanCompletion
+                                  ? requiresHumanCompletion
+                                    ? 'Complete after export'
+                                    : 'Preserved unchanged'
+                                  : staged
+                                    ? claimedBasisLabel(staged.provenance.kind)
+                                    : 'Agent proposal'}
                       </Badge>
                     </span>
                     {isHumanCompletion ? (
@@ -2520,7 +2959,10 @@ export function FormProofWorkbench() {
                         <span>
                           <small>After</small>
                           <b>
-                            {formatValue(staged.value, descriptor?.choices)}
+                            {formatValue(
+                              staged?.value ?? null,
+                              descriptor?.choices,
+                            )}
                           </b>
                         </span>
                       </span>
@@ -2553,14 +2995,23 @@ export function FormProofWorkbench() {
                       <div className="evidence-block">
                         <small>Evidence</small>
                         <ul className="evidence-list">
-                          {staged.provenance.evidence.map((item) => (
-                            <li key={item}>{item}</li>
-                          ))}
+                          {staged.provenance.evidence
+                            .slice(0, 5)
+                            .map((item) => (
+                              <li key={item}>{item}</li>
+                            ))}
                         </ul>
+                        {staged.provenance.evidence.length > 5 && (
+                          <small>
+                            {staged.provenance.evidence.length - 5} additional
+                            evidence items were omitted from this view.
+                          </small>
+                        )}
                       </div>
                     )}
                     {correctionFieldName === fieldName &&
                     canCorrect &&
+                    staged &&
                     field ? (
                       <HumanCorrectionEditor
                         field={field}
@@ -2572,7 +3023,7 @@ export function FormProofWorkbench() {
                           void correctProposal(fieldName, value)
                         }
                       />
-                    ) : staged?.actor === 'human' ? (
+                    ) : isHumanPinned ? (
                       <Button
                         type="button"
                         className="self-start"
@@ -2731,7 +3182,7 @@ export function FormProofWorkbench() {
                 correctionFieldName !== null ||
                 selectedExportStrategy === null ||
                 (selectedCreatesPdf &&
-                  (!validation?.canApprove || hasBlockedHighRiskActions))
+                  (!validation?.canApprove || hasBlockedPdfContent))
               }
             >
               {exporting ? (

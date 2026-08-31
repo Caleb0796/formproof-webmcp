@@ -57,7 +57,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         }
       },
       {
@@ -76,15 +77,40 @@
               "stateVersion": 1,
               "issues": [
                 {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.c8v3"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.p0x4"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.q7f1"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.r4d6"
+                },
+                {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 0,
-              "reviewCount": 1,
-              "reviewFieldNames": ["frm.z5a7"],
+              "reviewCount": 5,
+              "reviewFieldNames": [
+                "frm.c8v3",
+                "frm.p0x4",
+                "frm.q7f1",
+                "frm.r4d6",
+                "frm.z5a7"
+              ],
               "structurallyValid": true,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -107,7 +133,8 @@
         "name": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         }
       },
       {
@@ -152,6 +179,7 @@
           "ok": true,
           "stateVersion": 2,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_field_evidence",
           "data": {
             "document": {
@@ -161,7 +189,7 @@
             },
             "validation": {
               "blockerCount": 0,
-              "reviewCount": 1,
+              "reviewCount": 4,
               "structurallyValid": true,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -217,7 +245,8 @@
         "arguments": {
           "expectedStateVersion": 2,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.q7f1"]
+          "fieldNames": ["frm.q7f1"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -239,6 +268,7 @@
           "ok": true,
           "stateVersion": 2,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -272,7 +302,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 2,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -285,6 +316,7 @@
           "ok": true,
           "stateVersion": 2,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -293,8 +325,13 @@
             "stagedFieldCount": 4,
             "stateVersion": 2,
             "blockerCount": 0,
-            "reviewCount": 1,
-            "reviewFieldNames": ["frm.z5a7"],
+            "reviewCount": 4,
+            "reviewFieldNames": [
+              "frm.c8v3",
+              "frm.p0x4",
+              "frm.r4d6",
+              "frm.z5a7"
+            ],
             "structurallyValid": true,
             "completionStatus": "incomplete",
             "ruleCoverage": "pdf_required_flags_only",
@@ -302,10 +339,24 @@
             "canApprove": true,
             "issues": [
               {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.c8v3"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.p0x4"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.r4d6"
+              },
+              {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -316,7 +367,8 @@
         "functionName": "start_fill_review",
         "arguments": {
           "expectedStateVersion": 2,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -329,6 +381,7 @@
           "ok": true,
           "stateVersion": 2,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "human_review_required",
           "data": {
             "reviewOpened": true,

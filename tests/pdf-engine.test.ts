@@ -424,6 +424,76 @@ async function activeContentBytes(
   });
 }
 
+type TriggeredActionFixture =
+  | 'javascript_field_aa'
+  | 'javascript_name_tree'
+  | 'javascript_open_action'
+  | 'javascript_page_aa'
+  | 'javascript_widget_aa'
+  | 'uri_field_aa'
+  | 'uri_link'
+  | 'uri_open_action';
+
+async function triggeredActionBytes(
+  kind: TriggeredActionFixture,
+): Promise<Uint8Array> {
+  const document = await PDFDocument.load(
+    await activeContentBytes({ orphan: true }),
+    { updateMetadata: false },
+  );
+  const field = document.getForm().getTextField('active.name');
+  const page = document.getPages()[0];
+  const uri = kind.startsWith('uri_');
+  const action = document.context.obj(
+    uri
+      ? { S: 'URI', URI: PDFString.of('https://example.test/') }
+      : { S: 'JavaScript', JS: PDFString.of('untrusted();') },
+  ) as PDFDict;
+  const actionRef = document.context.register(action);
+
+  if (kind === 'javascript_name_tree') {
+    const javaScript = document.context.obj({
+      Names: [PDFString.of('startup'), actionRef],
+    }) as PDFDict;
+    document.catalog.set(
+      PDFName.of('Names'),
+      document.context.obj({
+        JavaScript: document.context.register(javaScript),
+      }),
+    );
+  } else if (kind === 'javascript_open_action' || kind === 'uri_open_action') {
+    document.catalog.set(PDFName.of('OpenAction'), actionRef);
+  } else if (kind === 'javascript_page_aa') {
+    page.node.set(PDFName.of('AA'), document.context.obj({ O: actionRef }));
+  } else if (kind === 'javascript_widget_aa') {
+    const widget = field.acroField.getWidgets()[0];
+    assert.ok(widget);
+    widget.dict.set(PDFName.of('AA'), document.context.obj({ E: actionRef }));
+  } else if (kind === 'uri_link') {
+    const annotation = document.context.obj({
+      Type: 'Annot',
+      Subtype: 'Link',
+      Rect: [40, 620, 160, 650],
+      A: actionRef,
+    }) as PDFDict;
+    page.node.set(
+      PDFName.of('Annots'),
+      document.context.obj([document.context.register(annotation)]),
+    );
+  } else {
+    field.acroField.dict.set(
+      PDFName.of('AA'),
+      document.context.obj({ K: actionRef }),
+    );
+  }
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
 async function resetFormActionBytes(): Promise<Uint8Array> {
   const document = await PDFDocument.load(
     await activeContentBytes({ orphan: true }),
@@ -476,6 +546,81 @@ async function actionLikeMetadataBytes(): Promise<Uint8Array> {
     PDFName.of('VendorMetadata'),
     document.context.register(metadata),
   );
+
+  return document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+}
+
+type PayloadFixture =
+  | '3d'
+  | 'associated_file'
+  | 'embedded_file'
+  | 'file_attachment'
+  | 'isolated_filespec'
+  | 'movie'
+  | 'page_associated_file'
+  | 'rich_media'
+  | 'screen'
+  | 'sound';
+
+async function payloadBytes(kind: PayloadFixture): Promise<Uint8Array> {
+  const document = await PDFDocument.load(
+    await activeContentBytes({ orphan: true }),
+    { updateMetadata: false },
+  );
+  const page = document.getPages()[0];
+  const embeddedStream = document.context.flateStream(
+    new TextEncoder().encode('synthetic untrusted attachment'),
+    { Type: 'EmbeddedFile' },
+  );
+  const embeddedStreamRef = document.context.register(embeddedStream);
+  const embeddedFileDictionary = document.context.obj({
+    F: embeddedStreamRef,
+  }) as PDFDict;
+  const fileSpec = document.context.obj({
+    Type: 'Filespec',
+    F: PDFString.of('invoice.exe'),
+    EF: embeddedFileDictionary,
+  }) as PDFDict;
+  const fileSpecRef = document.context.register(fileSpec);
+
+  if (kind === 'embedded_file') {
+    const embeddedFiles = document.context.obj({
+      Names: [PDFString.of('invoice.exe'), fileSpecRef],
+    }) as PDFDict;
+    document.catalog.set(
+      PDFName.of('Names'),
+      document.context.obj({
+        EmbeddedFiles: document.context.register(embeddedFiles),
+      }),
+    );
+  } else if (kind === 'associated_file') {
+    document.catalog.set(PDFName.of('AF'), document.context.obj([fileSpecRef]));
+  } else if (kind === 'page_associated_file') {
+    page.node.set(PDFName.of('AF'), document.context.obj([fileSpecRef]));
+  } else if (kind !== 'isolated_filespec') {
+    const subtype = {
+      '3d': '3D',
+      file_attachment: 'FileAttachment',
+      movie: 'Movie',
+      rich_media: 'RichMedia',
+      screen: 'Screen',
+      sound: 'Sound',
+    }[kind];
+    const annotation = document.context.obj({
+      Type: 'Annot',
+      Subtype: subtype,
+      Rect: [40, 620, 80, 660],
+      ...(kind === 'file_attachment' ? { FS: fileSpecRef } : {}),
+    }) as PDFDict;
+    page.node.set(
+      PDFName.of('Annots'),
+      document.context.obj([document.context.register(annotation)]),
+    );
+  }
 
   return document.save({
     addDefaultPage: false,
@@ -2199,7 +2344,7 @@ void test('fails closed when the trailer root is not a Catalog dictionary', asyn
   );
 });
 
-void test('reports reachable active content without exposing or executing scripts', async () => {
+void test('reports reachable active content and refuses to copy it into a filled PDF', async () => {
   const source = await activeContentBytes();
   const inspection = await inspectPdf(source);
 
@@ -2215,7 +2360,7 @@ void test('reports reachable active content without exposing or executing script
     inspection.warnings.some(
       (warning) =>
         warning.code === 'ACTIVE_CONTENT_PRESERVED' &&
-        /preserved/i.test(warning.message) &&
+        /original PDF/i.test(warning.message) &&
         /does not execute or validate/i.test(warning.message),
     ),
   );
@@ -2223,20 +2368,98 @@ void test('reports reachable active content without exposing or executing script
     inspection.warnings.some(
       (warning) =>
         warning.code === 'JAVASCRIPT_UNVALIDATED' &&
-        /preserved/i.test(warning.message) &&
+        /original PDF/i.test(warning.message) &&
         /does not execute or semantically validate/i.test(warning.message),
     ),
   );
   assert.doesNotMatch(JSON.stringify(inspection), /validateWithoutExecuting/);
 
-  const result = await applyApprovedValues(source, {
-    'active.name': 'Synthetic Applicant',
-  });
-  assert.deepEqual(result.activeContent, inspection.activeContent);
+  assert.equal(inspection.contentRisk.blocksPdfExport, true);
   assert.deepEqual(
-    (await inspectPdf(result.bytes)).activeContent,
-    inspection.activeContent,
+    inspection.contentRisk.reasons.map(({ code }) => code),
+    ['javascript_present', 'external_link_present'],
   );
+  assert.deepEqual(inspection.protection.exportStrategies, ['fill_package']);
+  await expectEngineError(
+    applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+    'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+  );
+});
+
+void test('blocks JavaScript and URI actions at every supported trigger entry', async () => {
+  const cases: Array<{
+    kind: TriggeredActionFixture;
+    reason: 'external_link_present' | 'javascript_present';
+    trigger:
+      | 'additional_action'
+      | 'direct_action'
+      | 'javascript_name_tree'
+      | 'open_action';
+  }> = [
+    {
+      kind: 'javascript_name_tree',
+      reason: 'javascript_present',
+      trigger: 'javascript_name_tree',
+    },
+    {
+      kind: 'javascript_open_action',
+      reason: 'javascript_present',
+      trigger: 'open_action',
+    },
+    {
+      kind: 'javascript_field_aa',
+      reason: 'javascript_present',
+      trigger: 'additional_action',
+    },
+    {
+      kind: 'javascript_widget_aa',
+      reason: 'javascript_present',
+      trigger: 'additional_action',
+    },
+    {
+      kind: 'javascript_page_aa',
+      reason: 'javascript_present',
+      trigger: 'additional_action',
+    },
+    {
+      kind: 'uri_link',
+      reason: 'external_link_present',
+      trigger: 'direct_action',
+    },
+    {
+      kind: 'uri_open_action',
+      reason: 'external_link_present',
+      trigger: 'open_action',
+    },
+    {
+      kind: 'uri_field_aa',
+      reason: 'external_link_present',
+      trigger: 'additional_action',
+    },
+  ];
+
+  for (const { kind, reason, trigger } of cases) {
+    const source = await triggeredActionBytes(kind);
+    const inspection = await inspectPdf(source);
+    assert.equal(inspection.contentRisk.blocksPdfExport, true, kind);
+    assert.equal(
+      inspection.contentRisk.reasons.some(
+        ({ code, count }) => code === reason && count === 1,
+      ),
+      true,
+      kind,
+    );
+    assert.equal(inspection.contentRisk.actionTriggerCounts[trigger], 1, kind);
+    assert.deepEqual(
+      inspection.protection.exportStrategies,
+      ['fill_package'],
+      kind,
+    );
+    await expectEngineError(
+      applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+      'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+    );
+  }
 });
 
 void test('treats cyclic and malformed action entry graphs as high risk without recursing', async () => {
@@ -2455,6 +2678,71 @@ void test('does not classify untriggered metadata as an action', async () => {
   ]);
 });
 
+void test('blocks only reachable attachment and interactive payload entry points', async () => {
+  const expectedReason = {
+    '3d': 'multimedia_present',
+    embedded_file: 'embedded_file_present',
+    associated_file: 'associated_file_present',
+    page_associated_file: 'associated_file_present',
+    file_attachment: 'file_attachment_present',
+    rich_media: 'rich_media_present',
+    movie: 'multimedia_present',
+    screen: 'multimedia_present',
+    sound: 'multimedia_present',
+  } as const;
+
+  for (const [kind, reason] of Object.entries(expectedReason) as Array<
+    [Exclude<PayloadFixture, 'isolated_filespec'>, string]
+  >) {
+    const source = await payloadBytes(kind);
+    const inspection = await inspectPdf(source);
+    assert.equal(inspection.contentRisk.blocksPdfExport, true, kind);
+    assert.equal(
+      inspection.contentRisk.reasons.some(({ code }) => code === reason),
+      true,
+      kind,
+    );
+    assert.deepEqual(
+      inspection.protection.exportStrategies,
+      ['fill_package'],
+      kind,
+    );
+    await expectEngineError(
+      applyApprovedValues(source, { 'active.name': 'Must not be written' }),
+      'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
+    );
+  }
+
+  const isolated = await payloadBytes('isolated_filespec');
+  const isolatedInspection = await inspectPdf(isolated);
+  assert.equal(isolatedInspection.contentRisk.blocksPdfExport, false);
+  assert.deepEqual(isolatedInspection.contentRisk.reasons, []);
+  const result = await applyApprovedValues(isolated, {
+    'active.name': 'Synthetic Applicant',
+  });
+  assert.equal(result.verifiedFields[0]?.value, 'Synthetic Applicant');
+});
+
+void test('content risk only removes strategies and never expands unknown protection', async () => {
+  const document = await PDFDocument.load(await payloadBytes('embedded_file'), {
+    updateMetadata: false,
+  });
+  document.catalog.set(
+    PDFName.of('Perms'),
+    document.context.obj({ VendorProtection: PDFString.of('opaque') }),
+  );
+  const source = await document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+  const inspection = await inspectPdf(source);
+  assert.equal(inspection.protection.protectionType, 'unknown');
+  assert.deepEqual(inspection.protection.allowedMutations, ['inspect_fields']);
+  assert.deepEqual(inspection.protection.exportStrategies, []);
+  assert.equal(inspection.contentRisk.blocksPdfExport, true);
+});
+
 void test('inspects an approval signature but blocks both PDF rewrite strategies', async () => {
   const source = await approvalSignatureBytes();
   const sourceSnapshot = Uint8Array.from(source);
@@ -2627,7 +2915,6 @@ void test('reports unknown Perms variants and refuses every export strategy', as
     assert.equal(inspection.protection.protectionType, 'unknown');
     assert.deepEqual(inspection.protection.allowedMutations, [
       'inspect_fields',
-      'stage_field_values',
     ]);
     assert.deepEqual(inspection.protection.exportStrategies, []);
     assert.equal(

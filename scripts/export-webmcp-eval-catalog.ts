@@ -15,6 +15,7 @@ const success = (): FormProofAdapterResult => ({
   ok: true,
   stateVersion: 0,
   sourceHash: SOURCE_HASH,
+  documentSessionId: '4'.repeat(32),
   data: {},
 });
 

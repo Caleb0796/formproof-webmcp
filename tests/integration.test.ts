@@ -121,6 +121,7 @@ interface AuthoredEvalCall {
     fieldNames?: string[];
   };
   mockOutput: {
+    documentSessionId?: string;
     data: unknown;
   };
 }
@@ -406,6 +407,10 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.match(workbench, /PDF bytes stay in this browser/);
   assert.match(workbench, /Approval and export stay outside its tool surface/);
   assert.match(
+    workbench,
+    /browser automation outside that tool boundary could still operate\s+the visible UI/,
+  );
+  assert.match(
     webMcpSource,
     /This WebMCP tool cannot approve or export; those controls exist only in the UI/,
   );
@@ -464,6 +469,81 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
     /getChoiceLabelReviewNotice\(\s*descriptor\?\.choices \?\? \[\],\s*\)/u,
   );
   assert.equal(workbench.match(/\{choiceLabelReviewNotice &&/gu)?.length, 2);
+});
+
+void test('binds data consent and every mutable workflow to one load session', async () => {
+  const workbench = await readFile(
+    new URL('../components/formproof-workbench.tsx', import.meta.url),
+    'utf8',
+  );
+  const bindingStart = workbench.indexOf('function bindingFailure(');
+  const bindingEnd = workbench.indexOf(
+    '\nfunction stateErrorFailure(',
+    bindingStart,
+  );
+  assert.ok(bindingStart >= 0 && bindingEnd > bindingStart);
+  const binding = workbench.slice(bindingStart, bindingEnd);
+  const sessionCheck = binding.indexOf('expectedDocumentSessionId');
+  const sourceCheck = binding.indexOf('expectedSourceHash');
+  const versionCheck = binding.indexOf('expectedStateVersion');
+  assert.ok(
+    sessionCheck >= 0 &&
+      sourceCheck > sessionCheck &&
+      versionCheck > sourceCheck,
+  );
+
+  const beginLoadStart = workbench.indexOf('const beginLoad = useCallback(');
+  const beginLoadEnd = workbench.indexOf(
+    'const loadSource = useCallback(',
+    beginLoadStart,
+  );
+  assert.ok(beginLoadStart >= 0 && beginLoadEnd > beginLoadStart);
+  const beginLoad = workbench.slice(beginLoadStart, beginLoadEnd);
+  assert.match(beginLoad, /stateRef\.current = null/u);
+  assert.match(beginLoad, /agentDataConsentSessionRef\.current = null/u);
+  assert.match(beginLoad, /setAgentDataAccessGranted\(false\)/u);
+  assert.match(beginLoad, /pdfInspectionAbortRef\.current\?\.abort\(\)/u);
+  assert.match(beginLoad, /pdfInspectionWorkerRef\.current\?\.terminate\(\)/u);
+
+  assert.equal(
+    workbench.match(
+      /agentDataConsentSessionRef\.current !== current\.documentSessionId/gu,
+    )?.length,
+    5,
+  );
+  assert.match(workbench, /Off by default and reset on every load/u);
+  assert.match(workbench, /new Worker\(/u);
+  assert.doesNotMatch(workbench, /\binspectPdf\s*\(/u);
+});
+
+void test('denies framing without constraining the PDF preview or inspection worker', async () => {
+  const { default: nextConfig } = (await import(
+    new URL('../next.config.ts', import.meta.url).href
+  )) as typeof import('../next.config');
+  const headers = await nextConfig.headers?.();
+
+  assert.deepEqual(headers, [
+    {
+      source: '/',
+      headers: [
+        {
+          key: 'Content-Security-Policy',
+          value: "frame-ancestors 'none'",
+        },
+        { key: 'X-Frame-Options', value: 'DENY' },
+      ],
+    },
+    {
+      source: '/:path*',
+      headers: [
+        {
+          key: 'Content-Security-Policy',
+          value: "frame-ancestors 'none'",
+        },
+        { key: 'X-Frame-Options', value: 'DENY' },
+      ],
+    },
+  ]);
 });
 
 void test('preserves exact-SOM static XFA choice label sources in the fill package and reviewer notice', async () => {
@@ -654,7 +734,7 @@ void test('wires scoped context and artifact-specific review boundaries through 
   const contextAdapter = workbench.slice(contextStart, contextEnd);
   assert.match(
     contextAdapter,
-    /parseFormContextCursor\(\s*input\.cursor,\s*\{\s*sourceHash:\s*current\.source\.sourceHash,\s*stateVersion:\s*current\.stateVersion,\s*\},\s*input,\s*\)/u,
+    /parseFormContextCursor\(\s*input\.cursor,\s*\{\s*documentSessionId:\s*current\.documentSessionId,\s*sourceHash:\s*current\.source\.sourceHash,\s*stateVersion:\s*current\.stateVersion,\s*\},\s*input,\s*\)/u,
   );
   assert.match(contextAdapter, /cursor\.code === 'stale_state'/u);
   assert.match(contextAdapter, /form state changed.*first page/u);
@@ -664,9 +744,7 @@ void test('wires scoped context and artifact-specific review boundaries through 
   );
   assert.match(contextAdapter, /offset > data\.pagination\.total/u);
 
-  const openReviewStart = workbench.indexOf(
-    'const openReview = useCallback(() => {',
-  );
+  const openReviewStart = workbench.indexOf('const openReview = useCallback(');
   const openReviewEnd = workbench.indexOf(
     'const resetOutput = useCallback(() => {',
   );
@@ -676,10 +754,9 @@ void test('wires scoped context and artifact-specific review boundaries through 
     openReview,
     /const preferredStrategy = initialExportStrategy\(inspection\)/u,
   );
-  assert.match(
-    openReview,
-    /preferredStrategy !== 'fill_package'[\s\S]*?!validateDraft\(current\)\.canApprove[\s\S]*?exportStrategies\.includes\('fill_package'\)[\s\S]*?\? 'fill_package'/u,
-  );
+  assert.match(openReview, /setSelectedExportStrategy\(null\)/u);
+  assert.match(openReview, /reviewBindingsMatch\(reviewBindingRef\.current/u);
+  assert.match(openReview, /dismissedReviewBindingRef\.current/u);
   assert.doesNotMatch(openReview, /PDF_ACTION_UNSUPPORTED|will not export/u);
 
   const validationStart = workbench.indexOf('validateFillPlan(input) {');
@@ -718,7 +795,7 @@ void test('wires scoped context and artifact-specific review boundaries through 
   assert.match(workbench, /exportApprovedDerivativePdfFromUi/u);
   assert.match(
     workbench,
-    /selectedCreatesPdf &&[\s\S]*?!validation\?\.canApprove \|\| hasBlockedHighRiskActions/u,
+    /selectedCreatesPdf &&[\s\S]*?!validation\?\.canApprove \|\| hasBlockedPdfContent/u,
   );
 });
 
@@ -732,6 +809,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
           : parseFormContextCursor(
               input.cursor,
               {
+                documentSessionId: initialState.documentSessionId,
                 sourceHash: initialState.source.sourceHash,
                 stateVersion: initialState.stateVersion,
               },
@@ -928,6 +1006,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
   assert.equal(mismatchedQueryScope.nextAction, 'fix_tool_input');
 
   const evidenceResponse = await evidence.execute({
+    expectedDocumentSessionId: initialState.documentSessionId,
     expectedStateVersion: initialState.stateVersion,
     expectedSourceHash: initialState.source.sourceHash,
     fieldNames: [FIELD.legalName, FIELD.email, FIELD.consent],
@@ -955,6 +1034,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
     true,
   );
   const housingResponse = await evidence.execute({
+    expectedDocumentSessionId: initialState.documentSessionId,
     expectedStateVersion: initialState.stateVersion,
     expectedSourceHash: initialState.source.sourceHash,
     fieldNames: [FIELD.housing],
@@ -980,6 +1060,7 @@ void test('keeps real WebMCP discovery and evidence atomic under the target budg
 
   for (const fieldNames of fieldCombinations(discoveredNames, 3)) {
     const response = await evidence.execute({
+      expectedDocumentSessionId: initialState.documentSessionId,
       expectedStateVersion: initialState.stateVersion,
       expectedSourceHash: initialState.source.sourceHash,
       fieldNames,
@@ -1099,6 +1180,12 @@ void test('keeps journey read mocks aligned with the real demo projector', async
     );
     assert.ok(contextCalls.length > 0);
     for (const call of contextCalls) {
+      const documentSessionId = call.mockOutput.documentSessionId ?? '';
+      assert.match(documentSessionId, /^[a-f0-9]{32}$/u);
+      const projectedState = {
+        ...journeyState,
+        documentSessionId,
+      };
       const cursor = call.arguments.cursor;
       const parsed =
         cursor === undefined
@@ -1106,15 +1193,16 @@ void test('keeps journey read mocks aligned with the real demo projector', async
           : parseFormContextCursor(
               cursor,
               {
-                sourceHash: journeyState.source.sourceHash,
-                stateVersion: journeyState.stateVersion,
+                documentSessionId,
+                sourceHash: projectedState.source.sourceHash,
+                stateVersion: projectedState.stateVersion,
               },
               call.arguments,
             );
       assert.equal(parsed.ok, true, `${evaluation.name} has an invalid cursor`);
       if (!parsed.ok) throw new Error('Authored context cursor was invalid.');
       const actual = createFormContextToolData(
-        journeyState,
+        projectedState,
         inspection,
         parsed.offset,
         call.arguments.limit ?? 6,
@@ -1186,6 +1274,7 @@ void test('paginates long choice evidence without losing exact values', async ()
           ? ({ ok: true, offset: 0 } as const)
           : parseFieldChoiceCursor(
               input.choiceCursor,
+              state.documentSessionId,
               state.source.sourceHash,
               input.fieldNames[0],
             );
@@ -1224,6 +1313,7 @@ void test('paginates long choice evidence without losing exact values', async ()
   let choiceCursor: string | null = null;
   do {
     const response: FormProofToolResponse = await evidence.execute({
+      expectedDocumentSessionId: state.documentSessionId,
       expectedStateVersion: state.stateVersion,
       expectedSourceHash: state.source.sourceHash,
       fieldNames: [FIELD.housing],
@@ -1423,6 +1513,7 @@ void test('never repeats an unreturnable choice cursor', async () => {
           ? ({ ok: true, offset: 0 } as const)
           : parseFieldChoiceCursor(
               input.choiceCursor,
+              state.documentSessionId,
               state.source.sourceHash,
               longName,
             );
@@ -1458,6 +1549,7 @@ void test('never repeats an unreturnable choice cursor', async () => {
   assert.ok(evidence);
 
   const response = await evidence.execute({
+    expectedDocumentSessionId: state.documentSessionId,
     expectedStateVersion: state.stateVersion,
     expectedSourceHash: state.source.sourceHash,
     fieldNames: [longName],
@@ -1482,7 +1574,12 @@ void test('never repeats an unreturnable choice cursor', async () => {
   assert.ok(page.returned + page.unavailableChoiceCount > 0);
   assert.notEqual(
     page.nextCursor,
-    createFieldChoiceCursor(0, state.source.sourceHash, longName),
+    createFieldChoiceCursor(
+      0,
+      state.documentSessionId,
+      state.source.sourceHash,
+      longName,
+    ),
   );
 });
 
@@ -1546,7 +1643,13 @@ void test('carries the real demo PDF through exact human approval and the releas
   assert.equal(validation.blockerCount, 0);
   assert.equal(validation.canApprove, true);
   assert.deepEqual(validation.reviewFieldNames, [
+    FIELD.consent,
     FIELD.support,
+    FIELD.contact,
+    FIELD.email,
+    FIELD.legalName,
+    FIELD.housing,
+    FIELD.notes,
     FIELD.signature,
   ]);
   assert.equal(

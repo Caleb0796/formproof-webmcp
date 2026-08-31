@@ -24,6 +24,7 @@ const {
   createFormState,
   exportFillPackageFromUi,
   getArtifactReviewFieldNames,
+  importFillPackageFromUi,
   resolvePdfFieldLabel,
   stageFieldUpdates,
 } = (await import(
@@ -87,6 +88,7 @@ interface HonestUsefulResult {
   humanOnlyFieldCount?: number;
   recoveredRadioGroupCount?: number;
   activeContent: PdfActiveContentSummary;
+  contentRisk: PdfInspection['contentRisk'];
   protection: ExpectedProtectionFacts;
   expectedPdfRewriteError?: string;
 }
@@ -388,6 +390,7 @@ function createBenchmarkTools(
           : parseFormContextCursor(
               input.cursor,
               {
+                documentSessionId: state.documentSessionId,
                 sourceHash: state.source.sourceHash,
                 stateVersion: state.stateVersion,
               },
@@ -417,6 +420,7 @@ function createBenchmarkTools(
     getFieldEvidence(input) {
       if (
         input.expectedStateVersion !== state.stateVersion ||
+        input.expectedDocumentSessionId !== state.documentSessionId ||
         input.expectedSourceHash !== state.source.sourceHash
       ) {
         throw new TypeError('The benchmark evidence request lost its binding.');
@@ -425,6 +429,7 @@ function createBenchmarkTools(
         ok: true,
         stateVersion: state.stateVersion,
         sourceHash: state.source.sourceHash,
+        documentSessionId: state.documentSessionId,
         data: createFieldEvidenceToolData(state, inspection, input.fieldNames),
       };
     },
@@ -728,6 +733,7 @@ async function measureFieldEvidence(
   while (pendingFieldNames.length > 0) {
     const requestedFieldNames = pendingFieldNames.slice(0, 3);
     const input = {
+      expectedDocumentSessionId: state.documentSessionId,
       expectedStateVersion: state.stateVersion,
       expectedSourceHash: state.source.sourceHash,
       fieldNames: requestedFieldNames,
@@ -1537,6 +1543,108 @@ async function measureFillPackage(
     'Fill-package workflow changed the original PDF bytes',
   );
 
+  const freshState = await createFormState(
+    {
+      fileName: initialState.source.fileName,
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const imported = await importFillPackageFromUi(
+    freshState,
+    source,
+    exported.result.bytes,
+    inspection,
+  );
+  if (!imported.ok) {
+    throw new TypeError(
+      `Fill-package import failed: ${imported.errors.map(({ code }) => code).join(', ')}`,
+    );
+  }
+  const importedFieldNames = Object.keys(experiment.values).sort();
+  assertEqual(
+    imported.receipt,
+    {
+      packageHash: exported.result.outputHash,
+      sourceHash: inspection.sourceHash,
+      recordedPlanHash: staged.state.planHash,
+      restoredPlanHash: staged.state.planHash,
+      sourceHashVerified: true,
+      planHashVerified: true,
+      authenticityVerified: false,
+      packageDisplayMetadataUsed: false,
+      sourcePdfModified: false,
+      importedFieldNames,
+    },
+    'Fill-package import receipt changed',
+  );
+  assertEqual(
+    imported.state.importedProposalFieldNames,
+    importedFieldNames,
+    'Fill-package imported-proposal markers changed',
+  );
+  assertEqual(
+    {
+      planHash: imported.state.planHash,
+      approval: imported.state.approval,
+      output: imported.state.output,
+      verification: imported.state.verification,
+    },
+    {
+      planHash: staged.state.planHash,
+      approval: null,
+      output: null,
+      verification: null,
+    },
+    'Fill-package import restored authority or changed the plan binding',
+  );
+  for (const [fieldName, proposedValue] of Object.entries(experiment.values)) {
+    assertEqual(
+      {
+        value: imported.state.draft[fieldName]?.value,
+        provenance: imported.state.draft[fieldName]?.provenance,
+        actor: imported.state.draft[fieldName]?.actor,
+      },
+      { value: proposedValue, provenance, actor: 'agent' },
+      `Fill-package import changed actionable content: ${fieldName}`,
+    );
+  }
+  const importedReviewFields = new Set(
+    getArtifactReviewFieldNames(imported.state),
+  );
+  assertEqual(
+    importedFieldNames.every((fieldName) =>
+      importedReviewFields.has(fieldName),
+    ),
+    true,
+    'Fill-package import skipped full field review',
+  );
+  const reexported = await exportFillPackageFromUi(
+    imported.state,
+    source,
+    request,
+  );
+  if (!reexported.ok) {
+    throw new TypeError(
+      `Imported fill-package re-export failed: ${reexported.errors.map(({ code }) => code).join(', ')}`,
+    );
+  }
+  assertEqual(
+    [
+      bytesEqual(reexported.result.bytes, exported.result.bytes),
+      reexported.result.outputHash,
+    ],
+    [true, exported.result.outputHash],
+    'Fill-package import/re-export round-trip changed the reviewed package',
+  );
+  assertEqual(
+    [sha256(source), bytesEqual(source, sourceSnapshot)],
+    [sourceHashBefore, true],
+    'Fill-package import or re-export changed the original PDF bytes',
+  );
+
   return {
     passed: true,
     artifactType: exported.result.manifest.artifactType,
@@ -1555,6 +1663,12 @@ async function measureFillPackage(
     deterministicWithFixedCreatedAt: true,
     sourceHashBound: true,
     planHashBound: true,
+    packageReimportVerified: true,
+    packageReexportRoundTripIdentical: true,
+    importedProposalTrust: 'untrusted_requires_full_human_review',
+    packageCreatorAuthenticityVerified: false,
+    packageDisplayMetadataUsed: false,
+    approvalRestoredOnImport: false,
     sourceBytesUnchanged: true,
     sourcePdfModified: false,
     protectionFactsPreserved: true,
@@ -1669,6 +1783,11 @@ for (const document of manifest.documents) {
     inspection.activeContent,
     expected.activeContent,
     `${document.id} active-content summary mismatch`,
+  );
+  assertEqual(
+    inspection.contentRisk,
+    expected.contentRisk,
+    `${document.id} content-risk summary mismatch`,
   );
   assertEqual(
     protectionFacts(inspection),
@@ -1967,10 +2086,10 @@ for (const document of manifest.documents) {
     },
     safety: {
       highRiskNativeActionCount: inspection.activeContent.highRiskActionCount,
-      mutationWouldBeBlockedForHighRiskAction:
-        inspection.activeContent.highRiskActionCount > 0,
+      pdfByteExportBlockedByContentRisk: inspection.contentRisk.blocksPdfExport,
       pdfJavaScriptExecuted: false,
       activeContent: inspection.activeContent,
+      contentRisk: inspection.contentRisk,
       warningCount: inspection.warnings.length,
       warningCounts: warningCounts(inspection),
       protection: inspection.protection,

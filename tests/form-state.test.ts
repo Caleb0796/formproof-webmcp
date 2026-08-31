@@ -21,17 +21,25 @@ import {
   exportApprovedDerivativePdfFromUi,
   exportApprovedPdfFromUi,
   exportFillPackageFromUi,
+  getArtifactReviewFieldNames,
   getEffectiveFieldValue,
   getExportGate,
   getFormContext,
   getReleaseGate,
   getVerificationGate,
+  importFillPackageFromUi,
+  MAX_FILL_PACKAGE_BYTES,
+  MAX_PLAN_PROVENANCE_ITEMS,
+  MAX_PLAN_PROVENANCE_UTF8_BYTES,
+  MAX_PROVENANCE_EVIDENCE_ITEMS,
+  MAX_PROVENANCE_TEXT_LENGTH,
   recordExportOutput,
   recordOutputVerification,
   stageFieldUpdates,
   validateDraft,
   type FieldProvenance,
   type FormFieldDefinition,
+  type FormFieldValue,
   type FormState,
   type SourceMetadata,
   // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
@@ -478,6 +486,9 @@ void test('creates a deterministic source-bound plan hash and validation report'
 
   assert.match(left.planHash, /^sha256:[0-9a-f]{64}$/);
   assert.equal(left.planHash, right.planHash);
+  assert.match(left.documentSessionId, /^[a-f0-9]{32}$/u);
+  assert.match(right.documentSessionId, /^[a-f0-9]{32}$/u);
+  assert.notEqual(left.documentSessionId, right.documentSessionId);
   assert.deepEqual(
     validateDraft(left).issues.map(({ code, fieldName }) => [code, fieldName]),
     [
@@ -1125,6 +1136,117 @@ void test('rejects duplicate, unknown, read-only, human-only, signature, type, a
   assert.equal(result.state, state);
 });
 
+void test('enforces per-field and cumulative provenance budgets atomically', async () => {
+  const oneField = await createFormState(SOURCE, [
+    {
+      name: 'evidence',
+      label: 'Evidence',
+      type: 'text',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      sourceValue: '',
+    },
+  ]);
+  const maximumEvidence = Array.from(
+    { length: MAX_PROVENANCE_EVIDENCE_ITEMS },
+    (_, index) => `${index}${'x'.repeat(MAX_PROVENANCE_TEXT_LENGTH - 1)}`,
+  );
+  const accepted = await stageFieldUpdates(oneField, {
+    expectedStateVersion: oneField.stateVersion,
+    expectedSourceHash: oneField.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'evidence',
+        value: 'accepted',
+        provenance: {
+          kind: 'source_document',
+          confidence: 1,
+          evidence: maximumEvidence,
+        },
+      },
+    ],
+  });
+  assert.equal(accepted.ok, true);
+
+  for (const [label, evidence] of [
+    ['six items', [...maximumEvidence, 'sixth']],
+    ['long item', ['x'.repeat(MAX_PROVENANCE_TEXT_LENGTH + 1)]],
+    ['duplicate item', ['same', 'same']],
+  ] as const) {
+    const rejected = await stageFieldUpdates(oneField, {
+      expectedStateVersion: oneField.stateVersion,
+      expectedSourceHash: oneField.source.sourceHash,
+      actor: 'agent',
+      updates: [
+        {
+          fieldName: 'evidence',
+          value: label,
+          provenance: {
+            kind: 'source_document',
+            confidence: 1,
+            evidence,
+          },
+        },
+      ],
+    });
+    assert.equal(rejected.ok, false, label);
+    if (rejected.ok) throw new Error(`${label} provenance was accepted`);
+    assert.equal(rejected.errors[0].code, 'invalid_provenance', label);
+    assert.equal(rejected.state, oneField, label);
+  }
+
+  const aggregateFieldCount = Math.ceil(
+    MAX_PLAN_PROVENANCE_UTF8_BYTES /
+      (MAX_PROVENANCE_EVIDENCE_ITEMS * MAX_PROVENANCE_TEXT_LENGTH),
+  );
+  assert.ok(
+    aggregateFieldCount * MAX_PROVENANCE_EVIDENCE_ITEMS <=
+      MAX_PLAN_PROVENANCE_ITEMS,
+  );
+  const aggregateFields = Array.from(
+    { length: aggregateFieldCount },
+    (_, index): FormFieldDefinition => ({
+      name: `field_${index}`,
+      label: `Field ${index}`,
+      type: 'text',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      sourceValue: '',
+    }),
+  );
+  const aggregateState = await createFormState(SOURCE, aggregateFields);
+  const aggregate = await stageFieldUpdates(aggregateState, {
+    expectedStateVersion: aggregateState.stateVersion,
+    expectedSourceHash: aggregateState.source.sourceHash,
+    actor: 'agent',
+    updates: aggregateFields.map((field, fieldIndex) => ({
+      fieldName: field.name,
+      value: 'candidate',
+      provenance: {
+        kind: 'source_document' as const,
+        confidence: 1,
+        evidence: Array.from(
+          { length: MAX_PROVENANCE_EVIDENCE_ITEMS },
+          (_, evidenceIndex) =>
+            `${fieldIndex}:${evidenceIndex}:`.padEnd(
+              MAX_PROVENANCE_TEXT_LENGTH,
+              'x',
+            ),
+        ),
+      },
+    })),
+  });
+  assert.equal(aggregate.ok, false);
+  if (aggregate.ok) throw new Error('aggregate provenance was accepted');
+  assert.equal(aggregate.errors[0].code, 'invalid_provenance');
+  assert.equal(aggregate.state, aggregateState);
+  assert.equal(aggregateState.stateVersion, 0);
+  assert.equal(Object.keys(aggregateState.draft).length, 0);
+});
+
 void test('rejects null for optional checkboxes at configuration and staging boundaries', async () => {
   const optionalCheckbox: FormFieldDefinition = {
     name: 'optional_checkbox',
@@ -1303,6 +1425,52 @@ void test('surfaces inference and low confidence exactly once in the review queu
   const report = validateDraft(result.state);
   assert.deepEqual(report.reviewFieldNames, ['attestation', 'full_name']);
   assert.equal(report.reviewCount, 3);
+  assert.equal(report.canApprove, true);
+});
+
+void test('requires human review for every agent claim regardless of claimed basis', async () => {
+  const state = await initialState();
+  const result = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'full_name',
+        value: 'Ada Lovelace',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+      {
+        fieldName: 'region',
+        value: 'NY',
+        provenance: {
+          kind: 'source_document',
+          confidence: 1,
+          evidence: ['Page 1, region field'],
+        },
+      },
+      {
+        fieldName: 'programs',
+        value: ['Health'],
+        provenance: {
+          kind: 'agent_inference',
+          confidence: 1,
+          rationale: 'Inferred from the supplied benefits description.',
+        },
+      },
+    ],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error('agent claim staging failed');
+
+  const report = validateDraft(result.state);
+  assert.deepEqual(
+    report.issues
+      .filter(({ code }) => code === 'agent_assertion_requires_review')
+      .map(({ fieldName }) => fieldName)
+      .sort(),
+    ['full_name', 'programs', 'region'],
+  );
   assert.equal(report.canApprove, true);
 });
 
@@ -1567,6 +1735,19 @@ void test('exports a deterministic source-bound fill package for protected hybri
   );
   assert.deepEqual(manifest.plan.humanSteps, [
     {
+      fieldName: 'formproof.applicant_name',
+      label: 'Applicant name',
+      type: 'text',
+      required: false,
+      multiSelect: false,
+      sourceValue: 'Original applicant',
+      choices: semanticDescriptor.choices,
+      widgets: semanticDescriptor.widgets,
+      page: semanticDescriptor.page,
+      rect: semanticDescriptor.rect,
+      reason: 'review_required',
+    },
+    {
       fieldName: 'opaque.f1_02',
       label: 'opaque.f1_02',
       type: 'text',
@@ -1638,6 +1819,363 @@ void test('exports a deterministic source-bound fill package for protected hybri
   assert.equal(state.output, null);
   assert.equal(state.verification, null);
   assert.deepEqual(source, sourceSnapshot, 'source PDF bytes were modified');
+});
+
+void test('refuses to export a fill package that a fresh state could not import', async () => {
+  const source = await createTextFormPdf('large_value');
+  const inspection = await inspectPdf(source);
+  const state = await createFormState(
+    {
+      fileName: 'large-value.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const staged = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'large_value',
+        value: 'x'.repeat(MAX_FILL_PACKAGE_BYTES),
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('large fill-package fixture did not stage');
+
+  const exported = await exportFillPackageFromUi(staged.state, source, {
+    confirmedFieldNames: ['large_value'],
+    createdAt: '2026-08-30T12:00:00.000Z',
+  });
+  assert.equal(exported.ok, false);
+  if (exported.ok) throw new Error('oversized fill package was exported');
+  assert.equal(exported.errors[0].code, 'package_too_large');
+  assert.equal(exported.state, staged.state);
+});
+
+void test('restores a source-bound fill package as untrusted proposals without restoring approval', async () => {
+  const { source, sourceSnapshot, inspection, state } =
+    await stagedProtectedForm();
+  const corrected = await correctDraftFieldFromUi(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    expectedPlanHash: state.planHash,
+    fieldName: 'formproof.applicant_name',
+    value: 'Grace Hopper',
+  });
+  assert.equal(corrected.ok, true);
+  if (!corrected.ok) throw new Error('fill-package correction failed');
+  const confirmedFieldNames = getArtifactReviewFieldNames(corrected.state);
+  const exported = await exportFillPackageFromUi(corrected.state, source, {
+    confirmedFieldNames,
+    createdAt: '2026-08-30T12:00:00.000Z',
+  });
+  assert.equal(exported.ok, true);
+  if (!exported.ok) throw new Error('restorable fill package failed');
+
+  const fresh = await createFormState(
+    {
+      fileName: 'renamed-protected-hybrid.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const imported = await importFillPackageFromUi(
+    fresh,
+    source,
+    exported.result.bytes,
+    inspection,
+  );
+  assert.equal(imported.ok, true);
+  if (!imported.ok) throw new Error('fill-package import failed');
+
+  assert.deepEqual(imported.receipt, {
+    packageHash: exported.result.outputHash,
+    sourceHash: fresh.source.sourceHash,
+    recordedPlanHash: corrected.state.planHash,
+    restoredPlanHash: corrected.state.planHash,
+    sourceHashVerified: true,
+    planHashVerified: true,
+    authenticityVerified: false,
+    packageDisplayMetadataUsed: false,
+    sourcePdfModified: false,
+    importedFieldNames: ['formproof.applicant_name', 'opaque.f1_02'],
+  });
+  assert.equal(imported.state.stateVersion, fresh.stateVersion + 1);
+  assert.equal(imported.state.planHash, corrected.state.planHash);
+  assert.equal(imported.state.documentSessionId, fresh.documentSessionId);
+  assert.notEqual(
+    imported.state.documentSessionId,
+    corrected.state.documentSessionId,
+  );
+  assert.equal(imported.state.approval, null);
+  assert.equal(imported.state.output, null);
+  assert.equal(imported.state.verification, null);
+  assert.deepEqual(imported.state.importedProposalFieldNames, [
+    'formproof.applicant_name',
+    'opaque.f1_02',
+  ]);
+  assert.equal(imported.state.draft['formproof.applicant_name'].actor, 'human');
+  assert.equal(
+    imported.state.draft['formproof.applicant_name'].provenance.kind,
+    'human_entry',
+  );
+  assert.equal(imported.state.draft['opaque.f1_02'].actor, 'agent');
+  assert.deepEqual(
+    getFormContext(imported.state)
+      .fields.filter(({ importedProposal }) => importedProposal)
+      .map(({ definition }) => definition.name),
+    ['formproof.applicant_name', 'opaque.f1_02'],
+  );
+  assert.deepEqual(
+    source,
+    sourceSnapshot,
+    'fill-package import changed PDF bytes',
+  );
+
+  const agentOverwrite = await stageFieldUpdates(imported.state, {
+    expectedStateVersion: imported.state.stateVersion,
+    expectedSourceHash: imported.state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'formproof.applicant_name',
+        value: 'Katherine Johnson',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(agentOverwrite.ok, true);
+  if (!agentOverwrite.ok) {
+    throw new Error('agent could not replace an untrusted imported proposal');
+  }
+  assert.equal(
+    agentOverwrite.state.draft['formproof.applicant_name'].actor,
+    'agent',
+  );
+  assert.deepEqual(agentOverwrite.state.importedProposalFieldNames, [
+    'opaque.f1_02',
+  ]);
+
+  const humanCorrection = await correctDraftFieldFromUi(imported.state, {
+    expectedStateVersion: imported.state.stateVersion,
+    expectedSourceHash: imported.state.source.sourceHash,
+    expectedPlanHash: imported.state.planHash,
+    fieldName: 'formproof.applicant_name',
+    value: 'Margaret Hamilton',
+  });
+  assert.equal(humanCorrection.ok, true);
+  if (!humanCorrection.ok) {
+    throw new Error(
+      'imported human-authored proposal could not be re-reviewed',
+    );
+  }
+  assert.equal(
+    humanCorrection.state.draft['formproof.applicant_name'].actor,
+    'human',
+  );
+  assert.deepEqual(humanCorrection.state.importedProposalFieldNames, [
+    'opaque.f1_02',
+  ]);
+});
+
+void test('ignores package display claims and rejects malformed or tampered actionable content', async () => {
+  const { source, inspection, state } = await stagedProtectedForm();
+  const confirmedFieldNames = getArtifactReviewFieldNames(state);
+  const exported = await exportFillPackageFromUi(state, source, {
+    confirmedFieldNames,
+    createdAt: '2026-08-30T12:10:00.000Z',
+  });
+  assert.equal(exported.ok, true);
+  if (!exported.ok) throw new Error('adversarial fill package failed');
+
+  const freshState = () =>
+    createFormState(
+      {
+        fileName: 'protected-hybrid.pdf',
+        sourceHash: inspection.sourceHash,
+        byteLength: source.byteLength,
+        pageCount: inspection.pageCount,
+      },
+      inspection.fields.map(createFormFieldDefinitionFromPdf),
+    );
+  const parsed = () =>
+    JSON.parse(new TextDecoder().decode(exported.result.bytes)) as {
+      schemaVersion: number;
+      source: { sourceHash: string };
+      protection: { protectionType: string };
+      plan: {
+        planHash: string;
+        stagedFields: Array<{
+          fieldName: string;
+          label: string;
+          page: number | null;
+          proposedValue: FormFieldValue;
+          provenance: {
+            kind: string;
+            confidence: number;
+            evidence?: string[];
+            rationale?: string;
+          };
+        }>;
+      };
+    };
+  const encode = (value: unknown) =>
+    new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+
+  const forgedDisplay = parsed();
+  forgedDisplay.protection.protectionType = 'none';
+  forgedDisplay.plan.stagedFields[0].label = 'Forged package label';
+  forgedDisplay.plan.stagedFields[0].page = 999;
+  const displayImport = await importFillPackageFromUi(
+    await freshState(),
+    source,
+    encode(forgedDisplay),
+    inspection,
+  );
+  assert.equal(displayImport.ok, true);
+  if (!displayImport.ok)
+    throw new Error('ignored display claims blocked import');
+  assert.equal(displayImport.receipt.packageDisplayMetadataUsed, false);
+  assert.equal(
+    displayImport.state.fields[forgedDisplay.plan.stagedFields[0].fieldName]
+      .label,
+    inspection.fields.find(
+      ({ name }) => name === forgedDisplay.plan.stagedFields[0].fieldName,
+    )?.tooltip,
+  );
+
+  const cases: Array<{
+    name: string;
+    mutate(value: ReturnType<typeof parsed>): void;
+    expectedCode: string;
+  }> = [
+    {
+      name: 'tampered value',
+      mutate(value) {
+        value.plan.stagedFields[0].proposedValue = 'Tampered value';
+      },
+      expectedCode: 'plan_mismatch',
+    },
+    {
+      name: 'source swap',
+      mutate(value) {
+        value.source.sourceHash = 'f'.repeat(64);
+      },
+      expectedCode: 'source_mismatch',
+    },
+    {
+      name: 'duplicate field',
+      mutate(value) {
+        value.plan.stagedFields[1] = structuredClone(
+          value.plan.stagedFields[0],
+        );
+      },
+      expectedCode: 'duplicate_update',
+    },
+    {
+      name: 'unknown field',
+      mutate(value) {
+        value.plan.stagedFields[0].fieldName = '__missing_field__';
+      },
+      expectedCode: 'unknown_field',
+    },
+    {
+      name: 'invalid provenance',
+      mutate(value) {
+        value.plan.stagedFields[0].provenance.confidence = 2;
+      },
+      expectedCode: 'invalid_provenance',
+    },
+    {
+      name: 'too many provenance evidence items',
+      mutate(value) {
+        value.plan.stagedFields[0].provenance.evidence = Array.from(
+          { length: MAX_PROVENANCE_EVIDENCE_ITEMS + 1 },
+          (_, index) => `evidence ${index}`,
+        );
+      },
+      expectedCode: 'invalid_provenance',
+    },
+    {
+      name: 'oversized provenance evidence item',
+      mutate(value) {
+        value.plan.stagedFields[0].provenance.evidence = [
+          'x'.repeat(MAX_PROVENANCE_TEXT_LENGTH + 1),
+        ];
+      },
+      expectedCode: 'invalid_provenance',
+    },
+    {
+      name: 'unsupported schema',
+      mutate(value) {
+        value.schemaVersion = 3;
+      },
+      expectedCode: 'unsupported_package_schema',
+    },
+  ];
+  for (const testCase of cases) {
+    const { name, expectedCode } = testCase;
+    const candidate = parsed();
+    testCase.mutate(candidate);
+    const cleanState = await freshState();
+    const result = await importFillPackageFromUi(
+      cleanState,
+      source,
+      encode(candidate),
+      inspection,
+    );
+    assert.equal(result.ok, false, name);
+    if (result.ok) throw new Error(`${name} unexpectedly imported`);
+    assert.equal(result.state, cleanState, name);
+    assert.equal(
+      result.errors.some(({ code }) => code === expectedCode),
+      true,
+      name,
+    );
+  }
+
+  const oversized = await importFillPackageFromUi(
+    await freshState(),
+    source,
+    new Uint8Array(MAX_FILL_PACKAGE_BYTES + 1),
+    inspection,
+  );
+  assert.equal(oversized.ok, false);
+  if (oversized.ok) throw new Error('oversized package imported');
+  assert.equal(oversized.errors[0].code, 'package_too_large');
+
+  for (const invalidBytes of [
+    new Uint8Array([0xff]),
+    new TextEncoder().encode('{not-json'),
+  ]) {
+    const invalid = await importFillPackageFromUi(
+      await freshState(),
+      source,
+      invalidBytes,
+      inspection,
+    );
+    assert.equal(invalid.ok, false);
+    if (invalid.ok) throw new Error('invalid JSON package imported');
+    assert.equal(invalid.errors[0].code, 'invalid_package');
+  }
+
+  const mergeAttempt = await importFillPackageFromUi(
+    state,
+    source,
+    exported.result.bytes,
+    inspection,
+  );
+  assert.equal(mergeAttempt.ok, false);
+  if (mergeAttempt.ok) throw new Error('package merged over a live draft');
+  assert.equal(mergeAttempt.errors[0].code, 'invalid_request');
 });
 
 void test('puts every unstaged required blocker into the actionable fill-package steps', async () => {
@@ -1906,6 +2444,7 @@ void test('rejects a forged Grace export and releases only the exact approved Ad
     legal_name: 'Grace Hopper',
   });
   const forgedRecord = {
+    documentSessionId: state.documentSessionId,
     sourceHash: state.source.sourceHash,
     planHash: state.planHash,
     stateVersion: state.stateVersion,

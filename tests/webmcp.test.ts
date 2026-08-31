@@ -31,6 +31,8 @@ const {
 )) as typeof import('../lib/webmcp');
 
 const {
+  MAX_PROVENANCE_EVIDENCE_ITEMS,
+  MAX_PROVENANCE_TEXT_LENGTH,
   correctDraftFieldFromUi,
   createFormState,
   resolvePdfFieldLabel,
@@ -40,6 +42,7 @@ const {
 )) as typeof import('../lib/form-state');
 
 const SOURCE_HASH = 'a'.repeat(64);
+const DOCUMENT_SESSION_ID = '1'.repeat(32);
 
 const EMPTY_ACTIVE_CONTENT = {
   javascriptActionCount: 0,
@@ -48,6 +51,26 @@ const EMPTY_ACTIVE_CONTENT = {
   externalActionCount: 0,
   highRiskActionCount: 0,
   otherActionCount: 0,
+} as const;
+
+const EMPTY_CONTENT_RISK = {
+  blocksPdfExport: false,
+  blocksInteractivePreview: false,
+  reasons: [],
+  actionTriggerCounts: {
+    open_action: 0,
+    additional_action: 0,
+    direct_action: 0,
+    javascript_name_tree: 0,
+  },
+  payloadSummary: {
+    embeddedFileCount: 0,
+    associatedFileCount: 0,
+    fileAttachmentAnnotationCount: 0,
+    richMediaAnnotationCount: 0,
+    multimediaAnnotationCount: 0,
+    malformedPayloadEntryCount: 0,
+  },
 } as const;
 
 const NO_PROTECTION = {
@@ -267,6 +290,7 @@ async function createContextFixture(
     fieldCount: fields.length,
     widgetCount: fields.length,
     activeContent: options.activeContent ?? EMPTY_ACTIVE_CONTENT,
+    contentRisk: EMPTY_CONTENT_RISK,
     protection: options.protection ?? NO_PROTECTION,
     fields,
     warnings: options.warnings ?? [],
@@ -283,6 +307,7 @@ function success(data: unknown = {}, stateVersion = 4): FormProofAdapterResult {
     ok: true,
     stateVersion,
     sourceHash: SOURCE_HASH,
+    documentSessionId: DOCUMENT_SESSION_ID,
     data,
   };
 }
@@ -310,7 +335,7 @@ function createAdapter(
 async function captureTools(
   adapter: FormProofWebMcpAdapter = createAdapter(),
   options: {
-    awaitVisibleCommit?: () => void | Promise<void>;
+    awaitVisibleCommit?: (signal: AbortSignal) => void | Promise<void>;
     failAt?: number;
     onRegistrationError?: (error: Error) => void;
   } = {},
@@ -419,6 +444,14 @@ void test('registers the exact safe tool catalog sequentially', async () => {
     byName(tools, 'get_form_context').description,
     /not semantic inference/u,
   );
+  assert.match(
+    byName(tools, 'get_form_context').description,
+    /imported-proposal markers/u,
+  );
+  assert.match(
+    byName(tools, 'get_field_evidence').description,
+    /imported-proposal markers/u,
+  );
   const contextSchema = byName(tools, 'get_form_context').inputSchema as {
     properties: {
       cursor: { description: string; maxLength: number };
@@ -473,6 +506,7 @@ void test('reports exact PDF protection without allowing agent strategy selectio
     ok: true,
     stateVersion: 9,
     sourceHash: SOURCE_HASH,
+    documentSessionId: DOCUMENT_SESSION_ID,
     nextAction: 'get_form_context',
     data: USAGE_RIGHTS_TOOL_DATA,
     outputTruncated: false,
@@ -613,6 +647,7 @@ void test('keeps context and evidence requests within semantic page limits', asy
   assert.equal(oversizedPage.error.code, 'INVALID_INPUT');
 
   const tooManyFields = await evidence.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     fieldNames: ['one', 'two', 'three', 'four'],
@@ -621,10 +656,16 @@ void test('keeps context and evidence requests within semantic page limits', asy
   assert.equal(tooManyFields.error.code, 'INVALID_INPUT');
 
   const ambiguousChoicePage = await evidence.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     fieldNames: ['one', 'two'],
-    choiceCursor: createFieldChoiceCursor(2, SOURCE_HASH, 'one'),
+    choiceCursor: createFieldChoiceCursor(
+      2,
+      DOCUMENT_SESSION_ID,
+      SOURCE_HASH,
+      'one',
+    ),
   });
   assert.equal(ambiguousChoicePage.ok, false);
   assert.equal(ambiguousChoicePage.error.code, 'INVALID_INPUT');
@@ -662,17 +703,25 @@ void test('rejects ambiguous or unusable context search inputs', async () => {
 });
 
 void test('binds context cursors to source, state version, and filtered scope', () => {
-  const binding = { sourceHash: SOURCE_HASH, stateVersion: 7 } as const;
+  const binding = {
+    documentSessionId: DOCUMENT_SESSION_ID,
+    sourceHash: SOURCE_HASH,
+    stateVersion: 7,
+  } as const;
   const cursor = createFormContextCursor(6, binding);
   const sameShortPrefixHash = `${SOURCE_HASH.slice(0, 16)}${'b'.repeat(48)}`;
 
-  assert.equal(cursor, `ctx:7:6:${SOURCE_HASH.slice(0, 32)}`);
+  assert.equal(
+    cursor,
+    `ctx:${DOCUMENT_SESSION_ID}:7:6:${SOURCE_HASH.slice(0, 32)}`,
+  );
   assert.deepEqual(parseFormContextCursor(cursor, binding), {
     ok: true,
     offset: 6,
   });
   assert.deepEqual(
     parseFormContextCursor(cursor, {
+      documentSessionId: DOCUMENT_SESSION_ID,
       sourceHash: 'b'.repeat(64),
       stateVersion: 8,
     }),
@@ -680,10 +729,18 @@ void test('binds context cursors to source, state version, and filtered scope', 
   );
   assert.deepEqual(
     parseFormContextCursor(cursor, {
+      documentSessionId: DOCUMENT_SESSION_ID,
       sourceHash: sameShortPrefixHash,
       stateVersion: binding.stateVersion,
     }),
     { ok: false, code: 'source_mismatch' },
+  );
+  assert.deepEqual(
+    parseFormContextCursor(cursor, {
+      ...binding,
+      documentSessionId: '2'.repeat(32),
+    }),
+    { ok: false, code: 'document_session_mismatch' },
   );
   assert.deepEqual(
     parseFormContextCursor(cursor, { ...binding, stateVersion: 8 }),
@@ -710,10 +767,14 @@ void test('binds context cursors to source, state version, and filtered scope', 
     agentWritableOnly: true,
   } as const;
   const filteredCursor = createFormContextCursor(2, binding, searchScope);
-  assert.match(filteredCursor, /^ctxq:7:2:[a-f0-9]{32}:[a-f0-9]{16}$/u);
+  assert.match(
+    filteredCursor,
+    /^ctxq:[a-f0-9]{32}:7:2:[a-f0-9]{32}:[a-f0-9]{16}$/u,
+  );
   const maximumLengthCursor = createFormContextCursor(
     Number.MAX_SAFE_INTEGER,
     {
+      documentSessionId: DOCUMENT_SESSION_ID,
       sourceHash: SOURCE_HASH,
       stateVersion: Number.MAX_SAFE_INTEGER,
     },
@@ -749,23 +810,47 @@ void test('binds context cursors to source, state version, and filtered scope', 
   assert.deepEqual(
     parseFormContextCursor(
       filteredCursor,
-      { sourceHash: 'b'.repeat(64), stateVersion: 8 },
+      {
+        documentSessionId: DOCUMENT_SESSION_ID,
+        sourceHash: 'b'.repeat(64),
+        stateVersion: 8,
+      },
       searchScope,
     ),
     { ok: false, code: 'source_mismatch' },
   );
 
-  const choiceCursor = createFieldChoiceCursor(3, SOURCE_HASH, 'housing');
+  const choiceCursor = createFieldChoiceCursor(
+    3,
+    DOCUMENT_SESSION_ID,
+    SOURCE_HASH,
+    'housing',
+  );
   assert.deepEqual(
-    parseFieldChoiceCursor(choiceCursor, SOURCE_HASH, 'housing'),
+    parseFieldChoiceCursor(
+      choiceCursor,
+      DOCUMENT_SESSION_ID,
+      SOURCE_HASH,
+      'housing',
+    ),
     { ok: true, offset: 3 },
   );
   assert.deepEqual(
-    parseFieldChoiceCursor(choiceCursor, 'b'.repeat(64), 'housing'),
+    parseFieldChoiceCursor(
+      choiceCursor,
+      DOCUMENT_SESSION_ID,
+      'b'.repeat(64),
+      'housing',
+    ),
     { ok: false, code: 'source_mismatch' },
   );
   assert.deepEqual(
-    parseFieldChoiceCursor(choiceCursor, SOURCE_HASH, 'support'),
+    parseFieldChoiceCursor(
+      choiceCursor,
+      DOCUMENT_SESSION_ID,
+      SOURCE_HASH,
+      'support',
+    ),
     { ok: false, code: 'invalid_input' },
   );
 });
@@ -820,6 +905,7 @@ void test('ranks batched lexical search deterministically and indexes bounded ra
       const parsed = parseFormContextCursor(
         nextCursor,
         {
+          documentSessionId: state.documentSessionId,
           sourceHash: state.source.sourceHash,
           stateVersion: state.stateVersion,
         },
@@ -1006,6 +1092,7 @@ void test('does not return long raw XFA text or exceed the evidence byte target'
     }),
   );
   const response = await byName(tools, 'get_field_evidence').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: state.stateVersion,
     expectedSourceHash: SOURCE_HASH,
     fieldNames,
@@ -1135,6 +1222,7 @@ void test('rejects an agent-writable continuation after a human correction chang
     parseFormContextCursor(
       v1Cursor,
       {
+        documentSessionId: staged.state.documentSessionId,
         sourceHash: staged.state.source.sourceHash,
         stateVersion: staged.state.stateVersion,
       },
@@ -1157,6 +1245,7 @@ void test('rejects an agent-writable continuation after a human correction chang
     parseFormContextCursor(
       v1Cursor,
       {
+        documentSessionId: corrected.state.documentSessionId,
         sourceHash: corrected.state.source.sourceHash,
         stateVersion: corrected.state.stateVersion,
       },
@@ -1184,6 +1273,7 @@ void test('rejects an agent-writable continuation after a human correction chang
   const parsedV2Cursor = parseFormContextCursor(
     v2Cursor,
     {
+      documentSessionId: corrected.state.documentSessionId,
       sourceHash: corrected.state.source.sourceHash,
       stateVersion: corrected.state.stateVersion,
     },
@@ -1295,6 +1385,72 @@ void test('reports human-pinned corrections in context and evidence while exclud
     ['agent_note'],
   );
   assert.equal(writable.pagination.total, 1);
+});
+
+void test('marks imported proposals as untrusted without treating imported human provenance as a current human lock', async () => {
+  const { state: initial, inspection } = await createContextFixture([
+    { name: 'imported_human', label: 'Imported human claim' },
+    { name: 'ordinary_agent', label: 'Ordinary agent proposal' },
+  ]);
+  const staged = await stageFieldUpdates(initial, {
+    expectedStateVersion: initial.stateVersion,
+    expectedSourceHash: initial.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'imported_human',
+        value: 'Original agent value',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+      {
+        fieldName: 'ordinary_agent',
+        value: 'Ordinary agent value',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('import marker fixture did not stage');
+  const corrected = await correctDraftFieldFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    fieldName: 'imported_human',
+    value: 'Claimed prior human value',
+  });
+  assert.equal(corrected.ok, true);
+  if (!corrected.ok) throw new Error('import marker fixture correction failed');
+  const importedState = {
+    ...corrected.state,
+    importedProposalFieldNames: ['imported_human'],
+  };
+
+  const context = createFormContextToolData(importedState, inspection, 0, 6);
+  const importedContext = context.fields.find(
+    (field) => 'name' in field && field.name === 'imported_human',
+  );
+  assert.equal(importedContext?.importedProposal, true);
+  assert.equal(Object.hasOwn(importedContext ?? {}, 'humanPinned'), false);
+  assert.equal(Object.hasOwn(context, 'humanCorrections'), false);
+
+  const evidence = createFieldEvidenceToolData(importedState, inspection, [
+    'imported_human',
+  ]);
+  assert.equal(evidence.fields[0].importedProposal, true);
+  assert.equal(Object.hasOwn(evidence.fields[0], 'humanPinned'), false);
+  assert.deepEqual(evidence.fields[0].provenance, {
+    kind: 'human_entry',
+    confidence: 1,
+  });
+  assert.equal(evidence.fields[0].untrustedPdfContent, true);
+
+  const writable = createFormContextToolData(importedState, inspection, 0, 6, {
+    agentWritableOnly: true,
+  });
+  assert.deepEqual(
+    writable.fields.map((field) => ('name' in field ? field.name : undefined)),
+    ['imported_human', 'ordinary_agent'],
+  );
 });
 
 void test('discloses field values only through exact evidence requests', async () => {
@@ -1561,6 +1717,7 @@ void test('emits compact safety and validation diagnostics only on the initial c
     returned: 1,
     total: 2,
     nextCursor: createFormContextCursor(1, {
+      documentSessionId: state.documentSessionId,
       sourceHash: state.source.sourceHash,
       stateVersion: state.stateVersion,
     }),
@@ -2231,7 +2388,10 @@ void test('keeps ambiguous discovery-only context and its continuation under bud
   };
   assert.equal(pagination.returned, 1);
   assert.equal(pagination.total, targetFieldNames.length);
-  assert.match(pagination.nextCursor ?? '', /^ctxq:9007199254740991:/u);
+  assert.match(
+    pagination.nextCursor ?? '',
+    /^ctxq:[a-f0-9]{32}:9007199254740991:/u,
+  );
   const fields = response.data.fields as Array<Record<string, unknown>>;
   assert.deepEqual(fields, [
     {
@@ -2281,6 +2441,7 @@ void test('paginates three maximum-size query representatives without starvation
           const parsed = parseFormContextCursor(
             input.cursor,
             {
+              documentSessionId: state.documentSessionId,
               sourceHash: state.source.sourceHash,
               stateVersion: state.stateVersion,
             },
@@ -2367,7 +2528,28 @@ void test('runtime parsing rejects extra properties and human authority claims',
   const stage = byName(tools, 'stage_form_values');
   const review = byName(tools, 'start_fill_review');
 
+  const missingSession = await stage.execute({
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+  assert.equal(missingSession.ok, false);
+  assert.equal(missingSession.error.code, 'INVALID_INPUT');
+  assert.deepEqual(missingSession.error.issues, [
+    {
+      code: 'INVALID_INPUT',
+      path: 'input.expectedDocumentSessionId',
+    },
+  ]);
+
   const actorClaim = await stage.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     actor: 'human',
@@ -2381,6 +2563,7 @@ void test('runtime parsing rejects extra properties and human authority claims',
   ]);
 
   const humanProvenance = await stage.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -2395,6 +2578,7 @@ void test('runtime parsing rejects extra properties and human authority claims',
   assert.equal(humanProvenance.error.code, 'INVALID_INPUT');
 
   const unlockClaim = await stage.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     unlock: true,
@@ -2413,6 +2597,7 @@ void test('runtime parsing rejects extra properties and human authority claims',
   ]);
 
   const nestedAuthorityClaim = await stage.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -2437,6 +2622,7 @@ void test('runtime parsing rejects extra properties and human authority claims',
   ]);
 
   const approvalClaim = await review.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     approve: true,
@@ -2447,6 +2633,70 @@ void test('runtime parsing rejects extra properties and human authority claims',
   assert.equal(reviewCalls, 0);
 });
 
+void test('enforces provenance evidence boundaries before adapter execution', async () => {
+  let stageCalls = 0;
+  const adapter = createAdapter({
+    stageFormValues: async () => {
+      stageCalls += 1;
+      return success();
+    },
+  });
+  const { tools } = await captureTools(adapter);
+  const stage = byName(tools, 'stage_form_values');
+  const base = {
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+  };
+  const maximumEvidence = Array.from(
+    { length: MAX_PROVENANCE_EVIDENCE_ITEMS },
+    (_, index) => `${index}${'e'.repeat(MAX_PROVENANCE_TEXT_LENGTH - 1)}`,
+  );
+
+  const accepted = await stage.execute({
+    ...base,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: {
+          kind: 'source_document',
+          confidence: 1,
+          evidence: maximumEvidence,
+          rationale: 'r'.repeat(MAX_PROVENANCE_TEXT_LENGTH),
+        },
+      },
+    ],
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(stageCalls, 1);
+
+  const rejectedCases = [
+    [...maximumEvidence, 'overflow'],
+    ['x'.repeat(MAX_PROVENANCE_TEXT_LENGTH + 1)],
+    ['same', 'same'],
+  ];
+  for (const evidence of rejectedCases) {
+    const rejected = await stage.execute({
+      ...base,
+      updates: [
+        {
+          fieldName: 'name',
+          value: 'Ari',
+          provenance: {
+            kind: 'source_document',
+            confidence: 1,
+            evidence,
+          },
+        },
+      ],
+    });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, 'INVALID_INPUT');
+  }
+  assert.equal(stageCalls, 1);
+});
+
 void test('stage_form_values validates, normalizes, and waits for visible state', async () => {
   const events: string[] = [];
   let received: unknown;
@@ -2454,7 +2704,10 @@ void test('stage_form_values validates, normalizes, and waits for visible state'
     stageFormValues: async (input) => {
       events.push('adapter');
       received = input;
-      return success({ stagedFieldNames: ['name'] }, 8);
+      return success(
+        { stagedFieldNames: ['name'], changedFields: ['name'] },
+        8,
+      );
     },
   });
   const { tools } = await captureTools(adapter, {
@@ -2465,6 +2718,7 @@ void test('stage_form_values validates, normalizes, and waits for visible state'
   const stage = byName(tools, 'stage_form_values');
 
   const response = await stage.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 7,
     expectedSourceHash: SOURCE_HASH.toUpperCase(),
     updates: [
@@ -2483,6 +2737,7 @@ void test('stage_form_values validates, normalizes, and waits for visible state'
 
   assert.deepEqual(events, ['adapter', 'visible-commit']);
   assert.deepEqual(received, {
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 7,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -2502,10 +2757,97 @@ void test('stage_form_values validates, normalizes, and waits for visible state'
     ok: true,
     stateVersion: 8,
     sourceHash: SOURCE_HASH,
+    documentSessionId: DOCUMENT_SESSION_ID,
     nextAction: 'validate_fill_plan',
-    data: { stagedFieldNames: ['name'] },
+    data: { stagedFieldNames: ['name'], changedFields: ['name'] },
     outputTruncated: false,
   });
+});
+
+void test('returns a bounded recovery response when visible commit is unconfirmed', async () => {
+  let stageCalls = 0;
+  const adapter = createAdapter({
+    stageFormValues: async () => {
+      stageCalls += 1;
+      return success({ changedFields: ['name'] }, 8);
+    },
+  });
+  const { tools } = await captureTools(adapter, {
+    awaitVisibleCommit: () => {
+      throw new Error('ui_commit_unconfirmed');
+    },
+  });
+
+  const response = await byName(tools, 'stage_form_values').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
+    expectedStateVersion: 7,
+    expectedSourceHash: SOURCE_HASH,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+
+  assert.equal(stageCalls, 1);
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'UI_COMMIT_UNCONFIRMED');
+  assert.equal(response.nextAction, 'refresh_form_context');
+  assert.equal(response.documentSessionId, DOCUMENT_SESSION_ID);
+  assert.equal(response.stateVersion, 8);
+  assert.equal(response.sourceHash, SOURCE_HASH);
+});
+
+void test('aborts a pending visible-commit wait without retrying the mutation', async () => {
+  let stageCalls = 0;
+  let markWaiting!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    markWaiting = resolve;
+  });
+  const adapter = createAdapter({
+    stageFormValues: async () => {
+      stageCalls += 1;
+      return success({ changedFields: ['name'] }, 8);
+    },
+  });
+  const { tools } = await captureTools(adapter, {
+    awaitVisibleCommit: (signal) =>
+      new Promise((_resolve, reject) => {
+        markWaiting();
+        signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        );
+      }),
+  });
+  const invocation = new AbortController();
+  const call = byName(tools, 'stage_form_values').execute(
+    {
+      expectedDocumentSessionId: DOCUMENT_SESSION_ID,
+      expectedStateVersion: 7,
+      expectedSourceHash: SOURCE_HASH,
+      updates: [
+        {
+          fieldName: 'name',
+          value: 'Ari',
+          provenance: { kind: 'user_instruction', confidence: 1 },
+        },
+      ],
+    },
+    { signal: invocation.signal },
+  );
+  await waiting;
+  invocation.abort();
+  const response = await call;
+
+  assert.equal(stageCalls, 1);
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'OPERATION_ABORTED');
+  assert.equal(response.nextAction, 'refresh_form_context');
+  assert.equal(response.documentSessionId, DOCUMENT_SESSION_ID);
 });
 
 void test('normalizes state-engine errors with a versioned recovery action', async () => {
@@ -2529,6 +2871,7 @@ void test('normalizes state-engine errors with a versioned recovery action', asy
   });
   const stage = byName(tools, 'stage_form_values');
   const response = await stage.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 11,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -2540,11 +2883,12 @@ void test('normalizes state-engine errors with a versioned recovery action', asy
     ],
   });
 
-  assert.equal(visibleCommits, 1);
+  assert.equal(visibleCommits, 0);
   assert.deepEqual(response, {
     ok: false,
     stateVersion: 12,
     sourceHash: SOURCE_HASH,
+    documentSessionId: null,
     nextAction: 'refresh_form_context',
     error: {
       code: 'STATE_VERSION_CONFLICT',
@@ -2571,6 +2915,7 @@ void test('maps state and PDF errors without exposing adapter details', async ()
   const { tools } = await captureTools(adapter);
   const stage = byName(tools, 'stage_form_values');
   const input = {
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -2651,6 +2996,7 @@ void test('returns bounded public issues without leaking adapter details', async
   });
   const { tools } = await captureTools(adapter);
   const response = await byName(tools, 'stage_form_values').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -2686,6 +3032,7 @@ void test('normalizes unknown field lists into repairable issues', async () => {
   });
   const { tools } = await captureTools(adapter);
   const response = await byName(tools, 'get_field_evidence').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     fieldNames: ['missing_one', 'missing_two'],
@@ -2791,6 +3138,7 @@ void test('validate derives review readiness from available artifacts without cl
     )
   ).tools;
   const input = {
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
   };
@@ -2847,7 +3195,7 @@ void test('validate derives review readiness from available artifacts without cl
   assert.equal(blocked.data.readyForReview, true);
   assert.equal(noArtifact.data.readyForReview, false);
   assert.equal(actionBlocked.data.readyForReview, true);
-  assert.equal(actionBlocked.data.exportBlockedByPdfActions, 2);
+  assert.equal('exportBlockedByPdfActions' in actionBlocked.data, false);
   assert.equal('valid' in ready.data, false);
   assert.deepEqual(ready.data, {
     readyForReview: true,
@@ -2877,6 +3225,7 @@ void test('start_fill_review stops at a human-required next action', async () =>
   });
   const { tools } = await captureTools(adapter);
   const response = await byName(tools, 'start_fill_review').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
   });
@@ -2890,6 +3239,48 @@ void test('start_fill_review stops at a human-required next action', async () =>
     ),
     false,
   );
+});
+
+void test('preserves an already-open review without waiting for another UI reset', async () => {
+  let reviewCalls = 0;
+  let visibleCommits = 0;
+  const adapter = createAdapter({
+    startFillReview: async () => {
+      reviewCalls += 1;
+      return success({
+        reviewOpened: true,
+        reviewStatePreserved: reviewCalls > 1,
+      });
+    },
+  });
+  const { tools } = await captureTools(adapter, {
+    awaitVisibleCommit: () => {
+      visibleCommits += 1;
+    },
+  });
+  const review = byName(tools, 'start_fill_review');
+  const input = {
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+  };
+
+  const first = await review.execute(input);
+  const replay = await review.execute(input);
+
+  assert.equal(first.ok, true);
+  assert.equal(replay.ok, true);
+  assert.equal(reviewCalls, 2);
+  assert.equal(visibleCommits, 1);
+  if (
+    !replay.ok ||
+    replay.data === null ||
+    typeof replay.data !== 'object' ||
+    Array.isArray(replay.data)
+  ) {
+    throw new Error('review replay should return structured success data');
+  }
+  assert.equal(replay.data.reviewStatePreserved, true);
 });
 
 void test('bounds PDF-derived tool output', async () => {
@@ -2966,6 +3357,7 @@ void test('keeps oversized failures bounded and repairable', async () => {
   });
   const { tools } = await captureTools(adapter);
   const response = await byName(tools, 'stage_form_values').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -3005,6 +3397,7 @@ void test('reports adapter issues omitted before byte bounding', async () => {
   });
   const { tools } = await captureTools(adapter);
   const response = await byName(tools, 'stage_form_values').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: 4,
     expectedSourceHash: SOURCE_HASH,
     updates: [
@@ -3224,6 +3617,45 @@ void test('a partial registration failure rolls back the whole catalog', async (
     true,
   );
   assert.equal(reportedError?.message, 'synthetic registration failure');
+});
+
+void test('caller cancellation settles a permanently hung partial registration', async () => {
+  const caller = new AbortController();
+  const signals: AbortSignal[] = [];
+  let registrationCount = 0;
+  let markSecondStarted!: () => void;
+  const secondStarted = new Promise<void>((resolve) => {
+    markSecondStarted = resolve;
+  });
+  const modelContext: WebMcpModelContext = {
+    registerTool(_tool, options) {
+      registrationCount += 1;
+      assert.ok(options?.signal);
+      signals.push(options.signal);
+      if (registrationCount === 2) {
+        markSecondStarted();
+        return new Promise<void>(() => undefined);
+      }
+    },
+  };
+
+  const pending = registerFormProofWebMcpTools(createAdapter(), {
+    modelContext,
+    signal: caller.signal,
+  });
+  await secondStarted;
+  caller.abort();
+  const registration = await pending;
+
+  assert.equal(registrationCount, 2);
+  assert.equal(registration.supported, true);
+  assert.deepEqual(registration.registeredTools, []);
+  assert.equal(registration.error?.code, 'REGISTRATION_FAILED');
+  assert.equal(registration.signal.aborted, true);
+  assert.equal(
+    signals.every((signal) => signal.aborted),
+    true,
+  );
 });
 
 void test('feature detection is a safe no-op without document.modelContext', async () => {

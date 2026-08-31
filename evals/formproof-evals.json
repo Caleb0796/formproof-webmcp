@@ -54,6 +54,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "protectionType": "none",
@@ -135,14 +136,14 @@
       {
         "role": "user",
         "type": "message",
-        "content": "Continue reading the form from cursor ctx:0:3:a051e79abfc64995de8b64e2e6549711 and return the next three fields."
+        "content": "Continue reading the form from cursor ctx:be0fe9800d687a851cd0167433179f03:0:3:a051e79abfc64995de8b64e2e6549711 and return the next three fields."
       }
     ],
     "expectedCall": [
       {
         "functionName": "get_form_context",
         "arguments": {
-          "cursor": "ctx:0:3:a051e79abfc64995de8b64e2e6549711",
+          "cursor": "ctx:be0fe9800d687a851cd0167433179f03:0:3:a051e79abfc64995de8b64e2e6549711",
           "limit": 3
         }
       }
@@ -163,7 +164,8 @@
         "arguments": {
           "expectedStateVersion": 4,
           "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "fieldNames": ["frm.q7f1"]
+          "fieldNames": ["frm.q7f1"],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -183,7 +185,8 @@
         "arguments": {
           "expectedStateVersion": 4,
           "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "fieldNames": ["frm.p0x4", "frm.m2k9"]
+          "fieldNames": ["frm.p0x4", "frm.m2k9"],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -198,7 +201,8 @@
         "arguments": {
           "expectedStateVersion": 4,
           "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "fieldNames": ["frm.r4d6"]
+          "fieldNames": ["frm.r4d6"],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       },
       {
@@ -209,6 +213,7 @@
           "ok": true,
           "stateVersion": 4,
           "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "documentSessionId": "ef27dc694d05732e26a648118ff25049",
           "nextAction": "get_field_evidence",
           "data": {
             "untrustedPdfContent": true,
@@ -246,7 +251,7 @@
                     "offset": 0,
                     "returned": 3,
                     "total": 5,
-                    "nextCursor": "choice:3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:08558e6e73231b7a"
+                    "nextCursor": "choice:ef27dc694d05732e26a648118ff25049:3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:08558e6e73231b7a"
                   }
                 },
                 "untrustedPdfContent": true
@@ -269,7 +274,8 @@
           "expectedStateVersion": 4,
           "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "fieldNames": ["frm.r4d6"],
-          "choiceCursor": "choice:3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:08558e6e73231b7a"
+          "choiceCursor": "choice:ef27dc694d05732e26a648118ff25049:3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:08558e6e73231b7a",
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -301,7 +307,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -333,7 +340,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -365,7 +373,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -395,7 +404,8 @@
                 "evidence": ["The user requested rent and utility support."]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -426,7 +436,8 @@
                 "rationale": "Summarizes the user's request for explicit human review."
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -445,7 +456,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 5,
-          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -464,7 +476,8 @@
         "functionName": "start_fill_review",
         "arguments": {
           "expectedStateVersion": 5,
-          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -506,7 +519,8 @@
         "arguments": {
           "expectedStateVersion": 4,
           "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "fieldNames": ["frm.t3w8"]
+          "fieldNames": ["frm.t3w8"],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -525,7 +539,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 5,
-          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -544,7 +559,8 @@
         "functionName": "start_fill_review",
         "arguments": {
           "expectedStateVersion": 5,
-          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "expectedSourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -566,13 +582,15 @@
       {
         "role": "user",
         "type": "message",
-        "content": "The previous form response ended at ctx:0:6:a051e79abfc64995de8b64e2e6549711. Continue from there without repeating earlier fields."
+        "content": "The previous form response ended at ctx:be0fe9800d687a851cd0167433179f03:0:6:a051e79abfc64995de8b64e2e6549711. Continue from there without repeating earlier fields."
       }
     ],
     "expectedCall": [
       {
         "functionName": "get_form_context",
-        "arguments": { "cursor": "ctx:0:6:a051e79abfc64995de8b64e2e6549711" }
+        "arguments": {
+          "cursor": "ctx:be0fe9800d687a851cd0167433179f03:0:6:a051e79abfc64995de8b64e2e6549711"
+        }
       }
     ]
   },
@@ -639,6 +657,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_field_evidence",
           "data": {
             "document": {
@@ -696,7 +715,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.q7f1"]
+          "fieldNames": ["frm.q7f1"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -708,6 +728,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -751,7 +772,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -763,6 +785,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.q7f1"],
@@ -773,31 +796,32 @@
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.c8v3",
-                  "message": "Permission to contact about this request is required."
+                  "fieldName": "frm.c8v3"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.p0x4",
-                  "message": "Email address is required."
+                  "fieldName": "frm.p0x4"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.q7f1"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.r4d6",
-                  "message": "Current housing arrangement is required."
+                  "fieldName": "frm.r4d6"
                 },
                 {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 3,
-              "reviewCount": 1,
-              "reviewFieldNames": ["frm.z5a7"],
+              "reviewCount": 2,
+              "reviewFieldNames": ["frm.q7f1", "frm.z5a7"],
               "structurallyValid": false,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -813,7 +837,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -826,6 +851,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -834,8 +860,8 @@
             "stagedFieldCount": 1,
             "stateVersion": 1,
             "blockerCount": 3,
-            "reviewCount": 1,
-            "reviewFieldNames": ["frm.z5a7"],
+            "reviewCount": 2,
+            "reviewFieldNames": ["frm.q7f1", "frm.z5a7"],
             "structurallyValid": false,
             "completionStatus": "incomplete",
             "ruleCoverage": "pdf_required_flags_only",
@@ -845,26 +871,27 @@
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.c8v3",
-                "message": "Permission to contact about this request is required."
+                "fieldName": "frm.c8v3"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.p0x4",
-                "message": "Email address is required."
+                "fieldName": "frm.p0x4"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.q7f1"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.r4d6",
-                "message": "Current housing arrangement is required."
+                "fieldName": "frm.r4d6"
               },
               {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -896,6 +923,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "document": {
@@ -940,7 +968,7 @@
             "pagination": {
               "returned": 2,
               "total": 11,
-              "nextCursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -973,7 +1001,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.q7f1", "frm.p0x4", "frm.c8v3"]
+          "fieldNames": ["frm.q7f1", "frm.p0x4", "frm.c8v3"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -985,6 +1014,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -1050,7 +1080,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.r4d6"]
+          "fieldNames": ["frm.r4d6"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1062,6 +1093,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -1139,7 +1171,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1151,6 +1184,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.c8v3", "frm.p0x4", "frm.q7f1", "frm.r4d6"],
@@ -1159,15 +1193,40 @@
               "stateVersion": 1,
               "issues": [
                 {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.c8v3"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.p0x4"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.q7f1"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.r4d6"
+                },
+                {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 0,
-              "reviewCount": 1,
-              "reviewFieldNames": ["frm.z5a7"],
+              "reviewCount": 5,
+              "reviewFieldNames": [
+                "frm.c8v3",
+                "frm.p0x4",
+                "frm.q7f1",
+                "frm.r4d6",
+                "frm.z5a7"
+              ],
               "structurallyValid": true,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -1183,7 +1242,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1196,6 +1256,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -1204,8 +1265,14 @@
             "stagedFieldCount": 4,
             "stateVersion": 1,
             "blockerCount": 0,
-            "reviewCount": 1,
-            "reviewFieldNames": ["frm.z5a7"],
+            "reviewCount": 5,
+            "reviewFieldNames": [
+              "frm.c8v3",
+              "frm.p0x4",
+              "frm.q7f1",
+              "frm.r4d6",
+              "frm.z5a7"
+            ],
             "structurallyValid": true,
             "completionStatus": "incomplete",
             "ruleCoverage": "pdf_required_flags_only",
@@ -1213,10 +1280,29 @@
             "canApprove": true,
             "issues": [
               {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.c8v3"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.p0x4"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.q7f1"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.r4d6"
+              },
+              {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -1227,7 +1313,8 @@
         "functionName": "start_fill_review",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1240,6 +1327,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "human_review_required",
           "data": {
             "reviewOpened": true,
@@ -1276,6 +1364,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "document": {
@@ -1320,7 +1409,7 @@
             "pagination": {
               "returned": 2,
               "total": 11,
-              "nextCursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -1353,7 +1442,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.p0x4", "frm.c8v3"]
+          "fieldNames": ["frm.p0x4", "frm.c8v3"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1365,6 +1455,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -1434,7 +1525,8 @@
                 "evidence": ["The user explicitly consented to contact."]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1446,6 +1538,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.c8v3", "frm.p0x4"],
@@ -1454,27 +1547,34 @@
               "stateVersion": 1,
               "issues": [
                 {
-                  "code": "required_missing",
-                  "severity": "error",
-                  "fieldName": "frm.q7f1",
-                  "message": "Legal name is required."
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.c8v3"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.p0x4"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.r4d6",
-                  "message": "Current housing arrangement is required."
+                  "fieldName": "frm.q7f1"
+                },
+                {
+                  "code": "required_missing",
+                  "severity": "error",
+                  "fieldName": "frm.r4d6"
                 },
                 {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 2,
-              "reviewCount": 1,
-              "reviewFieldNames": ["frm.z5a7"],
+              "reviewCount": 3,
+              "reviewFieldNames": ["frm.c8v3", "frm.p0x4", "frm.z5a7"],
               "structurallyValid": false,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -1490,7 +1590,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1503,6 +1604,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -1511,8 +1613,8 @@
             "stagedFieldCount": 2,
             "stateVersion": 1,
             "blockerCount": 2,
-            "reviewCount": 1,
-            "reviewFieldNames": ["frm.z5a7"],
+            "reviewCount": 3,
+            "reviewFieldNames": ["frm.c8v3", "frm.p0x4", "frm.z5a7"],
             "structurallyValid": false,
             "completionStatus": "incomplete",
             "ruleCoverage": "pdf_required_flags_only",
@@ -1520,22 +1622,29 @@
             "canApprove": false,
             "issues": [
               {
-                "code": "required_missing",
-                "severity": "error",
-                "fieldName": "frm.q7f1",
-                "message": "Legal name is required."
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.c8v3"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.p0x4"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.r4d6",
-                "message": "Current housing arrangement is required."
+                "fieldName": "frm.q7f1"
+              },
+              {
+                "code": "required_missing",
+                "severity": "error",
+                "fieldName": "frm.r4d6"
               },
               {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -1567,6 +1676,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "document": {
@@ -1611,7 +1721,7 @@
             "pagination": {
               "returned": 2,
               "total": 11,
-              "nextCursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -1641,7 +1751,9 @@
       },
       {
         "functionName": "get_form_context",
-        "arguments": { "cursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711" },
+        "arguments": {
+          "cursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
+        },
         "result": {
           "ok": true,
           "stateVersion": 0,
@@ -1652,12 +1764,13 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "pagination": {
               "returned": 6,
               "total": 11,
-              "nextCursor": "ctx:0:8:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:8:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -1730,7 +1843,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.r4d6", "frm.l9n5"]
+          "fieldNames": ["frm.r4d6", "frm.l9n5"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1742,6 +1856,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -1821,7 +1936,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1833,6 +1949,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.l9n5", "frm.r4d6"],
@@ -1843,31 +1960,37 @@
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.c8v3",
-                  "message": "Permission to contact about this request is required."
+                  "fieldName": "frm.c8v3"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.l9n5"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.p0x4",
-                  "message": "Email address is required."
+                  "fieldName": "frm.p0x4"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.q7f1",
-                  "message": "Legal name is required."
+                  "fieldName": "frm.q7f1"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.r4d6"
                 },
                 {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 3,
-              "reviewCount": 1,
-              "reviewFieldNames": ["frm.z5a7"],
+              "reviewCount": 3,
+              "reviewFieldNames": ["frm.l9n5", "frm.r4d6", "frm.z5a7"],
               "structurallyValid": false,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -1883,7 +2006,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -1896,6 +2020,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -1904,8 +2029,8 @@
             "stagedFieldCount": 2,
             "stateVersion": 1,
             "blockerCount": 3,
-            "reviewCount": 1,
-            "reviewFieldNames": ["frm.z5a7"],
+            "reviewCount": 3,
+            "reviewFieldNames": ["frm.l9n5", "frm.r4d6", "frm.z5a7"],
             "structurallyValid": false,
             "completionStatus": "incomplete",
             "ruleCoverage": "pdf_required_flags_only",
@@ -1915,26 +2040,32 @@
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.c8v3",
-                "message": "Permission to contact about this request is required."
+                "fieldName": "frm.c8v3"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.l9n5"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.p0x4",
-                "message": "Email address is required."
+                "fieldName": "frm.p0x4"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.q7f1",
-                "message": "Legal name is required."
+                "fieldName": "frm.q7f1"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.r4d6"
               },
               {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -1966,6 +2097,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "document": {
@@ -2010,7 +2142,7 @@
             "pagination": {
               "returned": 2,
               "total": 11,
-              "nextCursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -2040,7 +2172,9 @@
       },
       {
         "functionName": "get_form_context",
-        "arguments": { "cursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711" },
+        "arguments": {
+          "cursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
+        },
         "result": {
           "ok": true,
           "stateVersion": 0,
@@ -2051,12 +2185,13 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "pagination": {
               "returned": 6,
               "total": 11,
-              "nextCursor": "ctx:0:8:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:8:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -2129,7 +2264,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.t3w8"]
+          "fieldNames": ["frm.t3w8"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2141,6 +2277,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -2185,7 +2322,8 @@
                 "rationale": "Summarizes the user's explanation for reviewer context."
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2197,6 +2335,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.t3w8"],
@@ -2207,44 +2346,37 @@
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.c8v3",
-                  "message": "Permission to contact about this request is required."
+                  "fieldName": "frm.c8v3"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.p0x4",
-                  "message": "Email address is required."
+                  "fieldName": "frm.p0x4"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.q7f1",
-                  "message": "Legal name is required."
+                  "fieldName": "frm.q7f1"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.r4d6",
-                  "message": "Current housing arrangement is required."
+                  "fieldName": "frm.r4d6"
                 },
                 {
-                  "code": "inference_requires_review",
+                  "code": "agent_assertion_requires_review",
                   "severity": "review",
-                  "fieldName": "frm.t3w8",
-                  "message": "Context for reviewer contains an agent inference."
+                  "fieldName": "frm.t3w8"
                 },
                 {
                   "code": "low_confidence_requires_review",
                   "severity": "review",
-                  "fieldName": "frm.t3w8",
-                  "message": "Context for reviewer has confidence below 0.8."
+                  "fieldName": "frm.t3w8"
                 },
                 {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 4,
@@ -2265,7 +2397,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2278,6 +2411,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -2297,44 +2431,37 @@
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.c8v3",
-                "message": "Permission to contact about this request is required."
+                "fieldName": "frm.c8v3"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.p0x4",
-                "message": "Email address is required."
+                "fieldName": "frm.p0x4"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.q7f1",
-                "message": "Legal name is required."
+                "fieldName": "frm.q7f1"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.r4d6",
-                "message": "Current housing arrangement is required."
+                "fieldName": "frm.r4d6"
               },
               {
-                "code": "inference_requires_review",
+                "code": "agent_assertion_requires_review",
                 "severity": "review",
-                "fieldName": "frm.t3w8",
-                "message": "Context for reviewer contains an agent inference."
+                "fieldName": "frm.t3w8"
               },
               {
                 "code": "low_confidence_requires_review",
                 "severity": "review",
-                "fieldName": "frm.t3w8",
-                "message": "Context for reviewer has confidence below 0.8."
+                "fieldName": "frm.t3w8"
               },
               {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -2370,7 +2497,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         }
       },
       {
@@ -2404,6 +2532,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "document": {
@@ -2448,7 +2577,7 @@
             "pagination": {
               "returned": 2,
               "total": 11,
-              "nextCursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -2481,7 +2610,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
-          "fieldNames": ["frm.q7f1"]
+          "fieldNames": ["frm.q7f1"],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2493,6 +2623,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -2536,7 +2667,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2548,6 +2680,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.q7f1"],
@@ -2558,31 +2691,32 @@
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.c8v3",
-                  "message": "Permission to contact about this request is required."
+                  "fieldName": "frm.c8v3"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.p0x4",
-                  "message": "Email address is required."
+                  "fieldName": "frm.p0x4"
+                },
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "frm.q7f1"
                 },
                 {
                   "code": "required_missing",
                   "severity": "error",
-                  "fieldName": "frm.r4d6",
-                  "message": "Current housing arrangement is required."
+                  "fieldName": "frm.r4d6"
                 },
                 {
                   "code": "human_completion_required",
                   "severity": "review",
-                  "fieldName": "frm.z5a7",
-                  "message": "Applicant signature must be completed by a human after export."
+                  "fieldName": "frm.z5a7"
                 }
               ],
               "blockerCount": 3,
-              "reviewCount": 1,
-              "reviewFieldNames": ["frm.z5a7"],
+              "reviewCount": 2,
+              "reviewFieldNames": ["frm.q7f1", "frm.z5a7"],
               "structurallyValid": false,
               "completionStatus": "incomplete",
               "ruleCoverage": "pdf_required_flags_only",
@@ -2598,7 +2732,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 1,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2611,6 +2746,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "start_fill_review",
           "data": {
             "readyForReview": true,
@@ -2619,8 +2755,8 @@
             "stagedFieldCount": 1,
             "stateVersion": 1,
             "blockerCount": 3,
-            "reviewCount": 1,
-            "reviewFieldNames": ["frm.z5a7"],
+            "reviewCount": 2,
+            "reviewFieldNames": ["frm.q7f1", "frm.z5a7"],
             "structurallyValid": false,
             "completionStatus": "incomplete",
             "ruleCoverage": "pdf_required_flags_only",
@@ -2630,26 +2766,27 @@
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.c8v3",
-                "message": "Permission to contact about this request is required."
+                "fieldName": "frm.c8v3"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.p0x4",
-                "message": "Email address is required."
+                "fieldName": "frm.p0x4"
+              },
+              {
+                "code": "agent_assertion_requires_review",
+                "severity": "review",
+                "fieldName": "frm.q7f1"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.r4d6",
-                "message": "Current housing arrangement is required."
+                "fieldName": "frm.r4d6"
               },
               {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -2681,6 +2818,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_form_context",
           "data": {
             "document": {
@@ -2725,7 +2863,7 @@
             "pagination": {
               "returned": 2,
               "total": 11,
-              "nextCursor": "ctx:0:2:a051e79abfc64995de8b64e2e6549711"
+              "nextCursor": "ctx:be0fe9800d687a851cd0167433179f03:0:2:a051e79abfc64995de8b64e2e6549711"
             },
             "valuesAvailableVia": "get_field_evidence",
             "untrustedPdfContent": true,
@@ -2757,7 +2895,8 @@
         "functionName": "validate_fill_plan",
         "arguments": {
           "expectedStateVersion": 0,
-          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474"
+          "expectedSourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "expectedDocumentSessionId": "be0fe9800d687a851cd0167433179f03"
         },
         "result": {
           "ok": true,
@@ -2770,6 +2909,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "resolve_validation_issues",
           "data": {
             "readyForReview": false,
@@ -2789,32 +2929,27 @@
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.c8v3",
-                "message": "Permission to contact about this request is required."
+                "fieldName": "frm.c8v3"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.p0x4",
-                "message": "Email address is required."
+                "fieldName": "frm.p0x4"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.q7f1",
-                "message": "Legal name is required."
+                "fieldName": "frm.q7f1"
               },
               {
                 "code": "required_missing",
                 "severity": "error",
-                "fieldName": "frm.r4d6",
-                "message": "Current housing arrangement is required."
+                "fieldName": "frm.r4d6"
               },
               {
                 "code": "human_completion_required",
                 "severity": "review",
-                "fieldName": "frm.z5a7",
-                "message": "Applicant signature must be completed by a human after export."
+                "fieldName": "frm.z5a7"
               }
             ]
           },
@@ -2833,7 +2968,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-          "fieldNames": ["F[0].P5[0].EnrolledInMedicareHospitalInsurance[0]"]
+          "fieldNames": ["F[0].P5[0].EnrolledInMedicareHospitalInsurance[0]"],
+          "expectedDocumentSessionId": "d06ce164d697874979f8bb72c5d0c728"
         }
       },
       {
@@ -2844,6 +2980,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "documentSessionId": "d06ce164d697874979f8bb72c5d0c728",
           "nextAction": "stage_form_values",
           "data": {
             "untrustedPdfContent": true,
@@ -2904,7 +3041,8 @@
                 ]
               }
             }
-          ]
+          ],
+          "expectedDocumentSessionId": "d06ce164d697874979f8bb72c5d0c728"
         },
         "result": {
           "ok": true,
@@ -2916,6 +3054,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "documentSessionId": "d06ce164d697874979f8bb72c5d0c728",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": [
@@ -2924,10 +3063,18 @@
             "planHash": "sha256:2e2e8c751a56f77b8f7b86eaac79ad30e13066403762a87feb4759687c4371c6",
             "validation": {
               "stateVersion": 1,
-              "issues": [],
+              "issues": [
+                {
+                  "code": "agent_assertion_requires_review",
+                  "severity": "review",
+                  "fieldName": "F[0].P5[0].EnrolledInMedicareHospitalInsurance[0]"
+                }
+              ],
               "blockerCount": 0,
-              "reviewCount": 0,
-              "reviewFieldNames": [],
+              "reviewCount": 1,
+              "reviewFieldNames": [
+                "F[0].P5[0].EnrolledInMedicareHospitalInsurance[0]"
+              ],
               "structurallyValid": true,
               "completionStatus": "unknown",
               "ruleCoverage": "pdf_required_flags_only",
@@ -3048,7 +3195,8 @@
             "Applicant SSN 1",
             "Applicant SSN 3",
             "Applicant SSN 2"
-          ]
+          ],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ]
@@ -3243,7 +3391,7 @@
         "name": "get_form_context",
         "arguments": {
           "queries": ["contact"],
-          "cursor": "ctxq:0:1:a051e79abfc64995de8b64e2e6549711:64722013fe9ee4ab"
+          "cursor": "ctxq:be0fe9800d687a851cd0167433179f03:0:1:a051e79abfc64995de8b64e2e6549711:64722013fe9ee4ab"
         }
       },
       {
@@ -3337,7 +3485,9 @@
         "role": "model",
         "type": "functioncall",
         "name": "get_form_context",
-        "arguments": { "cursor": "ctx:0:6:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        "arguments": {
+          "cursor": "ctx:be0fe9800d687a851cd0167433179f03:0:6:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
       },
       {
         "role": "user",
@@ -3474,7 +3624,8 @@
         "arguments": {
           "expectedStateVersion": 0,
           "expectedSourceHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "fieldNames": ["frm.s1u2"]
+          "fieldNames": ["frm.s1u2"],
+          "expectedDocumentSessionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         },
         "result": {
           "ok": true,

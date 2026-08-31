@@ -31,6 +31,27 @@ const {
 )) as typeof import('../lib/webmcp');
 
 const SOURCE_HASH = 'd'.repeat(64);
+const DOCUMENT_SESSION_ID = '2'.repeat(32);
+
+const EMPTY_CONTENT_RISK = {
+  blocksPdfExport: false,
+  blocksInteractivePreview: false,
+  reasons: [],
+  actionTriggerCounts: {
+    open_action: 0,
+    additional_action: 0,
+    direct_action: 0,
+    javascript_name_tree: 0,
+  },
+  payloadSummary: {
+    embeddedFileCount: 0,
+    associatedFileCount: 0,
+    fileAttachmentAnnotationCount: 0,
+    richMediaAnnotationCount: 0,
+    multimediaAnnotationCount: 0,
+    malformedPayloadEntryCount: 0,
+  },
+} as const;
 
 const NO_PROTECTION = {
   protectionType: 'none',
@@ -135,6 +156,7 @@ async function fixture(fields: PdfFieldDescriptor[]) {
       highRiskActionCount: 0,
       otherActionCount: 0,
     },
+    contentRisk: EMPTY_CONTENT_RISK,
     protection: NO_PROTECTION,
     fields,
     warnings: [],
@@ -159,6 +181,7 @@ function toolSuccess(data: unknown, stateVersion = 0): FormProofAdapterResult {
     ok: true,
     stateVersion,
     sourceHash: SOURCE_HASH,
+    documentSessionId: DOCUMENT_SESSION_ID,
     data,
   };
 }
@@ -363,6 +386,7 @@ void test('ambiguous discovery search requires pagination before field evidence'
       const parsed = parseFormContextCursor(
         input.cursor,
         {
+          documentSessionId: state.documentSessionId,
           sourceHash: state.source.sourceHash,
           stateVersion: state.stateVersion,
         },
@@ -441,6 +465,7 @@ void test('over-budget identity evidence keeps whole fields and requires narrowe
   assert.ok(evidence);
 
   const batch = await evidence.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: state.stateVersion,
     expectedSourceHash: state.source.sourceHash,
     fieldNames: names,
@@ -480,6 +505,7 @@ void test('over-budget identity evidence keeps whole fields and requires narrowe
 
   for (const fieldName of names) {
     const single = await evidence.execute({
+      expectedDocumentSessionId: DOCUMENT_SESSION_ID,
       expectedStateVersion: state.stateVersion,
       expectedSourceHash: state.source.sourceHash,
       fieldNames: [fieldName],
@@ -522,6 +548,7 @@ void test('over-budget identity evidence keeps whole fields and requires narrowe
   ).find(({ name }) => name === 'get_field_evidence');
   assert.ok(richEvidence);
   const irreducible = await richEvidence.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: staged.state.stateVersion,
     expectedSourceHash: staged.state.source.sourceHash,
     fieldNames: [names[0]],
@@ -598,6 +625,7 @@ void test('many selected values stay atomic while choices paginate without losin
     if (input.choiceCursor !== undefined) {
       const parsed = parseFieldChoiceCursor(
         input.choiceCursor,
+        state.documentSessionId,
         state.source.sourceHash,
         input.fieldNames[0],
       );
@@ -656,6 +684,7 @@ void test('many selected values stay atomic while choices paginate without losin
   assert.deepEqual(contextField.identityReviewReasons, ['standard_initialism']);
 
   const first = await evidence.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: state.stateVersion,
     expectedSourceHash: state.source.sourceHash,
     fieldNames: [name],
@@ -701,6 +730,7 @@ void test('many selected values stay atomic while choices paginate without losin
   assert.equal(firstField.constraints.choicePage.total, choices.length);
 
   const second = await evidence.execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
     expectedStateVersion: state.stateVersion,
     expectedSourceHash: state.source.sourceHash,
     fieldNames: [name],

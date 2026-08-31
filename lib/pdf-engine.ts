@@ -65,6 +65,7 @@ export type PdfEngineErrorCode =
   | 'CRYPTO_UNAVAILABLE'
   | 'PDF_ENCRYPTED'
   | 'PDF_LOAD_FAILED'
+  | 'PDF_RESOURCE_LIMIT_EXCEEDED'
   | 'PDF_XFA_UNSUPPORTED'
   | 'PDF_SIGNED_UNSUPPORTED'
   | 'PDF_CERTIFIED_UNSUPPORTED'
@@ -98,6 +99,7 @@ export type PdfEngineWarningCode =
   | 'APPEARANCE_UNAVAILABLE'
   | 'JAVASCRIPT_UNVALIDATED'
   | 'ACTIVE_CONTENT_PRESERVED'
+  | 'PDF_EXPORT_BLOCKED_BY_CONTENT'
   | 'USAGE_RIGHTS_DETECTED'
   | 'XFA_PRESENT_INSPECTION_ONLY'
   | 'XFA_SEMANTICS_UNAVAILABLE'
@@ -185,6 +187,45 @@ export interface PdfActiveContentSummary {
   otherActionCount: number;
 }
 
+export type PdfContentRiskReasonCode =
+  | 'javascript_present'
+  | 'external_link_present'
+  | 'dangerous_or_unknown_action_present'
+  | 'embedded_file_present'
+  | 'associated_file_present'
+  | 'file_attachment_present'
+  | 'rich_media_present'
+  | 'multimedia_present'
+  | 'unclassified_payload_entry';
+
+export type PdfActionTriggerKind =
+  | 'open_action'
+  | 'additional_action'
+  | 'direct_action'
+  | 'javascript_name_tree';
+
+export interface PdfContentRiskReason {
+  readonly code: PdfContentRiskReasonCode;
+  readonly count: number;
+}
+
+export interface PdfPayloadSummary {
+  readonly embeddedFileCount: number;
+  readonly associatedFileCount: number;
+  readonly fileAttachmentAnnotationCount: number;
+  readonly richMediaAnnotationCount: number;
+  readonly multimediaAnnotationCount: number;
+  readonly malformedPayloadEntryCount: number;
+}
+
+export interface PdfContentRisk {
+  readonly blocksPdfExport: boolean;
+  readonly blocksInteractivePreview: boolean;
+  readonly reasons: readonly PdfContentRiskReason[];
+  readonly actionTriggerCounts: Readonly<Record<PdfActionTriggerKind, number>>;
+  readonly payloadSummary: Readonly<PdfPayloadSummary>;
+}
+
 export interface PdfRect {
   x: number;
   y: number;
@@ -250,6 +291,7 @@ export interface PdfInspection {
   fieldCount: number;
   widgetCount: number;
   activeContent: PdfActiveContentSummary;
+  contentRisk: PdfContentRisk;
   protection: PdfProtectionReport;
   fields: PdfFieldDescriptor[];
   warnings: PdfEngineWarning[];
@@ -270,6 +312,7 @@ export interface ApplyResult {
   fieldCount: number;
   widgetCount: number;
   activeContent: PdfActiveContentSummary;
+  contentRisk: PdfContentRisk;
   exportStrategy: 'filled_pdf' | 'confirmed_plain_derivative_pdf';
   sourceProtection: PdfProtectionReport;
   outputProtection: PdfProtectionReport;
@@ -310,6 +353,7 @@ interface LoadedPdf {
   document: PDFDocument;
   form: ReturnType<PDFDocument['getForm']>;
   activeContent: PdfActiveContentSummary;
+  contentRisk: PdfContentRisk;
   protectionAnalysis: PdfProtectionAnalysis;
   xfaSemantics: XfaSemanticsResult;
 }
@@ -467,7 +511,11 @@ interface RawPdfParsedValue {
   readonly objectStreamMetadataInvalid?: true;
   readonly objectStreamN?: number;
   readonly streamDecodeParmsPresent?: true;
-  readonly streamFilter?: 'flate' | 'unsupported';
+  readonly streamFilter?:
+    | 'ascii85_flate'
+    | 'flate'
+    | 'flate_chain'
+    | 'unsupported';
   readonly typeIndirect?: true;
   readonly xrefStreamDictionary?: true;
   readonly xrefStmOffset?: number;
@@ -502,6 +550,9 @@ interface RawPdfScanState {
 
 interface RawPdfScanBudget {
   decodedNameBytes: number;
+  flateStreamCompressedBytes: number;
+  flateStreamCount: number;
+  flateStreamDecodedBytes: number;
   objectStreamCompressedBytes: number;
   objectStreamCount: number;
   objectStreamDecodedBytes: number;
@@ -526,6 +577,35 @@ const MAX_RAW_PDF_OBJECT_STREAM_COMPRESSED_BYTES = 32 * 1024 * 1024;
 const MAX_RAW_PDF_OBJECT_STREAM_DECODED_BYTES = 64 * 1024 * 1024;
 const MAX_RAW_PDF_SINGLE_OBJECT_STREAM_COMPRESSED_BYTES = 8 * 1024 * 1024;
 const MAX_RAW_PDF_SINGLE_OBJECT_STREAM_DECODED_BYTES = 16 * 1024 * 1024;
+const MAX_RAW_PDF_FLATE_STREAMS = 20_000;
+const MAX_RAW_PDF_FLATE_STREAM_COMPRESSED_BYTES = 32 * 1024 * 1024;
+const MAX_RAW_PDF_FLATE_STREAM_DECODED_BYTES = 96 * 1024 * 1024;
+const MAX_RAW_PDF_SINGLE_FLATE_STREAM_COMPRESSED_BYTES = 8 * 1024 * 1024;
+const MAX_RAW_PDF_SINGLE_FLATE_STREAM_DECODED_BYTES = 24 * 1024 * 1024;
+const MAX_PDF_SOURCE_BYTES = 15 * 1024 * 1024;
+const RAW_PDF_RESOURCE_ISSUES = new Set([
+  'object_stream_compressed_budget_exceeded',
+  'object_stream_count_limit_exceeded',
+  'object_stream_decode_failed',
+  'object_stream_decoded_budget_exceeded',
+  'object_stream_filter_unsupported',
+  'object_stream_object_budget_exceeded',
+  'flate_stream_compressed_budget_exceeded',
+  'flate_stream_count_limit_exceeded',
+  'flate_stream_decode_failed',
+  'flate_stream_decoded_budget_exceeded',
+  'flate_filter_chain_unsupported',
+  'raw_container_depth_exceeded',
+  'raw_name_budget_exceeded',
+  'raw_name_too_long',
+  'raw_token_budget_exceeded',
+  'stream_extent_unverified',
+  'stream_length_duplicate',
+  'stream_length_indirect',
+  'stream_length_invalid',
+  'stream_length_missing',
+  'stream_length_out_of_bounds',
+]);
 const STREAM_BYTES = new TextEncoder().encode('stream');
 const ENDSTREAM_BYTES = new TextEncoder().encode('endstream');
 const LENGTH_BYTES = new TextEncoder().encode('Length');
@@ -541,6 +621,7 @@ const FIRST_BYTES = new TextEncoder().encode('First');
 const FILTER_BYTES = new TextEncoder().encode('Filter');
 const DECODE_PARMS_BYTES = new TextEncoder().encode('DecodeParms');
 const OBJ_STM_BYTES = new TextEncoder().encode('ObjStm');
+const ASCII85_DECODE_NAME = 'ASCII85Decode';
 const FLATE_DECODE_NAME = 'FlateDecode';
 const REFERENCE_BYTES = new TextEncoder().encode('R');
 const TRUE_BYTES = new TextEncoder().encode('true');
@@ -554,6 +635,9 @@ const XREF_STM_BYTES = new TextEncoder().encode('XRefStm');
 function createRawPdfScanBudget(): RawPdfScanBudget {
   return {
     decodedNameBytes: 0,
+    flateStreamCompressedBytes: 0,
+    flateStreamCount: 0,
+    flateStreamDecodedBytes: 0,
     objectStreamCompressedBytes: 0,
     objectStreamCount: 0,
     objectStreamDecodedBytes: 0,
@@ -926,7 +1010,12 @@ function parseRawPdfDictionary(
   let objectStreamN: number | undefined;
   let objectStreamFirst: number | undefined;
   let objectStreamMetadataInvalid = false;
-  let streamFilter: 'flate' | 'unsupported' | undefined;
+  let streamFilter:
+    | 'ascii85_flate'
+    | 'flate'
+    | 'flate_chain'
+    | 'unsupported'
+    | undefined;
   let streamDecodeParmsPresent = false;
   let xrefStmOffset: number | undefined;
   let prevOffset: number | undefined;
@@ -1046,7 +1135,13 @@ function parseRawPdfDictionary(
         (value.nameArray?.length === 1 &&
           value.nameArray[0] === FLATE_DECODE_NAME)
           ? 'flate'
-          : 'unsupported';
+          : value.nameArray?.length === 2 &&
+              value.nameArray[0] === ASCII85_DECODE_NAME &&
+              value.nameArray[1] === FLATE_DECODE_NAME
+            ? 'ascii85_flate'
+            : value.nameArray?.includes(FLATE_DECODE_NAME)
+              ? 'flate_chain'
+              : 'unsupported';
     }
     if (rawPdfNameEquals(state.bytes, key, DECODE_PARMS_BYTES)) {
       streamDecodeParmsPresent = true;
@@ -1341,6 +1436,85 @@ function markObjectStreamIssue(state: RawPdfScanState, issue: string): false {
   return false;
 }
 
+class RawPdfDecodeLimitError extends Error {}
+
+function decodeBoundedAscii85(
+  input: Uint8Array,
+  maxOutputBytes: number,
+): Uint8Array {
+  const output: number[] = [];
+  const group: number[] = [];
+  let index = 0;
+  let terminated = false;
+  const append = (value: number): void => {
+    if (output.length >= maxOutputBytes) throw new RawPdfDecodeLimitError();
+    output.push(value);
+  };
+  const flush = (count: number): void => {
+    let value = 0;
+    for (let groupIndex = 0; groupIndex < 5; groupIndex += 1) {
+      value = value * 85 + (group[groupIndex] ?? 84);
+      if (!Number.isSafeInteger(value) || value > 0xffff_ffff) {
+        throw new Error('Invalid ASCII85 group');
+      }
+    }
+    for (let byteIndex = 0; byteIndex < count; byteIndex += 1) {
+      append((value >>> (24 - byteIndex * 8)) & 255);
+    }
+    group.length = 0;
+  };
+
+  while (index < input.byteLength) {
+    const byte = input[index++];
+    if (isPdfWhitespace(byte)) continue;
+    if (byte === 60 && input[index] === 126 && output.length === 0) {
+      index += 1;
+      continue;
+    }
+    if (byte === 126) {
+      while (index < input.byteLength && isPdfWhitespace(input[index])) {
+        index += 1;
+      }
+      if (input[index] !== 62) throw new Error('Invalid ASCII85 terminator');
+      index += 1;
+      terminated = true;
+      break;
+    }
+    if (byte === 122) {
+      if (group.length !== 0) throw new Error('Invalid ASCII85 zero group');
+      append(0);
+      append(0);
+      append(0);
+      append(0);
+      continue;
+    }
+    if (byte < 33 || byte > 117) throw new Error('Invalid ASCII85 byte');
+    group.push(byte - 33);
+    if (group.length === 5) flush(4);
+  }
+  if (!terminated || group.length === 1) {
+    throw new Error('Invalid ASCII85 stream');
+  }
+  if (group.length > 1) flush(group.length - 1);
+  while (index < input.byteLength) {
+    if (!isPdfWhitespace(input[index])) {
+      throw new Error('Trailing ASCII85 data');
+    }
+    index += 1;
+  }
+  return Uint8Array.from(output);
+}
+
+function rawPdfZlibInput(
+  input: Uint8Array,
+  filter: RawPdfParsedValue['streamFilter'],
+  maxOutputBytes: number,
+): Uint8Array {
+  return filter === 'ascii85_flate'
+    ? decodeBoundedAscii85(input, maxOutputBytes)
+    : input;
+}
+
 function scanRawPdfObjectStreamPayload(
   state: RawPdfScanState,
   payload: Uint8Array,
@@ -1487,7 +1661,9 @@ function scanRawPdfObjectStream(
   }
   if (
     dictionary.streamDecodeParmsPresent ||
-    dictionary.streamFilter === 'unsupported'
+    dictionary.streamFilter === 'unsupported' ||
+    dictionary.streamFilter === 'flate_chain' ||
+    dictionary.streamFilter === 'ascii85_flate'
   ) {
     return markObjectStreamIssue(state, 'object_stream_filter_unsupported');
   }
@@ -1549,6 +1725,80 @@ function scanRawPdfObjectStream(
     payload,
     dictionary.objectStreamN,
     dictionary.objectStreamFirst,
+  );
+}
+
+function scanRawPdfFlateStream(
+  state: RawPdfScanState,
+  dictionary: RawPdfParsedValue,
+  extent: RawPdfStreamExtent,
+): boolean {
+  state.budget.flateStreamCount += 1;
+  if (state.budget.flateStreamCount > MAX_RAW_PDF_FLATE_STREAMS) {
+    return markObjectStreamIssue(state, 'flate_stream_count_limit_exceeded');
+  }
+  const input = state.bytes.subarray(extent.dataStart, extent.dataEnd);
+  if (
+    input.byteLength > MAX_RAW_PDF_SINGLE_FLATE_STREAM_COMPRESSED_BYTES ||
+    state.budget.flateStreamCompressedBytes + input.byteLength >
+      MAX_RAW_PDF_FLATE_STREAM_COMPRESSED_BYTES
+  ) {
+    return markObjectStreamIssue(
+      state,
+      'flate_stream_compressed_budget_exceeded',
+    );
+  }
+  state.budget.flateStreamCompressedBytes += input.byteLength;
+  const remainingDecodedBytes =
+    MAX_RAW_PDF_FLATE_STREAM_DECODED_BYTES -
+    state.budget.flateStreamDecodedBytes;
+  const outputLimit = Math.min(
+    remainingDecodedBytes,
+    MAX_RAW_PDF_SINGLE_FLATE_STREAM_DECODED_BYTES,
+  );
+  if (outputLimit <= 0) {
+    return markObjectStreamIssue(state, 'flate_stream_decoded_budget_exceeded');
+  }
+  let decoded: Uint8Array;
+  try {
+    const zlibInput = rawPdfZlibInput(
+      input,
+      dictionary.streamFilter,
+      MAX_RAW_PDF_SINGLE_FLATE_STREAM_COMPRESSED_BYTES,
+    );
+    decoded = decodeBoundedZlib(zlibInput, outputLimit);
+  } catch (error) {
+    return markObjectStreamIssue(
+      state,
+      error instanceof BoundedZlibDecodeLimitError ||
+        error instanceof RawPdfDecodeLimitError
+        ? 'flate_stream_decoded_budget_exceeded'
+        : 'flate_stream_decode_failed',
+    );
+  }
+  if (
+    decoded.byteLength > MAX_RAW_PDF_SINGLE_FLATE_STREAM_DECODED_BYTES ||
+    state.budget.flateStreamDecodedBytes + decoded.byteLength >
+      MAX_RAW_PDF_FLATE_STREAM_DECODED_BYTES
+  ) {
+    return markObjectStreamIssue(state, 'flate_stream_decoded_budget_exceeded');
+  }
+  state.budget.flateStreamDecodedBytes += decoded.byteLength;
+  return true;
+}
+
+function rawPdfOrdinaryStreamResourceSafe(
+  state: RawPdfScanState,
+  dictionary: RawPdfParsedValue,
+  extent: RawPdfStreamExtent,
+): boolean {
+  if (dictionary.streamFilter === 'flate_chain') {
+    return markObjectStreamIssue(state, 'flate_filter_chain_unsupported');
+  }
+  return (
+    (dictionary.streamFilter !== 'flate' &&
+      dictionary.streamFilter !== 'ascii85_flate') ||
+    scanRawPdfFlateStream(state, dictionary, extent)
   );
 }
 
@@ -1709,6 +1959,12 @@ function scanRawPdfRevisions(
         ) {
           break;
         }
+        if (
+          !value.objectStreamDictionary &&
+          !rawPdfOrdinaryStreamResourceSafe(state, value, extent)
+        ) {
+          break;
+        }
         index = extent.end;
       }
       continue;
@@ -1730,6 +1986,9 @@ function scanRawPdfRevisions(
       value.streamLength ?? { kind: 'missing' },
     );
     if (extent === null) break;
+    if (!rawPdfOrdinaryStreamResourceSafe(state, value, extent)) {
+      break;
+    }
     index = extent.end;
   }
 
@@ -1819,6 +2078,26 @@ function findPdfRevisionCandidates(bytes: Uint8Array): RawPdfRevisionScan {
   return scan;
 }
 
+function preflightPdfBytes(bytes: Uint8Array): RawPdfRevisionScan {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_PDF_SOURCE_BYTES) {
+    throw new PdfEngineError(
+      'PDF_RESOURCE_LIMIT_EXCEEDED',
+      'The PDF exceeds the supported source-byte budget.',
+    );
+  }
+  const scan = findPdfRevisionCandidates(bytes);
+  const resourceIssue = scan.issues.find((issue) =>
+    RAW_PDF_RESOURCE_ISSUES.has(issue),
+  );
+  if (resourceIssue !== undefined) {
+    throw new PdfEngineError(
+      'PDF_RESOURCE_LIMIT_EXCEEDED',
+      'The PDF contains a compressed or structural stream that exceeds the bounded parser budget.',
+    );
+  }
+  return scan;
+}
+
 function onlyPdfWhitespace(bytes: Uint8Array, start: number): boolean {
   for (let index = start; index < bytes.length; index += 1) {
     if (!isPdfWhitespace(bytes[index])) return false;
@@ -1852,8 +2131,9 @@ function signatureByteRangeFingerprint(
 async function inspectPdfRevisionHistory(
   bytes: Uint8Array,
   currentDocument: PDFDocument,
+  preflightScan?: RawPdfRevisionScan,
 ): Promise<PdfRevisionHistorySummary> {
-  const scan = findPdfRevisionCandidates(bytes);
+  const scan = preflightScan ?? findPdfRevisionCandidates(bytes);
   const { candidates, markerCount } = scan;
   const issues = new Set(scan.issues);
   const currentSnapshot = await fingerprintPdfSignatures(currentDocument);
@@ -2369,6 +2649,7 @@ interface ActionGraphFrame {
 
 interface ReferencedActionSummary {
   readonly actions: ReadonlySet<PDFDict>;
+  readonly triggers: ReadonlyMap<PDFDict, ReadonlySet<PdfActionTriggerKind>>;
   readonly malformedActionGraphCount: number;
 }
 
@@ -2496,6 +2777,7 @@ function explicitlyReferencedActions(
   fieldAndWidgetDictionaries: ReadonlySet<PDFDict>,
 ): ReferencedActionSummary {
   const actions = new Set<PDFDict>();
+  const triggers = new Map<PDFDict, Set<PdfActionTriggerKind>>();
   let malformedActionGraphCount = 0;
   let traversedEdgeCount = 0;
   let traversedNodeCount = 0;
@@ -2508,6 +2790,7 @@ function explicitlyReferencedActions(
   const addAction = (
     object: PDFObject | undefined,
     allowRootArray: boolean,
+    trigger: PdfActionTriggerKind,
   ): void => {
     if (object === undefined) return;
     let rootKind: 'array' | 'dictionary' | 'invalid' | null = null;
@@ -2610,6 +2893,9 @@ function explicitlyReferencedActions(
           continue;
         }
         actions.add(frame.object);
+        const actionTriggers = triggers.get(frame.object) ?? new Set();
+        actionTriggers.add(trigger);
+        triggers.set(frame.object, actionTriggers);
         if (frame.object.has(PDFName.of('Next'))) {
           if (!reserveEdges(1)) {
             frame.valid = false;
@@ -2648,13 +2934,13 @@ function explicitlyReferencedActions(
     if (dictionary.has(PDFName.of('A'))) {
       const action = dictionary.get(PDFName.of('A'));
       if (ownsActionEntry || isDirectActionDictionary(document, action)) {
-        addAction(action, false);
+        addAction(action, false, 'direct_action');
       }
     }
     if (dictionary.has(PDFName.of('NA'))) {
       const action = dictionary.get(PDFName.of('NA'));
       if (ownsActionEntry || isDirectActionDictionary(document, action)) {
-        addAction(action, false);
+        addAction(action, false, 'direct_action');
       }
     }
     if (dictionary.has(PDFName.of('AA'))) {
@@ -2665,7 +2951,7 @@ function explicitlyReferencedActions(
       if (additionalActions instanceof PDFDict) {
         for (const action of additionalActions.values()) {
           if (ownsActionEntry || isDirectActionDictionary(document, action)) {
-            addAction(action, false);
+            addAction(action, false, 'additional_action');
           }
         }
       } else if (ownsActionEntry) {
@@ -2679,7 +2965,7 @@ function explicitlyReferencedActions(
       openAction !== undefined &&
       !isOpenActionDestination(document, openAction)
     ) {
-      addAction(openAction, false);
+      addAction(openAction, false, 'open_action');
     }
   }
 
@@ -2726,7 +3012,7 @@ function explicitlyReferencedActions(
     if (entries instanceof PDFArray) {
       if (entries.size() % 2 !== 0) malformedActionGraphCount += 1;
       for (let index = 1; index < entries.size(); index += 2) {
-        addAction(entries.get(index), false);
+        addAction(entries.get(index), false, 'javascript_name_tree');
       }
     } else if (rawEntries !== undefined) {
       malformedActionGraphCount += 1;
@@ -2754,7 +3040,7 @@ function explicitlyReferencedActions(
     }
   }
 
-  return { actions, malformedActionGraphCount };
+  return { actions, triggers, malformedActionGraphCount };
 }
 
 function resolvedObject(
@@ -3508,11 +3794,154 @@ function analyzeProtection(
   };
 }
 
+interface PdfContentAnalysis {
+  readonly activeContent: PdfActiveContentSummary;
+  readonly contentRisk: PdfContentRisk;
+}
+
+function isReachableFileSpec(dictionary: PDFDict): boolean {
+  return (
+    dictionaryName(dictionary, 'Type') === 'Filespec' ||
+    dictionary.has(PDFName.of('EF'))
+  );
+}
+
+function summarizeReachablePayloads(
+  document: PDFDocument,
+  dictionaries: readonly PDFDict[],
+): PdfPayloadSummary {
+  const embeddedFiles = new Set<PDFDict>();
+  const associatedFiles = new Set<PDFDict>();
+  const fileAttachments = new Set<PDFDict>();
+  const richMediaAnnotations = new Set<PDFDict>();
+  const multimediaEntries = new Set<PDFDict>();
+  let malformedPayloadEntryCount = 0;
+
+  const names = lookedUpObject(
+    document,
+    document.catalog.get(PDFName.of('Names')),
+  );
+  const embeddedFilesEntry =
+    names instanceof PDFDict
+      ? names.get(PDFName.of('EmbeddedFiles'))
+      : undefined;
+  const embeddedFilesRoot = lookedUpObject(document, embeddedFilesEntry);
+  if (
+    embeddedFilesEntry !== undefined &&
+    !(embeddedFilesRoot instanceof PDFDict)
+  ) {
+    malformedPayloadEntryCount += 1;
+  }
+  if (embeddedFilesRoot instanceof PDFDict) {
+    const seen = new Set<PDFDict>();
+    const queued = new Set<PDFDict>([embeddedFilesRoot]);
+    const pending: Array<{ readonly depth: number; readonly tree: PDFDict }> = [
+      { depth: 0, tree: embeddedFilesRoot },
+    ];
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (current === undefined) continue;
+      if (
+        current.depth > MAX_ACTION_GRAPH_DEPTH ||
+        seen.has(current.tree) ||
+        seen.size >= MAX_ACTION_GRAPH_NODES
+      ) {
+        malformedPayloadEntryCount += 1;
+        continue;
+      }
+      seen.add(current.tree);
+
+      const rawEntries = current.tree.get(PDFName.of('Names'));
+      const entries = lookedUpObject(document, rawEntries);
+      if (entries instanceof PDFArray) {
+        if (entries.size() % 2 !== 0) malformedPayloadEntryCount += 1;
+        for (let index = 1; index < entries.size(); index += 2) {
+          const fileSpec = lookedUpObject(document, entries.get(index));
+          if (fileSpec instanceof PDFDict && isReachableFileSpec(fileSpec)) {
+            embeddedFiles.add(fileSpec);
+          } else {
+            malformedPayloadEntryCount += 1;
+          }
+        }
+      } else if (rawEntries !== undefined) {
+        malformedPayloadEntryCount += 1;
+      }
+
+      const rawKids = current.tree.get(PDFName.of('Kids'));
+      const kids = lookedUpObject(document, rawKids);
+      if (kids instanceof PDFArray) {
+        for (let index = 0; index < kids.size(); index += 1) {
+          const child = lookedUpObject(document, kids.get(index));
+          if (!(child instanceof PDFDict) || queued.has(child)) {
+            malformedPayloadEntryCount += 1;
+          } else {
+            queued.add(child);
+            pending.push({ depth: current.depth + 1, tree: child });
+          }
+        }
+      } else if (rawKids !== undefined) {
+        malformedPayloadEntryCount += 1;
+      }
+    }
+  }
+
+  for (const dictionary of dictionaries) {
+    const type = dictionaryName(dictionary, 'Type');
+    const subtype = dictionaryName(dictionary, 'Subtype');
+    if (dictionary === document.catalog || type === 'Page') {
+      const rawAssociatedFiles = dictionary.get(PDFName.of('AF'));
+      if (rawAssociatedFiles !== undefined) {
+        const associated = lookedUpObject(document, rawAssociatedFiles);
+        if (!(associated instanceof PDFArray)) {
+          malformedPayloadEntryCount += 1;
+        } else {
+          for (let index = 0; index < associated.size(); index += 1) {
+            const fileSpec = lookedUpObject(document, associated.get(index));
+            if (fileSpec instanceof PDFDict && isReachableFileSpec(fileSpec)) {
+              associatedFiles.add(fileSpec);
+            } else {
+              malformedPayloadEntryCount += 1;
+            }
+          }
+        }
+      }
+    }
+    if (subtype === 'FileAttachment') {
+      fileAttachments.add(dictionary);
+      const rawFileSpec = dictionary.get(PDFName.of('FS'));
+      if (rawFileSpec !== undefined) {
+        const fileSpec = lookedUpObject(document, rawFileSpec);
+        if (!(fileSpec instanceof PDFDict) || !isReachableFileSpec(fileSpec)) {
+          malformedPayloadEntryCount += 1;
+        }
+      }
+    } else if (subtype === 'RichMedia') {
+      richMediaAnnotations.add(dictionary);
+    } else if (
+      subtype === '3D' ||
+      subtype === 'Sound' ||
+      subtype === 'Movie' ||
+      subtype === 'Screen'
+    ) {
+      multimediaEntries.add(dictionary);
+    }
+  }
+
+  return {
+    embeddedFileCount: embeddedFiles.size,
+    associatedFileCount: associatedFiles.size,
+    fileAttachmentAnnotationCount: fileAttachments.size,
+    richMediaAnnotationCount: richMediaAnnotations.size,
+    multimediaAnnotationCount: multimediaEntries.size,
+    malformedPayloadEntryCount,
+  };
+}
+
 function summarizeActiveContent(
   document: PDFDocument,
   dictionaries: readonly PDFDict[],
   fieldAndWidgetDictionaries: ReadonlySet<PDFDict>,
-): PdfActiveContentSummary {
+): PdfContentAnalysis {
   const referencedActionSummary = explicitlyReferencedActions(
     document,
     dictionaries,
@@ -3521,6 +3950,8 @@ function summarizeActiveContent(
   const referencedActions = referencedActionSummary.actions;
   const additionalActions = new Set<PDFDict>();
   let javascriptActionCount = 0;
+  let uriActionCount = 0;
+  let multimediaActionCount = 0;
   let externalActionCount = 0;
   let highRiskActionCount = referencedActionSummary.malformedActionGraphCount;
   let otherActionCount = 0;
@@ -3538,6 +3969,7 @@ function summarizeActiveContent(
       : null;
     if (actionType === 'JavaScript') javascriptActionCount += 1;
     else if (actionType === 'URI') {
+      uriActionCount += 1;
       externalActionCount += 1;
     } else if (
       actionType === 'Launch' ||
@@ -3549,6 +3981,15 @@ function summarizeActiveContent(
       externalActionCount += 1;
       highRiskActionCount += 1;
     } else if (
+      actionType === 'Sound' ||
+      actionType === 'Movie' ||
+      actionType === 'Rendition' ||
+      actionType === 'GoTo3DView' ||
+      actionType === 'RichMediaExecute'
+    ) {
+      multimediaActionCount += 1;
+      otherActionCount += 1;
+    } else if (
       actionType !== null &&
       REPORT_ONLY_ACTION_TYPES.has(actionType)
     ) {
@@ -3558,13 +3999,57 @@ function summarizeActiveContent(
     }
   }
 
-  return {
+  const activeContent = {
     javascriptActionCount,
     additionalActionDictionaryCount: additionalActions.size,
     openActionCount: document.catalog.has(PDFName.of('OpenAction')) ? 1 : 0,
     externalActionCount,
     highRiskActionCount,
     otherActionCount,
+  };
+  const payloadSummary = summarizeReachablePayloads(document, dictionaries);
+  const reasons: PdfContentRiskReason[] = [];
+  const addReason = (code: PdfContentRiskReasonCode, count: number): void => {
+    if (count > 0) reasons.push({ code, count });
+  };
+  addReason('javascript_present', javascriptActionCount);
+  addReason('external_link_present', uriActionCount);
+  addReason(
+    'dangerous_or_unknown_action_present',
+    highRiskActionCount + multimediaActionCount,
+  );
+  addReason('embedded_file_present', payloadSummary.embeddedFileCount);
+  addReason('associated_file_present', payloadSummary.associatedFileCount);
+  addReason(
+    'file_attachment_present',
+    payloadSummary.fileAttachmentAnnotationCount,
+  );
+  addReason('rich_media_present', payloadSummary.richMediaAnnotationCount);
+  addReason('multimedia_present', payloadSummary.multimediaAnnotationCount);
+  addReason(
+    'unclassified_payload_entry',
+    payloadSummary.malformedPayloadEntryCount,
+  );
+
+  const actionTriggerCounts: Record<PdfActionTriggerKind, number> = {
+    open_action: 0,
+    additional_action: 0,
+    direct_action: 0,
+    javascript_name_tree: 0,
+  };
+  for (const actionTriggers of referencedActionSummary.triggers.values()) {
+    for (const trigger of actionTriggers) actionTriggerCounts[trigger] += 1;
+  }
+  const blocksPdfExport = reasons.length > 0;
+  return {
+    activeContent,
+    contentRisk: {
+      blocksPdfExport,
+      blocksInteractivePreview: blocksPdfExport,
+      reasons,
+      actionTriggerCounts,
+      payloadSummary,
+    },
   };
 }
 
@@ -3582,7 +4067,7 @@ function hasActiveContent(summary: PdfActiveContentSummary): boolean {
 function createProtectionReport(
   analysis: PdfProtectionAnalysis,
   fields: readonly PdfFieldDescriptor[],
-  activeContent: PdfActiveContentSummary,
+  contentRisk: PdfContentRisk,
 ): PdfProtectionReport {
   const allowedMutations: PdfAllowedMutation[] = ['inspect_fields'];
   const exportStrategies: PdfExportStrategy[] = [];
@@ -3593,16 +4078,18 @@ function createProtectionReport(
       field.type !== 'signature' &&
       field.type !== 'unsupported',
   );
-  if (canStage) allowedMutations.push('stage_field_values');
+  if (canStage && analysis.protectionType !== 'unknown') {
+    allowedMutations.push('stage_field_values');
+  }
 
-  const pdfActionsAllowExport = activeContent.highRiskActionCount === 0;
+  const pdfContentAllowsExport = !contentRisk.blocksPdfExport;
   if (canStage && analysis.protectionType !== 'unknown') {
     allowedMutations.push('create_fill_package');
     exportStrategies.push('fill_package');
   }
   if (
     canStage &&
-    pdfActionsAllowExport &&
+    pdfContentAllowsExport &&
     analysis.protectionType === 'none' &&
     !analysis.evidence.xfaPresent
   ) {
@@ -3611,7 +4098,7 @@ function createProtectionReport(
   }
   if (
     canStage &&
-    pdfActionsAllowExport &&
+    pdfContentAllowsExport &&
     analysis.protectionType === 'usage_rights' &&
     !analysis.evidence.xfaPresent
   ) {
@@ -3661,6 +4148,7 @@ function inspectionForm(document: PDFDocument): PDFForm {
 
 async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
   let document: PDFDocument;
+  const preflightScan = preflightPdfBytes(bytes);
 
   try {
     document = await PDFDocument.load(copyBytes(bytes), {
@@ -3698,14 +4186,18 @@ async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
     const dictionaries = collectPdfDictionaries(document);
     const unreachableSignatureDictionaries =
       collectUnreachableSignatureDictionaries(document, dictionaries);
-    const activeContent = summarizeActiveContent(
+    const { activeContent, contentRisk } = summarizeActiveContent(
       document,
       dictionaries,
       fieldAndWidgetDictionaries,
     );
     const xfaSemantics = extractXfaSemantics(document);
     const form = inspectionForm(document);
-    const revisionHistory = await inspectPdfRevisionHistory(bytes, document);
+    const revisionHistory = await inspectPdfRevisionHistory(
+      bytes,
+      document,
+      preflightScan,
+    );
     const protectionAnalysis = analyzeProtection(
       document,
       [...dictionaries, ...unreachableSignatureDictionaries],
@@ -3719,6 +4211,7 @@ async function loadPdf(bytes: Uint8Array): Promise<LoadedPdf> {
       document,
       form,
       activeContent,
+      contentRisk,
       protectionAnalysis,
       xfaSemantics,
     };
@@ -4133,6 +4626,7 @@ function describeField(
 function inspectionWarnings(
   fields: PdfFieldDescriptor[],
   activeContent: PdfActiveContentSummary,
+  contentRisk: PdfContentRisk,
   protection: PdfProtectionReport,
   xfaSemantics: XfaSemanticsResult,
 ): PdfEngineWarning[] {
@@ -4148,14 +4642,21 @@ function inspectionWarnings(
     warnings.push({
       code: 'ACTIVE_CONTENT_PRESERVED',
       message:
-        'The PDF contains scripts or actions. They are preserved, but FormProof does not execute or validate them.',
+        'The original PDF contains scripts or actions. FormProof does not execute or validate them.',
     });
   }
   if (activeContent.javascriptActionCount > 0) {
     warnings.push({
       code: 'JAVASCRIPT_UNVALIDATED',
       message:
-        'The PDF contains JavaScript that is preserved, but FormProof does not execute or semantically validate it.',
+        'The original PDF contains JavaScript. FormProof does not execute or semantically validate it.',
+    });
+  }
+  if (contentRisk.blocksPdfExport) {
+    warnings.push({
+      code: 'PDF_EXPORT_BLOCKED_BY_CONTENT',
+      message:
+        'PDF byte export and interactive preview are disabled because copying this unvalidated content into a PDF with new field data is not supported. A fill package may still be available when document protection permits it.',
     });
   }
   if (protection.protectionType === 'usage_rights') {
@@ -4279,6 +4780,7 @@ function inspectLoadedPdf(
   form: ReturnType<PDFDocument['getForm']>,
   sourceHash: string,
   activeContent: PdfActiveContentSummary,
+  contentRisk: PdfContentRisk,
   protectionAnalysis: PdfProtectionAnalysis,
   xfaSemantics: XfaSemanticsResult,
 ): PdfInspection {
@@ -4288,7 +4790,7 @@ function inspectLoadedPdf(
   const protection = createProtectionReport(
     protectionAnalysis,
     fields,
-    activeContent,
+    contentRisk,
   );
   return {
     sourceHash,
@@ -4296,11 +4798,13 @@ function inspectLoadedPdf(
     fieldCount: fields.length,
     widgetCount: fields.reduce((total, field) => total + field.widgetCount, 0),
     activeContent,
+    contentRisk,
     protection,
     fields,
     warnings: inspectionWarnings(
       fields,
       activeContent,
+      contentRisk,
       protection,
       xfaSemantics,
     ),
@@ -4309,13 +4813,20 @@ function inspectLoadedPdf(
 
 export async function inspectPdf(source: Uint8Array): Promise<PdfInspection> {
   const sourceHash = await sha256Hex(source);
-  const { document, form, activeContent, protectionAnalysis, xfaSemantics } =
-    await loadPdf(source);
+  const {
+    document,
+    form,
+    activeContent,
+    contentRisk,
+    protectionAnalysis,
+    xfaSemantics,
+  } = await loadPdf(source);
   return inspectLoadedPdf(
     document,
     form,
     sourceHash,
     activeContent,
+    contentRisk,
     protectionAnalysis,
     xfaSemantics,
   );
@@ -4771,15 +5282,21 @@ async function applyValues(
 ): Promise<ApplyResult> {
   const sourceHash = await sha256Hex(source);
   const loaded = await loadPdf(source);
-  const { document, form, activeContent, protectionAnalysis, xfaSemantics } =
-    loaded;
+  const {
+    document,
+    form,
+    activeContent,
+    contentRisk,
+    protectionAnalysis,
+    xfaSemantics,
+  } = loaded;
   const descriptors = form
     .getFields()
     .map((field) => describeField(document, field, xfaSemantics));
   const sourceProtection = createProtectionReport(
     protectionAnalysis,
     descriptors,
-    activeContent,
+    contentRisk,
   );
 
   if (
@@ -4794,13 +5311,13 @@ async function applyValues(
   const blocked = mutationError(sourceProtection, exportStrategy);
   if (blocked) throw blocked;
 
-  if (activeContent.highRiskActionCount > 0) {
+  if (contentRisk.blocksPdfExport) {
     throw new PdfEngineError(
       'PDF_HIGH_RISK_ACTION_UNSUPPORTED',
-      'PDFs with external launch, remote navigation, submit, import, or unrecognized actions cannot be exported safely.',
+      'This PDF contains unvalidated active content, external links, or embedded payloads. FormProof will not copy it into a PDF containing new field data.',
       {
         details: {
-          highRiskActionCount: activeContent.highRiskActionCount,
+          reasonCodes: contentRisk.reasons.map(({ code }) => code),
         },
       },
     );
@@ -4818,6 +5335,7 @@ async function applyValues(
       form,
       sourceHash,
       activeContent,
+      contentRisk,
       protectionAnalysis,
       xfaSemantics,
     );
@@ -4828,6 +5346,7 @@ async function applyValues(
       fieldCount: inspection.fieldCount,
       widgetCount: inspection.widgetCount,
       activeContent: inspection.activeContent,
+      contentRisk: inspection.contentRisk,
       exportStrategy,
       sourceProtection,
       outputProtection: sourceProtection,
@@ -5015,6 +5534,7 @@ async function applyValues(
     reopened.form,
     outputHash,
     reopened.activeContent,
+    reopened.contentRisk,
     reopened.protectionAnalysis,
     reopened.xfaSemantics,
   );
@@ -5041,6 +5561,7 @@ async function applyValues(
     fieldCount: inspection.fieldCount,
     widgetCount: inspection.widgetCount,
     activeContent: inspection.activeContent,
+    contentRisk: inspection.contentRisk,
     exportStrategy,
     sourceProtection,
     outputProtection: inspection.protection,

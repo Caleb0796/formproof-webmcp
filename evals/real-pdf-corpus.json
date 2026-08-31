@@ -29,6 +29,25 @@
           "highRiskActionCount": 0,
           "otherActionCount": 0
         },
+        "contentRisk": {
+          "blocksPdfExport": true,
+          "blocksInteractivePreview": true,
+          "reasons": [{ "code": "javascript_present", "count": 3 }],
+          "actionTriggerCounts": {
+            "open_action": 0,
+            "additional_action": 0,
+            "direct_action": 0,
+            "javascript_name_tree": 3
+          },
+          "payloadSummary": {
+            "embeddedFileCount": 0,
+            "associatedFileCount": 0,
+            "fileAttachmentAnnotationCount": 0,
+            "richMediaAnnotationCount": 0,
+            "multimediaAnnotationCount": 0,
+            "malformedPayloadEntryCount": 0
+          }
+        },
         "protection": {
           "protectionType": "usage_rights",
           "allowedMutations": [
@@ -125,6 +144,25 @@
           "externalActionCount": 0,
           "highRiskActionCount": 0,
           "otherActionCount": 0
+        },
+        "contentRisk": {
+          "blocksPdfExport": true,
+          "blocksInteractivePreview": true,
+          "reasons": [{ "code": "javascript_present", "count": 3 }],
+          "actionTriggerCounts": {
+            "open_action": 0,
+            "additional_action": 0,
+            "direct_action": 0,
+            "javascript_name_tree": 3
+          },
+          "payloadSummary": {
+            "embeddedFileCount": 0,
+            "associatedFileCount": 0,
+            "fileAttachmentAnnotationCount": 0,
+            "richMediaAnnotationCount": 0,
+            "multimediaAnnotationCount": 0,
+            "malformedPayloadEntryCount": 0
+          }
         },
         "protection": {
           "protectionType": "usage_rights",
@@ -286,7 +324,7 @@
       "pageCount": 4,
       "expectedEngineOutcome": {
         "status": "honestUsefulResult",
-        "artifactType": "filled_pdf",
+        "artifactType": "original_untouched_fill_package",
         "fieldCount": 128,
         "widgetCount": 130,
         "humanOnlyFieldCount": 9,
@@ -298,15 +336,36 @@
           "highRiskActionCount": 0,
           "otherActionCount": 0
         },
+        "contentRisk": {
+          "blocksPdfExport": true,
+          "blocksInteractivePreview": true,
+          "reasons": [
+            { "code": "javascript_present", "count": 24 },
+            { "code": "external_link_present", "count": 8 }
+          ],
+          "actionTriggerCounts": {
+            "open_action": 0,
+            "additional_action": 20,
+            "direct_action": 12,
+            "javascript_name_tree": 0
+          },
+          "payloadSummary": {
+            "embeddedFileCount": 0,
+            "associatedFileCount": 0,
+            "fileAttachmentAnnotationCount": 0,
+            "richMediaAnnotationCount": 0,
+            "multimediaAnnotationCount": 0,
+            "malformedPayloadEntryCount": 0
+          }
+        },
         "protection": {
           "protectionType": "none",
           "allowedMutations": [
             "inspect_fields",
             "stage_field_values",
-            "create_fill_package",
-            "create_filled_pdf"
+            "create_fill_package"
           ],
-          "exportStrategies": ["filled_pdf", "fill_package"],
+          "exportStrategies": ["fill_package"],
           "signatureImpact": "none",
           "requiresHumanConfirmation": false,
           "catalogPermsPresent": false,
@@ -338,7 +397,8 @@
           "unknownStructures": [],
           "cmsIntegrity": "not_applicable",
           "signerTrust": "not_applicable"
-        }
+        },
+        "expectedPdfRewriteError": "PDF_HIGH_RISK_ACTION_UNSUPPORTED"
       },
       "queryExperiment": {
         "queries": ["citizen", "signature", "state"],
@@ -350,7 +410,8 @@
         "expectedMatchCounts": [1, 18, 5],
         "expectedTotalMatchedFields": 24
       },
-      "writeExperiment": {
+      "fillPackageExperiment": {
+        "createdAt": "2026-08-29T00:00:00.000Z",
         "values": {
           "First Name Given Name": "Synthetic",
           "CB_1": true,
@@ -369,7 +430,7 @@
       "pageCount": 6,
       "expectedEngineOutcome": {
         "status": "honestUsefulResult",
-        "artifactType": "filled_pdf",
+        "artifactType": "original_untouched_fill_package",
         "fieldCount": 84,
         "widgetCount": 99,
         "recoveredRadioGroupCount": 12,
@@ -381,15 +442,33 @@
           "highRiskActionCount": 0,
           "otherActionCount": 2
         },
+        "contentRisk": {
+          "blocksPdfExport": true,
+          "blocksInteractivePreview": true,
+          "reasons": [{ "code": "javascript_present", "count": 2 }],
+          "actionTriggerCounts": {
+            "open_action": 1,
+            "additional_action": 2,
+            "direct_action": 1,
+            "javascript_name_tree": 0
+          },
+          "payloadSummary": {
+            "embeddedFileCount": 0,
+            "associatedFileCount": 0,
+            "fileAttachmentAnnotationCount": 0,
+            "richMediaAnnotationCount": 0,
+            "multimediaAnnotationCount": 0,
+            "malformedPayloadEntryCount": 0
+          }
+        },
         "protection": {
           "protectionType": "none",
           "allowedMutations": [
             "inspect_fields",
             "stage_field_values",
-            "create_fill_package",
-            "create_filled_pdf"
+            "create_fill_package"
           ],
-          "exportStrategies": ["filled_pdf", "fill_package"],
+          "exportStrategies": ["fill_package"],
           "signatureImpact": "none",
           "requiresHumanConfirmation": false,
           "catalogPermsPresent": false,
@@ -421,7 +500,8 @@
           "unknownStructures": [],
           "cmsIntegrity": "not_applicable",
           "signerTrust": "not_applicable"
-        }
+        },
+        "expectedPdfRewriteError": "PDF_HIGH_RISK_ACTION_UNSUPPORTED"
       },
       "queryExperiment": {
         "queries": ["name", "gender", "social security"],
@@ -429,7 +509,8 @@
           "List all other name you have used",
           "Gender",
           "Applicant SSN 1",
-          "Emergency Contact Name"
+          "Emergency Contact Name",
+          "Your name as printed on your most recent U.S. passport book and/or passport card"
         ],
         "expectedMatchCounts": [13, 3, 3],
         "expectedTotalMatchedFields": 19,
@@ -558,7 +639,8 @@
           ]
         }
       },
-      "writeExperiment": {
+      "fillPackageExperiment": {
+        "createdAt": "2026-08-29T00:00:00.000Z",
         "values": {
           "Applicant First Name": "Synthetic",
           "Gender": "M",
@@ -589,6 +671,28 @@
           "externalActionCount": 5,
           "highRiskActionCount": 0,
           "otherActionCount": 0
+        },
+        "contentRisk": {
+          "blocksPdfExport": true,
+          "blocksInteractivePreview": true,
+          "reasons": [
+            { "code": "javascript_present", "count": 3 },
+            { "code": "external_link_present", "count": 5 }
+          ],
+          "actionTriggerCounts": {
+            "open_action": 0,
+            "additional_action": 0,
+            "direct_action": 5,
+            "javascript_name_tree": 3
+          },
+          "payloadSummary": {
+            "embeddedFileCount": 0,
+            "associatedFileCount": 0,
+            "fileAttachmentAnnotationCount": 0,
+            "richMediaAnnotationCount": 0,
+            "multimediaAnnotationCount": 0,
+            "malformedPayloadEntryCount": 0
+          }
         },
         "protection": {
           "protectionType": "usage_rights",

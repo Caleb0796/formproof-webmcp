@@ -382,6 +382,100 @@ async function objectStreamFixture(
   return bytes;
 }
 
+async function compressedObjectStreamBomb(): Promise<{
+  bytes: Uint8Array;
+  compressedBytes: number;
+  decodedBytes: number;
+}> {
+  const source = await ordinaryFormPdf();
+  const parsed = await PDFDocument.load(source, { updateMetadata: false });
+  const root = parsed.context.trailerInfo.Root;
+  assert.ok(root instanceof PDFRef);
+  const objectNumber = parsed.context.largestObjectNumber + 1;
+  const decoded = new Uint8Array(17 * 1024 * 1024);
+  decoded.fill(32);
+  decoded.set(new TextEncoder().encode('99 0 null'));
+  const compressed = Uint8Array.from(deflateSync(decoded));
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode('\n');
+  const objectOffset = source.byteLength + prefix.byteLength;
+  const object = concatenate(
+    encoder.encode(
+      `${objectNumber} 0 obj\n<< /Type /ObjStm /N 1 /First 5 /Length ${compressed.byteLength} /Filter /FlateDecode >>\nstream\n`,
+    ),
+    compressed,
+    encoder.encode('\nendstream\nendobj\n'),
+  );
+  const xrefOffset = objectOffset + object.byteLength;
+  const xref = encoder.encode(
+    `xref\n${objectNumber} 1\n${String(objectOffset).padStart(10, '0')} 00000 n \n` +
+      `trailer\n<< /Size ${objectNumber + 1} /Root ${root.toString()} /Prev ${lastStartXref(source)} >>\n` +
+      `startxref\n${xrefOffset}\n%%EOF\n`,
+  );
+  return {
+    bytes: concatenate(source, prefix, object, xref),
+    compressedBytes: compressed.byteLength,
+    decodedBytes: decoded.byteLength,
+  };
+}
+
+function encodeAscii85(input: Uint8Array): Uint8Array {
+  let encoded = '';
+  for (let offset = 0; offset < input.byteLength; offset += 4) {
+    const length = Math.min(4, input.byteLength - offset);
+    let value = 0;
+    for (let index = 0; index < 4; index += 1) {
+      value = value * 256 + (index < length ? input[offset + index] : 0);
+    }
+    const group = Array.from({ length: 5 }, () => 0);
+    for (let index = 4; index >= 0; index -= 1) {
+      group[index] = (value % 85) + 33;
+      value = Math.floor(value / 85);
+    }
+    encoded += String.fromCharCode(...group.slice(0, length + 1));
+  }
+  return new TextEncoder().encode(`${encoded}~>`);
+}
+
+function appendCompressedOrdinaryStream(
+  source: Uint8Array,
+  root: PDFRef,
+  objectNumber: number,
+  decodedBytes: number,
+  options: {
+    ascii85?: boolean;
+    filter?: string;
+    length?: string;
+  } = {},
+): { bytes: Uint8Array; compressedBytes: number } {
+  const decoded = new Uint8Array(decodedBytes);
+  decoded.fill(32);
+  const compressed = Uint8Array.from(deflateSync(decoded));
+  const streamContents = options.ascii85
+    ? encodeAscii85(compressed)
+    : compressed;
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode('\n');
+  const objectOffset = source.byteLength + prefix.byteLength;
+  const object = concatenate(
+    encoder.encode(
+      `${objectNumber} 0 obj\n<< /Length ${options.length ?? streamContents.byteLength} /Filter ${options.filter ?? '/FlateDecode'} >>\nstream\n`,
+    ),
+    streamContents,
+    encoder.encode('\nendstream\nendobj\n'),
+  );
+  const xrefOffset = objectOffset + object.byteLength;
+  const xref = encoder.encode(
+    `xref\n${objectNumber} 1\n${String(objectOffset).padStart(10, '0')} 00000 n \n` +
+      `trailer\n<< /Size ${objectNumber + 1} /Root ${root.toString()} /Prev ${lastStartXref(source)} >>\n` +
+      `startxref\n${xrefOffset}\n%%EOF\n`,
+  );
+  return {
+    bytes: concatenate(source, prefix, object, xref),
+    compressedBytes: streamContents.byteLength,
+  };
+}
+
 async function assertObjectStreamRejected(
   bytes: Uint8Array,
   expectedIssue: string,
@@ -415,6 +509,19 @@ async function assertObjectStreamRejected(
     (error: unknown) =>
       error instanceof PdfEngineError &&
       error.code === 'PDF_UNKNOWN_PROTECTION_UNSUPPORTED',
+    label,
+  );
+}
+
+async function assertObjectStreamResourceRejected(
+  bytes: Uint8Array,
+  label: string,
+): Promise<void> {
+  await assert.rejects(
+    inspectPdf(bytes),
+    (error: unknown) =>
+      error instanceof PdfEngineError &&
+      error.code === 'PDF_RESOURCE_LIMIT_EXCEEDED',
     label,
   );
 }
@@ -633,10 +740,7 @@ void test('fails closed when a historical document signature is redefined as UR3
     'historical_signature_structure_changed_or_missing',
   ]);
   assert.deepEqual(inspection.protection.exportStrategies, []);
-  assert.deepEqual(inspection.protection.allowedMutations, [
-    'inspect_fields',
-    'stage_field_values',
-  ]);
+  assert.deepEqual(inspection.protection.allowedMutations, ['inspect_fields']);
 
   await assert.rejects(
     applyApprovedValues(source, { [FIELD_NAME]: 'Must not be written' }),
@@ -1380,9 +1484,8 @@ void test('fails closed for unsupported object stream filters and decode paramet
   ];
 
   for (const { label, dictionary } of cases) {
-    await assertObjectStreamRejected(
+    await assertObjectStreamResourceRejected(
       await objectStreamFixture(dictionary),
-      'object_stream_filter_unsupported',
       label,
     );
   }
@@ -1442,11 +1545,99 @@ void test('fails closed for invalid object stream headers and offsets', async ()
 });
 
 void test('fails closed before expanding an excessive object stream object count', async () => {
-  await assertObjectStreamRejected(
+  await assertObjectStreamResourceRejected(
     await objectStreamFixture('/N 200001 /First 5'),
-    'object_stream_object_budget_exceeded',
     'object count budget',
   );
+});
+
+void test('rejects a compressed object-stream bomb before pdf-lib parsing', async () => {
+  const fixture = await compressedObjectStreamBomb();
+  assert.ok(fixture.compressedBytes < 64 * 1024);
+  assert.equal(fixture.decodedBytes, 17 * 1024 * 1024);
+  await assertObjectStreamResourceRejected(
+    fixture.bytes,
+    'decoded byte budget',
+  );
+
+  const inspection = await inspectPdf(await ordinaryFormPdf());
+  assert.equal(inspection.pageCount, 1);
+});
+
+void test('bounds single and cumulative ordinary Flate streams before parsing', async () => {
+  const source = await ordinaryFormPdf();
+  const parsed = await PDFDocument.load(source, { updateMetadata: false });
+  const root = parsed.context.trailerInfo.Root;
+  assert.ok(root instanceof PDFRef);
+  const firstObjectNumber = parsed.context.largestObjectNumber + 1;
+
+  const single = appendCompressedOrdinaryStream(
+    source,
+    root,
+    firstObjectNumber,
+    25 * 1024 * 1024,
+  );
+  assert.ok(single.compressedBytes < 64 * 1024);
+  await assertObjectStreamResourceRejected(single.bytes, 'single Flate budget');
+
+  let cumulative = source;
+  for (let index = 0; index < 5; index += 1) {
+    cumulative = appendCompressedOrdinaryStream(
+      cumulative,
+      root,
+      firstObjectNumber + index,
+      20 * 1024 * 1024,
+    ).bytes;
+  }
+  await assertObjectStreamResourceRejected(
+    cumulative,
+    'cumulative Flate budget',
+  );
+});
+
+void test('rejects unbounded Flate filter chains and stream extents', async () => {
+  const source = await ordinaryFormPdf();
+  const parsed = await PDFDocument.load(source, { updateMetadata: false });
+  const root = parsed.context.trailerInfo.Root;
+  assert.ok(root instanceof PDFRef);
+  const objectNumber = parsed.context.largestObjectNumber + 1;
+  const supportedChain = appendCompressedOrdinaryStream(
+    source,
+    root,
+    objectNumber,
+    1_024,
+    {
+      ascii85: true,
+      filter: '[/ASCII85Decode /FlateDecode]',
+    },
+  );
+  assert.equal((await inspectPdf(supportedChain.bytes)).pageCount, 1);
+
+  const cases = [
+    {
+      label: 'nested filter chain',
+      options: { filter: '[/ASCII85Decode /FlateDecode]' },
+    },
+    {
+      label: 'false direct length',
+      options: { length: '1' },
+    },
+    {
+      label: 'indirect length',
+      options: { length: '999 0 R' },
+    },
+  ] as const;
+
+  for (const { label, options } of cases) {
+    const fixture = appendCompressedOrdinaryStream(
+      source,
+      root,
+      objectNumber,
+      1_024,
+      options,
+    );
+    await assertObjectStreamResourceRejected(fixture.bytes, label);
+  }
 });
 
 void test('fails closed when the final revision boundary cannot be verified', async () => {
