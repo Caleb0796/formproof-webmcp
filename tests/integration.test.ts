@@ -516,6 +516,81 @@ void test('binds data consent and every mutable workflow to one load session', a
   assert.doesNotMatch(workbench, /\binspectPdf\s*\(/u);
 });
 
+void test('delegates upload identity to PDF inspection and renders multiline review values exactly', async () => {
+  const [workbench, styles] = await Promise.all([
+    readFile(
+      new URL('../components/formproof-workbench.tsx', import.meta.url),
+      'utf8',
+    ),
+    readFile(new URL('../app/globals.css', import.meta.url), 'utf8'),
+  ]);
+
+  const uploadStart = workbench.indexOf('const onFileChosen = useCallback(');
+  const uploadEnd = workbench.indexOf(
+    'const onFillPackageChosen = useCallback(',
+    uploadStart,
+  );
+  assert.ok(uploadStart >= 0 && uploadEnd > uploadStart);
+  const upload = workbench.slice(uploadStart, uploadEnd);
+  assert.doesNotMatch(upload, /file\.type|endsWith\(['"]\.pdf['"]\)/u);
+  assert.doesNotMatch(upload, /Choose a PDF file\./u);
+  const sizeCheck = upload.indexOf('file.size > MAX_PDF_BYTES');
+  const reset = upload.indexOf('const generation = beginLoad()');
+  const bytesRead = upload.indexOf('await file.arrayBuffer()');
+  assert.ok(sizeCheck >= 0 && reset > sizeCheck && bytesRead > reset);
+  assert.match(
+    upload,
+    /await loadSource\([\s\S]*?new Uint8Array\(await file\.arrayBuffer\(\)\)[\s\S]*?'upload'/u,
+  );
+  assert.match(workbench, /accept="application\/pdf,\.pdf"/u);
+
+  const loadSourceStart = workbench.indexOf('const loadSource = useCallback(');
+  const loadSourceEnd = workbench.indexOf(
+    'const loadDemo = useCallback(',
+    loadSourceStart,
+  );
+  assert.ok(loadSourceStart >= 0 && loadSourceEnd > loadSourceStart);
+  const loadSource = workbench.slice(loadSourceStart, loadSourceEnd);
+  assert.match(loadSource, /new Worker\(/u);
+  assert.match(loadSource, /worker\.postMessage\(transferableBytes/u);
+
+  const editorStart = workbench.indexOf('function HumanCorrectionEditor(');
+  const editorEnd = workbench.indexOf(
+    'export function FormProofWorkbench()',
+    editorStart,
+  );
+  assert.ok(editorStart >= 0 && editorEnd > editorStart);
+  const editor = workbench.slice(editorStart, editorEnd);
+  assert.match(editor, /field\.type === 'text' && multiline/u);
+  assert.match(editor, /<Textarea[\s\S]*?rows=\{4\}/u);
+  assert.match(editor, /: field\.type === 'text' \? \(\s*<Input/u);
+  assert.equal(editor.match(/maxLength=\{field\.maxLength\}/gu)?.length, 2);
+  assert.match(workbench, /multiline=\{isMultiline\}/u);
+  assert.match(
+    workbench,
+    /className=\{`mini-diff\$\{isMultiline \? ' is-multiline' : ''\}`\}/u,
+  );
+  assert.match(
+    workbench,
+    /className=\{`full-diff\$\{isMultiline \? ' is-multiline' : ''\}`\}/u,
+  );
+
+  const miniMultilineStart = styles.indexOf('.mini-diff.is-multiline span,');
+  const miniMultilineEnd = styles.indexOf('.mini-diff svg', miniMultilineStart);
+  assert.ok(miniMultilineStart >= 0 && miniMultilineEnd > miniMultilineStart);
+  const miniMultiline = styles.slice(miniMultilineStart, miniMultilineEnd);
+  assert.match(miniMultiline, /overflow-wrap: anywhere/u);
+  assert.match(miniMultiline, /white-space: pre-wrap/u);
+  assert.doesNotMatch(miniMultiline, /white-space: nowrap/u);
+
+  const fullMultilineStart = styles.indexOf('.full-diff.is-multiline > span,');
+  const fullMultilineEnd = styles.indexOf('.full-diff svg', fullMultilineStart);
+  assert.ok(fullMultilineStart >= 0 && fullMultilineEnd > fullMultilineStart);
+  const fullMultiline = styles.slice(fullMultilineStart, fullMultilineEnd);
+  assert.match(fullMultiline, /overflow-wrap: anywhere/u);
+  assert.match(fullMultiline, /white-space: pre-wrap/u);
+});
+
 void test('denies framing without constraining the PDF preview or inspection worker', async () => {
   const { default: nextConfig } = (await import(
     new URL('../next.config.ts', import.meta.url).href

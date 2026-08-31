@@ -1341,6 +1341,11 @@ void test('inspects canonical AcroForm fields, widgets, geometry, and policies',
 
   const fields = new Map(inspection.fields.map((field) => [field.name, field]));
   assert.deepEqual([...fields.keys()], Object.values(FIELD));
+  assert.equal(fields.get(FIELD.notes)?.multiline, true);
+  assert.equal(
+    Object.hasOwn(fields.get(FIELD.legalName) ?? {}, 'multiline'),
+    false,
+  );
 
   assert.deepEqual(
     {
@@ -1817,6 +1822,51 @@ void test('applies only approved values to a fresh interactive copy and reopens 
         warning.code === 'SIGNATURE_FIELD_HUMAN_ONLY' &&
         warning.fieldName === FIELD.signature,
     ),
+  );
+});
+
+void test('preflights multiline appearance lines without rewriting the field value', async () => {
+  const source = await demoBytes();
+  const value =
+    'Line one\tindented\nLine two\rLine three\fLine four\vcontinued\u0085spaced\u2028again\u2029done';
+
+  const result = await applyApprovedValues(source, {
+    [FIELD.notes]: value,
+  });
+  const output = await inspectPdf(result.bytes);
+  const reopened = await PDFDocument.load(result.bytes, {
+    updateMetadata: false,
+  });
+
+  assert.equal(
+    output.fields.find(({ name }) => name === FIELD.notes)?.current,
+    value,
+  );
+  assert.equal(reopened.getForm().getTextField(FIELD.notes).getText(), value);
+  assert.equal(
+    result.verifiedFields.find(({ name }) => name === FIELD.notes)
+      ?.normalAppearancePresent,
+    true,
+  );
+});
+
+void test('rejects an unsupported glyph in a multiline display line', async () => {
+  await expectEngineError(
+    applyApprovedValues(await demoBytes(), {
+      [FIELD.notes]: 'Line one\nLine two 🙂',
+    }),
+    'FIELD_GLYPH_UNSUPPORTED',
+    FIELD.notes,
+  );
+});
+
+void test('keeps newlines in single-line text on the unsupported-glyph path', async () => {
+  await expectEngineError(
+    applyApprovedValues(await demoBytes(), {
+      [FIELD.legalName]: 'Line one\nLine two',
+    }),
+    'FIELD_GLYPH_UNSUPPORTED',
+    FIELD.legalName,
   );
 });
 

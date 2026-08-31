@@ -977,6 +977,15 @@ a {
     color: #1d4936;
   }
 
+  .mini-diff.is-multiline span,
+  .mini-diff.is-multiline b {
+    min-width: 0;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: pre-wrap;
+  }
+
   .mini-diff svg {
     width: 11px;
   }
@@ -1179,6 +1188,12 @@ a {
 
   .full-diff b {
     color: #1e5038;
+  }
+
+  .full-diff.is-multiline > span,
+  .full-diff.is-multiline b {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 
   .full-diff svg {

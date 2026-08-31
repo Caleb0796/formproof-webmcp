@@ -827,7 +827,7 @@ void test('discarding a staged proposal invalidates approval and released output
   assert.equal(getReleaseGate(discarded.state).open, false);
 });
 
-void test('pins UI corrections as exact human-authored proposals and clears released workflow state', async () => {
+void test('pins an empty UI correction and clears released workflow state', async () => {
   const source = await createTextFormPdf('legal_name');
   const inspection = await inspectPdf(source);
   const initial = await createFormState(
@@ -884,7 +884,7 @@ void test('pins UI corrections as exact human-authored proposals and clears rele
     expectedSourceHash: released.state.source.sourceHash,
     expectedPlanHash: released.state.planHash,
     fieldName: 'legal_name',
-    value: 'Grace Hopper',
+    value: '',
   });
   assert.equal(corrected.ok, true);
   if (!corrected.ok) throw new Error('human correction failed');
@@ -893,14 +893,45 @@ void test('pins UI corrections as exact human-authored proposals and clears rele
   assert.deepEqual(corrected.changedFields, ['legal_name']);
   assert.deepEqual(corrected.state.draft.legal_name, {
     fieldName: 'legal_name',
-    value: 'Grace Hopper',
+    value: '',
     actor: 'human',
     provenance: { kind: 'human_entry', confidence: 1 },
   });
+  assert.equal(getEffectiveFieldValue(corrected.state, 'legal_name'), '');
+  assert.equal(
+    corrected.state.validation.issues.some(
+      ({ code, fieldName }) =>
+        code === 'required_missing' && fieldName === 'legal_name',
+    ),
+    true,
+  );
   assert.equal(corrected.state.approval, null);
   assert.equal(corrected.state.output, null);
   assert.equal(corrected.state.verification, null);
   assert.equal(Object.isFrozen(corrected.state.draft.legal_name), true);
+
+  const agentOverwrite = await stageFieldUpdates(corrected.state, {
+    expectedStateVersion: corrected.state.stateVersion,
+    expectedSourceHash: corrected.state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'legal_name',
+        value: 'Grace Hopper',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(agentOverwrite.ok, false);
+  if (agentOverwrite.ok) throw new Error('agent replaced a human correction');
+  assert.equal(agentOverwrite.state, corrected.state);
+  assert.equal(
+    agentOverwrite.errors.some(
+      ({ code, fieldName }) =>
+        code === 'human_pinned' && fieldName === 'legal_name',
+    ),
+    true,
+  );
 });
 
 void test('rejects stale or ineligible UI corrections without changing the draft', async () => {

@@ -263,6 +263,7 @@ export interface PdfFieldDescriptor {
   options: string[];
   choices: PdfChoiceDescriptor[];
   multiSelect: boolean;
+  multiline?: boolean;
   required: boolean;
   readOnly: boolean;
   humanOnly: boolean;
@@ -4602,6 +4603,9 @@ function describeField(
     options: choices.map((choice) => choice.value),
     choices,
     multiSelect: fieldAllowsMultiple(field),
+    ...(field instanceof PDFTextField && field.isMultiline()
+      ? { multiline: true }
+      : {}),
     required: field.isRequired(),
     readOnly: field.isReadOnly() || xfaReadOnly,
     humanOnly:
@@ -4966,13 +4970,35 @@ function choiceLabel(descriptor: PdfFieldDescriptor, value: string): string {
   );
 }
 
+function multilineAppearanceTextValues(value: string): string[] {
+  const lines = [''];
+  for (const character of value) {
+    if (
+      character === '\t' ||
+      character === '\u0085' ||
+      character === '\u2028' ||
+      character === '\u2029'
+    ) {
+      lines[lines.length - 1] += '    ';
+    } else if (character === '\u0008' || character === '\u000B') {
+      continue;
+    } else if (character === '\n' || character === '\f' || character === '\r') {
+      lines.push('');
+    } else {
+      lines[lines.length - 1] += character;
+    }
+  }
+  return lines;
+}
+
 function appearanceTextValues(
   field: PDFField,
   descriptor: PdfFieldDescriptor,
   value: ValidatedValue,
 ): string[] {
   if (field instanceof PDFTextField) {
-    return typeof value === 'string' ? [value] : [];
+    if (typeof value !== 'string') return [];
+    return field.isMultiline() ? multilineAppearanceTextValues(value) : [value];
   }
   if (field instanceof PDFOptionList) {
     return descriptor.choices.map((choice) => choice.label);

@@ -43,6 +43,7 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from '@/components/ui/native-select';
+import { Textarea } from '@/components/ui/textarea';
 import {
   approveDraftFromUi,
   correctDraftFieldFromUi,
@@ -367,6 +368,7 @@ function exportStrategyCopy(strategy: PdfExportStrategy): {
 interface HumanCorrectionEditorProps {
   field: Readonly<FormFieldDefinition>;
   choices: readonly { value: string; label: string }[];
+  multiline: boolean;
   initialValue: FormFieldValue;
   disabled: boolean;
   onCancel: () => void;
@@ -376,6 +378,7 @@ interface HumanCorrectionEditorProps {
 function HumanCorrectionEditor({
   field,
   choices,
+  multiline,
   initialValue,
   disabled,
   onCancel,
@@ -395,7 +398,16 @@ function HumanCorrectionEditor({
       <label className="text-xs font-medium" htmlFor={inputId}>
         Corrected value
       </label>
-      {field.type === 'text' ? (
+      {field.type === 'text' && multiline ? (
+        <Textarea
+          id={inputId}
+          value={typeof value === 'string' ? value : ''}
+          maxLength={field.maxLength}
+          rows={4}
+          onChange={(event) => setValue(event.target.value)}
+          disabled={disabled}
+        />
+      ) : field.type === 'text' ? (
         <Input
           id={inputId}
           value={typeof value === 'string' ? value : ''}
@@ -1360,13 +1372,6 @@ export function FormProofWorkbench() {
         setError(
           'Wait for the current review update or verified export to finish before loading a PDF.',
         );
-        return;
-      }
-      if (
-        file.type !== 'application/pdf' &&
-        !file.name.toLowerCase().endsWith('.pdf')
-      ) {
-        setError('Choose a PDF file.');
         return;
       }
       if (file.size > MAX_PDF_BYTES) {
@@ -2484,6 +2489,7 @@ export function FormProofWorkbench() {
               {draftEntries.map((entry) => {
                 const field = formState?.fields[entry.fieldName];
                 const descriptor = descriptorByName.get(entry.fieldName);
+                const isMultiline = descriptor?.multiline === true;
                 const importedProposal = importedProposalSet.has(
                   entry.fieldName,
                 );
@@ -2506,7 +2512,9 @@ export function FormProofWorkbench() {
                               : `${Math.round(entry.provenance.confidence * 100)}%`}
                       </Badge>
                     </div>
-                    <div className="mini-diff">
+                    <div
+                      className={`mini-diff${isMultiline ? ' is-multiline' : ''}`}
+                    >
                       <span>
                         {formatValue(
                           field?.sourceValue ?? null,
@@ -2864,6 +2872,7 @@ export function FormProofWorkbench() {
               const field = formState?.fields[fieldName];
               const staged = formState?.draft[fieldName];
               const descriptor = descriptorByName.get(fieldName);
+              const isMultiline = descriptor?.multiline === true;
               const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
                 descriptor?.choices ?? [],
               );
@@ -2947,7 +2956,9 @@ export function FormProofWorkbench() {
                               : 'FormProof will preserve the existing value and will not rewrite this field.'}
                       </span>
                     ) : (
-                      <span className="full-diff">
+                      <span
+                        className={`full-diff${isMultiline ? ' is-multiline' : ''}`}
+                      >
                         <span>
                           <small>Before</small>
                           {formatValue(
@@ -3016,6 +3027,7 @@ export function FormProofWorkbench() {
                       <HumanCorrectionEditor
                         field={field}
                         choices={descriptor?.choices ?? []}
+                        multiline={isMultiline}
                         initialValue={staged.value}
                         disabled={exporting || reviewMutating}
                         onCancel={() => setCorrectionFieldName(null)}
