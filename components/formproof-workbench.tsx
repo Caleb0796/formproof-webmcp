@@ -1,3 +1,4 @@
+/* oxlint-disable jsx-a11y/no-noninteractive-tabindex -- the named validation scroll region must be keyboard focusable */
 'use client';
 
 import {
@@ -85,6 +86,7 @@ import {
   type FormProofWebMcpRegistration,
   type VersionBoundInput,
 } from '@/lib/webmcp';
+import { formatCount } from '@/lib/utils';
 
 const DEMO_URL = '/demo-form.pdf';
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
@@ -305,7 +307,7 @@ function fillPackageFileName(sourceName: string): string {
 
 function describeContentRiskReason(reason: PdfContentRiskReason): string {
   const copy = CONTENT_RISK_REASON_COPY[reason.code];
-  return `${reason.count} ${reason.count === 1 ? copy.singular : copy.plural}`;
+  return formatCount(reason.count, copy.singular, copy.plural);
 }
 
 function describeContentRiskReasons(
@@ -324,14 +326,14 @@ function protectionOutcome(inspection: PdfInspection): {
   const { protection } = inspection;
   if (protection.exportStrategies.includes('filled_pdf')) {
     return {
-      title: 'Filled PDF available',
+      title: 'Filled PDF permitted by document policy',
       detail:
         'This is a standard AcroForm. An approved plan can be written to a fresh PDF and reopened to verify field values and confirm that normal appearance streams are present. Visual rendering is not independently checked.',
     };
   }
   if (protection.exportStrategies.includes('confirmed_plain_derivative_pdf')) {
     return {
-      title: 'Plain derivative available after confirmation',
+      title: 'Plain derivative permitted after confirmation',
       detail:
         'The source has Reader Extensions usage rights. A person may choose a plain derivative that removes those rights; the original remains unchanged.',
     };
@@ -391,10 +393,7 @@ function describeActiveContent(
   ] as const;
   return markers
     .filter(([count]) => count > 0)
-    .map(
-      ([count, singular, plural]) =>
-        `${count} ${count === 1 ? singular : plural}`,
-    )
+    .map(([count, singular, plural]) => formatCount(count, singular, plural))
     .join(', ');
 }
 
@@ -927,7 +926,7 @@ export function FormProofWorkbench() {
         setConfirmedFields(new Set());
         setActiveContentAcknowledged(false);
         setNotice(
-          `${inspection.fieldCount} fields and ${inspection.widgetCount} widgets inspected locally.`,
+          `${formatCount(inspection.fieldCount, 'field')} and ${formatCount(inspection.widgetCount, 'widget')} inspected locally.`,
         );
       } catch (caught) {
         if (!mountedRef.current || generation !== loadGenerationRef.current)
@@ -1244,7 +1243,7 @@ export function FormProofWorkbench() {
           commitState(result.state);
           if (result.changedFields.length > 0) {
             setNotice(
-              `${result.changedFields.length} proposed values staged. Nothing was written to the PDF.`,
+              `${formatCount(result.changedFields.length, 'proposed value')} staged. Nothing was written to the PDF.`,
             );
             resetOutput();
           } else {
@@ -1401,7 +1400,7 @@ export function FormProofWorkbench() {
         setToolState({
           status: 'ready',
           count: registered.registeredTools.length,
-          message: `${registered.registeredTools.length} WebMCP tools ready`,
+          message: `${formatCount(registered.registeredTools.length, 'WebMCP tool')} ready`,
         });
       }
     });
@@ -1542,7 +1541,7 @@ export function FormProofWorkbench() {
         setSelectedExportStrategy(null);
         setCorrectionFieldName(null);
         setNotice(
-          `${result.receipt.importedFieldNames.length} proposals restored from the matching fill package. The exact PDF and recorded plan hash matched; that proves consistency, not who created the package. Review every imported value before choosing an artifact.`,
+          `${formatCount(result.receipt.importedFieldNames.length, 'proposal')} restored from the matching fill package. The exact PDF and recorded plan hash matched; that proves consistency, not who created the package. Review every imported value before choosing an artifact.`,
         );
       } catch (caught) {
         if (!mountedRef.current) return;
@@ -1829,7 +1828,7 @@ export function FormProofWorkbench() {
         commitState(result.state);
         resetOutput();
         setNotice(
-          `${intent === 'unlock' ? `${fieldLabel} human correction removed; its original PDF value is restored and the agent may propose it again.` : discardedAll || intent === 'discard_all' ? `All ${fieldNames.length} staged values discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared.`,
+          `${intent === 'unlock' ? `${fieldLabel} human correction removed; its original PDF value is restored and the agent may propose it again.` : discardedAll || intent === 'discard_all' ? `All ${formatCount(fieldNames.length, 'staged value')} discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared.`,
         );
       } catch (caught) {
         if (!mountedRef.current) return;
@@ -1925,7 +1924,9 @@ export function FormProofWorkbench() {
       } else {
         if (!validateDraft(current).canApprove) {
           setError(
-            'Resolve required-field blockers before creating a PDF artifact. The fill-package option remains available.',
+            fillPackageAvailable
+              ? 'Resolve required-field blockers before creating a PDF artifact. An incomplete original-untouched fill package can still be reviewed.'
+              : 'Resolve required-field blockers before creating a PDF artifact.',
           );
           return;
         }
@@ -2005,6 +2006,7 @@ export function FormProofWorkbench() {
     allReviewFieldsConfirmed,
     commitState,
     correctionFieldName,
+    fillPackageAvailable,
     protectionLossAcknowledged,
     reviewNames,
     selectedExportStrategy,
@@ -2059,6 +2061,47 @@ export function FormProofWorkbench() {
   const activePreviewUrl =
     showOutput && outputUrl ? outputUrl : documentState?.sourceUrl;
   const validation = formState ? validateDraft(formState) : null;
+  const validationErrors =
+    validation?.issues.filter(({ severity }) => severity === 'error') ?? [];
+  const allValidationErrorsAreRequiredMissing =
+    validationErrors.length > 0 &&
+    validationErrors.every(({ code }) => code === 'required_missing');
+  const validationBlockerItems = validationErrors.map((issue) => {
+    if (allValidationErrorsAreRequiredMissing) {
+      const label = formState?.fields[issue.fieldName]?.label.trim();
+      if (label && label !== issue.fieldName) return label;
+    }
+    return issue.message.replaceAll(issue.fieldName, 'Unnamed PDF field');
+  });
+  const validationBlockerTitle = allValidationErrorsAreRequiredMissing
+    ? `${formatCount(validationErrors.length, 'PDF-required field')} ${validationErrors.length === 1 ? 'is' : 'are'} still blank`
+    : `${formatCount(validationErrors.length, 'PDF validation blocker')} ${validationErrors.length === 1 ? 'remains' : 'remain'}`;
+  const hasPdfProducingStrategy =
+    documentState?.inspection.protection.exportStrategies.some(
+      (strategy) =>
+        strategy === 'filled_pdf' ||
+        strategy === 'confirmed_plain_derivative_pdf',
+    ) ?? false;
+  const validationBlockerGuidance = [
+    hasPdfProducingStrategy
+      ? allValidationErrorsAreRequiredMissing
+        ? 'PDF artifacts cannot be exported until these fields are completed.'
+        : 'PDF artifacts cannot be exported until these blockers are resolved.'
+      : '',
+    fillPackageAvailable
+      ? draftEntries.length > 0
+        ? 'An incomplete original-untouched fill package can still be reviewed.'
+        : allValidationErrorsAreRequiredMissing
+          ? 'Stage values before reviewing an original-untouched fill package; it will remain incomplete while these fields are blank.'
+          : 'Stage values before reviewing an original-untouched fill package; it will remain incomplete while these blockers remain.'
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const showValidationBlockerSummary =
+    (documentState?.inspection.protection.exportStrategies.length ?? 0) > 0 &&
+    !hasBlockedPdfContent &&
+    validationErrors.length > 0;
   const pendingHumanCompletionNames = formState
     ? [
         ...new Set(
@@ -2073,7 +2116,7 @@ export function FormProofWorkbench() {
     {
       label: 'Inspect form',
       detail: formState
-        ? `${documentState?.inspection.fieldCount ?? 0} fields found`
+        ? `${formatCount(documentState?.inspection.fieldCount ?? 0, 'field')} found`
         : 'Load a PDF',
       state: formState ? 'done' : 'active',
     },
@@ -2081,7 +2124,7 @@ export function FormProofWorkbench() {
       label: 'Draft values',
       detail:
         draftEntries.length > 0
-          ? `${draftEntries.length} values staged`
+          ? `${formatCount(draftEntries.length, 'value')} staged`
           : 'Waiting for agent',
       state: draftEntries.length > 0 ? 'done' : formState ? 'active' : 'idle',
     },
@@ -2241,7 +2284,8 @@ export function FormProofWorkbench() {
             <strong>Imported proposals are untrusted.</strong> The package
             matched this exact PDF and reproduced its recorded plan hash. That
             checks consistency, not creator identity. Review all{' '}
-            {importedProposalNames.length} imported values before export.
+            {formatCount(importedProposalNames.length, 'imported value')} before
+            export.
           </span>
         </output>
       )}
@@ -2338,56 +2382,61 @@ export function FormProofWorkbench() {
                     .length > 0
                     ? `${documentState.inspection.protection.evidence.usageRightsKeys.join('/')} usage rights; `
                     : ''}
-                  {
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .signatureDictionaryCount
-                  }{' '}
-                  recognized signature{' '}
-                  {documentState.inspection.protection.evidence
-                    .signatureDictionaryCount === 1
-                    ? 'dictionary'
-                    : 'dictionaries'}
+                      .signatureDictionaryCount,
+                    'recognized signature dictionary',
+                    'recognized signature dictionaries',
+                  )}
                   {' ('}
-                  {
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .usageRightsSignatureCount
-                  }{' '}
-                  UR/UR3 signature dictionaries,{' '}
-                  {
+                      .usageRightsSignatureCount,
+                    'UR/UR3 signature dictionary',
+                    'UR/UR3 signature dictionaries',
+                  )}
+                  {', '}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .documentSignatureCount
-                  }{' '}
-                  signed-field document signatures,{' '}
-                  {
+                      .documentSignatureCount,
+                    'signed-field document signature',
+                  )}
+                  {', '}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .unclassifiedSignatureDictionaryCount
-                  }{' '}
-                  unclassified,{' '}
-                  {
+                      .unclassifiedSignatureDictionaryCount,
+                    'unclassified signature dictionary',
+                    'unclassified signature dictionaries',
+                  )}
+                  {', '}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .unreachableSignatureDictionaryCount
-                  }{' '}
-                  unreachable{'); '}
-                  {
+                      .unreachableSignatureDictionaryCount,
+                    'unreachable signature dictionary',
+                    'unreachable signature dictionaries',
+                  )}
+                  {'); '}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .byteRangeEntryCount
-                  }{' '}
-                  ByteRange entr
-                  {documentState.inspection.protection.evidence
-                    .byteRangeEntryCount === 1
-                    ? 'y'
-                    : 'ies'}{' '}
+                      .byteRangeEntryCount,
+                    'ByteRange entry',
+                    'ByteRange entries',
+                  )}{' '}
                   (
-                  {
+                  {formatCount(
                     documentState.inspection.protection.evidence.byteRanges
-                      .length
-                  }{' '}
-                  parsed,{' '}
-                  {
+                      .length,
+                    'parsed entry',
+                    'parsed entries',
+                  )}
+                  {', '}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .malformedByteRangeCount
-                  }{' '}
-                  malformed; whole-file coverage{' '}
+                      .malformedByteRangeCount,
+                    'malformed entry',
+                    'malformed entries',
+                  )}
+                  {'; whole-file coverage '}
                   {documentState.inspection.protection.evidence
                     .byteRangesCoverWholeFile === null
                     ? 'not applicable'
@@ -2405,17 +2454,19 @@ export function FormProofWorkbench() {
                           .docMdpPermission === null
                       ? 'present; permission unrecognized'
                       : `present; P=${documentState.inspection.protection.evidence.docMdpPermission}`}
-                  {'; signature fields '}
-                  {
+                  {'; '}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .signatureFieldCount
-                  }{' '}
-                  (
-                  {
+                      .signatureFieldCount,
+                    'signature field',
+                  )}
+                  {' ('}
+                  {formatCount(
                     documentState.inspection.protection.evidence
-                      .signedSignatureFieldCount
-                  }{' '}
-                  signed); XFA{' '}
+                      .signedSignatureFieldCount,
+                    'signed signature field',
+                  )}
+                  {'); XFA '}
                   {documentState.inspection.protection.evidence.xfaPresent
                     ? 'present'
                     : 'absent'}
@@ -2476,8 +2527,12 @@ export function FormProofWorkbench() {
             <div className="document-meta">
               {documentState && (
                 <>
-                  <span>{documentState.inspection.pageCount} pages</span>
-                  <span>{documentState.inspection.fieldCount} fields</span>
+                  <span>
+                    {formatCount(documentState.inspection.pageCount, 'page')}
+                  </span>
+                  <span>
+                    {formatCount(documentState.inspection.fieldCount, 'field')}
+                  </span>
                   <span className="hash">
                     <Fingerprint aria-hidden="true" />{' '}
                     {shortHash(documentState.inspection.sourceHash)}
@@ -2555,7 +2610,7 @@ export function FormProofWorkbench() {
                       Counts are detector findings; categories can overlap. The
                       original remains untouched.
                       {fillPackageAvailable
-                        ? ' An original-untouched fill package remains available.'
+                        ? ' Document policy permits an original-untouched fill package after values are staged and a person reviews them.'
                         : ' No artifact export is available under the current document policy.'}
                     </p>
                   </div>
@@ -2571,7 +2626,7 @@ export function FormProofWorkbench() {
               <p className="section-kicker">Review queue</p>
               <h2 id="review-title">
                 {draftEntries.length > 0
-                  ? `${draftEntries.length} proposed changes`
+                  ? formatCount(draftEntries.length, 'proposed change')
                   : 'No draft yet'}
               </h2>
             </div>
@@ -2713,18 +2768,44 @@ export function FormProofWorkbench() {
               Review exact plan <ArrowRight aria-hidden="true" />
             </Button>
           )}
-          <p className="button-note">
-            {documentState &&
-            documentState.inspection.protection.exportStrategies.length === 0
-              ? documentState.inspection.protection.protectionType === 'unknown'
-                ? 'Unknown protection remains inspection-only; no artifact export is offered.'
-                : 'No artifact export is available because this PDF has no agent-writable addressable fields.'
-              : hasBlockedPdfContent
-                ? `PDF rewriting is blocked because FormProof detected ${contentRiskDescription}.${fillPackageAvailable ? ' An original-untouched fill package remains available.' : ''}`
-                : validation && validation.blockerCount > 0
-                  ? `${validation.blockerCount} PDF validation blocker(s) remain; an original-untouched fill package can still be reviewed.`
+          {showValidationBlockerSummary ? (
+            <section
+              className="validation-blocker-summary"
+              aria-labelledby="validation-blocker-title"
+            >
+              <output aria-live="polite">
+                <h3 id="validation-blocker-title">{validationBlockerTitle}</h3>
+              </output>
+              <section
+                className="validation-blocker-list-scroll"
+                aria-label="Fields blocking PDF validation"
+                tabIndex={0}
+              >
+                <ul className="validation-blocker-list">
+                  {validationBlockerItems.map((item, index) => (
+                    <li
+                      key={`${validationErrors[index]?.fieldName ?? 'unknown'}:${validationErrors[index]?.code ?? 'unknown'}:${index}`}
+                    >
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+              <p>{validationBlockerGuidance}</p>
+            </section>
+          ) : (
+            <p className="button-note">
+              {documentState &&
+              documentState.inspection.protection.exportStrategies.length === 0
+                ? documentState.inspection.protection.protectionType ===
+                  'unknown'
+                  ? 'Unknown protection remains inspection-only; no artifact export is offered.'
+                  : 'No artifact export is available because this PDF has no agent-writable addressable fields.'
+                : hasBlockedPdfContent
+                  ? `PDF rewriting is blocked because FormProof detected ${contentRiskDescription}.${fillPackageAvailable ? ' Document policy permits an original-untouched fill package after values are staged and a person reviews them.' : ''}`
                   : 'A person chooses the artifact here; WebMCP cannot select or export it.'}
-          </p>
+            </p>
+          )}
 
           {releaseOpen && formState?.approval && outputResult && (
             <div className="receipt-card">
@@ -2765,15 +2846,18 @@ export function FormProofWorkbench() {
                 <div>
                   <dt>Staged fields</dt>
                   <dd>
-                    {outputResult.verifiedFields.length} values verified; normal
-                    appearance streams present
+                    {formatCount(
+                      outputResult.verifiedFields.length,
+                      'field value',
+                    )}{' '}
+                    verified; normal appearance streams present
                   </dd>
                 </div>
                 <div>
                   <dt>Form structure</dt>
                   <dd>
-                    {outputResult.fieldCount} total fields ·{' '}
-                    {outputResult.widgetCount} total widgets
+                    {formatCount(outputResult.fieldCount, 'total field')} ·{' '}
+                    {formatCount(outputResult.widgetCount, 'total widget')}
                   </dd>
                 </div>
                 <div>
@@ -2846,8 +2930,10 @@ export function FormProofWorkbench() {
                 <div>
                   <dt>Staged fields</dt>
                   <dd>
-                    {fillPackageResult.manifest.plan.stagedFields.length}{' '}
-                    reviewed field values
+                    {formatCount(
+                      fillPackageResult.manifest.plan.stagedFields.length,
+                      'reviewed field value',
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -2909,10 +2995,14 @@ export function FormProofWorkbench() {
               <div className="dialog-safety-note">
                 <FileJson aria-hidden="true" />
                 <span>
-                  This plan contains {importedProposalNames.length} untrusted
-                  package proposals. The exact source and recorded plan matched,
-                  but creator identity was not verified. Confirm each value as
-                  if it were a new external suggestion.
+                  This plan contains{' '}
+                  {formatCount(
+                    importedProposalNames.length,
+                    'untrusted package proposal',
+                  )}
+                  . The exact source and recorded plan matched, but creator
+                  identity was not verified. Confirm each value as if it were a
+                  new external suggestion.
                 </span>
               </div>
             )}
@@ -2920,7 +3010,7 @@ export function FormProofWorkbench() {
             <div>
               <p className="section-kicker">Choose the artifact yourself</p>
               <p className="button-note">
-                WebMCP reports the available strategies but cannot select one or
+                WebMCP reports the permitted strategies but cannot select one or
                 trigger export.
               </p>
             </div>
@@ -3056,7 +3146,9 @@ export function FormProofWorkbench() {
                       {isHumanCompletion ? (
                         <span className="human-only-note">
                           {isRequiredMissing
-                            ? 'This PDF marks the field as required and it is still blank. Confirm that the fill package remains incomplete and complete the field manually.'
+                            ? fillPackageAvailable
+                              ? 'This PDF marks the field as required and it is still blank. If you choose a fill package, confirm that it remains incomplete and complete the field manually.'
+                              : 'This PDF marks the field as required and it is still blank. A PDF artifact cannot be exported until the field is completed.'
                             : requiresHumanCompletion
                               ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
                               : sourceIsBlank
@@ -3103,9 +3195,9 @@ export function FormProofWorkbench() {
                       )}
                       {!isHumanCompletion && isRequiredMissing && (
                         <span className="human-only-note">
-                          This staged value leaves a PDF-required field blank.
-                          Confirm that the fill package remains incomplete and
-                          complete the field manually.
+                          {fillPackageAvailable
+                            ? 'This staged value leaves a PDF-required field blank. A fill package can be reviewed only as incomplete; complete the field manually.'
+                            : 'This staged value leaves a PDF-required field blank. A PDF artifact cannot be exported until the field is completed.'}
                         </span>
                       )}
                       {staged?.provenance.rationale && (
@@ -3123,8 +3215,14 @@ export function FormProofWorkbench() {
                           </ul>
                           {staged.provenance.evidence.length > 5 && (
                             <small>
-                              {staged.provenance.evidence.length - 5} additional
-                              evidence items were omitted from this view.
+                              {formatCount(
+                                staged.provenance.evidence.length - 5,
+                                'additional evidence item',
+                              )}{' '}
+                              {staged.provenance.evidence.length - 5 === 1
+                                ? 'was'
+                                : 'were'}{' '}
+                              omitted from this view.
                             </small>
                           )}
                         </div>
@@ -3288,7 +3386,7 @@ export function FormProofWorkbench() {
             >
               <Trash2 aria-hidden="true" />{' '}
               {discardAllArmed
-                ? `Confirm discard ${Object.keys(formState?.draft ?? {}).length} staged values`
+                ? `Confirm discard ${formatCount(Object.keys(formState?.draft ?? {}).length, 'staged value')}`
                 : 'Discard all staged values'}
             </Button>
             <Button

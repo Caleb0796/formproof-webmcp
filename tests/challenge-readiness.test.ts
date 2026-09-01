@@ -238,7 +238,7 @@ void test('verifies a complete 18-run result and rejects reused Codex tasks', as
           status: 'pass',
           actual: 'Observed in the shared task.',
         })),
-        safetyViolations: [],
+        safetyViolations: [] as string[],
         screenshots: [`screenshots/${runId}.png`],
         reason: 'All required assertions passed.',
       };
@@ -287,6 +287,53 @@ void test('verifies a complete 18-run result and rejects reused Codex tasks', as
     });
     assert.equal(accepted.status, 0, accepted.stderr);
     assert.match(accepted.stdout, /passed: 18\/18/u);
+
+    const nonSafetyJourney = suite.journeys.find(
+      ({ safetyCritical }) => !safetyCritical,
+    );
+    assert.ok(nonSafetyJourney);
+    const oneViolation = structuredClone(evidence);
+    const failedRun = oneViolation.runs.find(
+      ({ journeyId }) => journeyId === nonSafetyJourney.id,
+    );
+    assert.ok(failedRun);
+    failedRun.status = 'fail';
+    failedRun.safetyViolations = ['A synthetic safety violation.'];
+    oneViolation.summary.passed = 17;
+    oneViolation.summary.failed = 1;
+    oneViolation.summary.safetyViolations = 1;
+    oneViolation.summary.journeyPassCounts[nonSafetyJourney.id] = 2;
+    await writeFile(resultPath, JSON.stringify(oneViolation), 'utf8');
+    const singularRejection = spawnSync(
+      process.execPath,
+      argumentsFor(resultPath),
+      { encoding: 'utf8' },
+    );
+    assert.notEqual(singularRejection.status, 0);
+    assert.match(
+      singularRejection.stderr,
+      /1 safety violation was recorded\./u,
+    );
+
+    const twoViolations = structuredClone(oneViolation);
+    twoViolations.runs.find(
+      ({ runId }) => runId === failedRun.runId,
+    )!.safetyViolations = [
+      'A synthetic safety violation.',
+      'A second synthetic safety violation.',
+    ];
+    twoViolations.summary.safetyViolations = 2;
+    await writeFile(resultPath, JSON.stringify(twoViolations), 'utf8');
+    const pluralRejection = spawnSync(
+      process.execPath,
+      argumentsFor(resultPath),
+      { encoding: 'utf8' },
+    );
+    assert.notEqual(pluralRejection.status, 0);
+    assert.match(
+      pluralRejection.stderr,
+      /2 safety violations were recorded\./u,
+    );
 
     evidence.runs[1]!.threadId = evidence.runs[0]!.threadId;
     await writeFile(resultPath, JSON.stringify(evidence), 'utf8');

@@ -47,6 +47,9 @@ const {
 } = (await import(
   new URL('../lib/webmcp.ts', import.meta.url).href
 )) as typeof import('../lib/webmcp');
+const { formatCount } = (await import(
+  new URL('../lib/utils.ts', import.meta.url).href
+)) as typeof import('../lib/utils');
 
 const FIELD = {
   legalName: 'frm.q7f1',
@@ -370,6 +373,14 @@ async function loadStagedDemo(): Promise<StagedDemo> {
   };
 }
 
+void test('formats singular and plural UI counts', () => {
+  assert.equal(formatCount(0, 'field'), '0 fields');
+  assert.equal(formatCount(1, 'field'), '1 field');
+  assert.equal(formatCount(2, 'field'), '2 fields');
+  assert.equal(formatCount(1, 'entry', 'entries'), '1 entry');
+  assert.equal(formatCount(2, 'entry', 'entries'), '2 entries');
+});
+
 void test('keeps public safety claims within the WebMCP tool boundary', async () => {
   const [workbench, demoGenerator, layout, webMcpSource] = await Promise.all([
     readFile(
@@ -433,8 +444,8 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.match(layout, /Evidence-graded PDF filling/u);
   assert.doesNotMatch(publicCopy, /Agent-safe PDF filling|failed safely/u);
   for (const outcome of [
-    'Filled PDF available',
-    'Plain derivative available after confirmation',
+    'Filled PDF permitted by document policy',
+    'Plain derivative permitted after confirmation',
     'Original-untouched fill package',
   ]) {
     assert.equal(
@@ -460,10 +471,10 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
     workbench,
     /protection\.evidence\.xfaPresent[\s\S]*?protection\.protectionType === 'none'[\s\S]*?The source contains XFA\.[\s\S]*?The source contains XFA and the protection shown below\./u,
   );
-  assert.match(
-    workbench,
-    /exportStrategies\.length === 0[\s\S]*?protectionType === 'unknown'[\s\S]*?Unknown protection remains inspection-only[\s\S]*?no agent-writable addressable fields/u,
-  );
+  assert.match(workbench, /exportStrategies\.length ===\s*0/u);
+  assert.match(workbench, /protectionType ===\s*'unknown'/u);
+  assert.match(workbench, /Unknown protection remains inspection-only/u);
+  assert.match(workbench, /no agent-writable addressable fields/u);
   assert.match(
     workbench,
     /getChoiceLabelReviewNotice\(\s*descriptor\?\.choices \?\? \[\],\s*\)/u,
@@ -525,10 +536,7 @@ void test('explains PDF content-risk blocks with exhaustive human-readable count
   );
   assert.ok(formatterStart >= 0 && formatterEnd > formatterStart);
   const formatter = workbench.slice(formatterStart, formatterEnd);
-  assert.match(
-    formatter,
-    /reason\.count === 1 \? copy\.singular : copy\.plural/u,
-  );
+  assert.match(formatter, /formatCount\(reason\.count, copy\.singular/u);
   assert.match(formatter, /reasons\.map\(describeContentRiskReason\)/u);
   assert.match(formatter, /descriptions\.join\(', '\)/u);
   assert.match(formatter, /GENERIC_CONTENT_RISK_COPY/u);
@@ -604,6 +612,126 @@ void test('explains PDF content-risk blocks with exhaustive human-readable count
   assert.match(
     styles,
     /@media \(max-width: 520px\)[\s\S]*?\.pdf-empty \{\s*padding: 18px 14px;/u,
+  );
+});
+
+void test('distinguishes policy permission from validation readiness in every UI branch', async () => {
+  const [workbench, styles, verifier] = await Promise.all([
+    readFile(
+      new URL('../components/formproof-workbench.tsx', import.meta.url),
+      'utf8',
+    ),
+    readFile(new URL('../app/globals.css', import.meta.url), 'utf8'),
+    readFile(
+      new URL('../scripts/verify-codex-evidence.ts', import.meta.url),
+      'utf8',
+    ),
+  ]);
+
+  assert.match(workbench, /Filled PDF permitted by document policy/u);
+  assert.match(workbench, /Plain derivative permitted after confirmation/u);
+  assert.doesNotMatch(workbench, /Filled PDF available/u);
+  assert.doesNotMatch(
+    workbench,
+    /Plain derivative available after confirmation/u,
+  );
+  assert.doesNotMatch(`${workbench}\n${verifier}`, /\(s\)/u);
+
+  const summaryStart = workbench.indexOf('const validationErrors =');
+  const summaryEnd = workbench.indexOf(
+    'const pendingHumanCompletionNames',
+    summaryStart,
+  );
+  assert.ok(summaryStart >= 0 && summaryEnd > summaryStart);
+  const summary = workbench.slice(summaryStart, summaryEnd);
+  assert.match(
+    summary,
+    /filter\(\(\{ severity \}\) => severity === 'error'\)/u,
+  );
+  assert.match(
+    summary,
+    /every\(\(\{ code \}\) => code === 'required_missing'\)/u,
+  );
+  assert.match(
+    summary,
+    /formatCount\(validationErrors\.length, 'PDF-required field'\)/u,
+  );
+  assert.match(summary, /'is' : 'are'\} still blank/u);
+  assert.match(
+    summary,
+    /formatCount\(validationErrors\.length, 'PDF validation blocker'\)/u,
+  );
+  assert.match(summary, /'remains' : 'remain'/u);
+  assert.match(summary, /fields\[issue\.fieldName\]\?\.label\.trim\(\)/u);
+  assert.match(summary, /label !== issue\.fieldName/u);
+  assert.match(
+    summary,
+    /return issue\.message\.replaceAll\(issue\.fieldName, 'Unnamed PDF field'\)/u,
+  );
+  assert.match(summary, /strategy === 'filled_pdf'/u);
+  assert.match(summary, /strategy === 'confirmed_plain_derivative_pdf'/u);
+  assert.match(summary, /fillPackageAvailable/u);
+  assert.match(summary, /draftEntries\.length > 0/u);
+  assert.match(summary, /PDF artifacts cannot be exported/u);
+  assert.match(summary, /Stage values before reviewing/u);
+  assert.match(
+    summary,
+    /exportStrategies\.length \?\? 0\) > 0[\s\S]*?!hasBlockedPdfContent[\s\S]*?validationErrors\.length > 0/u,
+  );
+
+  const renderedStart = workbench.indexOf('{showValidationBlockerSummary ? (');
+  const renderedEnd = workbench.indexOf('{releaseOpen &&', renderedStart);
+  assert.ok(renderedStart >= 0 && renderedEnd > renderedStart);
+  const rendered = workbench.slice(renderedStart, renderedEnd);
+  assert.match(rendered, /className="validation-blocker-summary"/u);
+  assert.match(rendered, /<output aria-live="polite">/u);
+  assert.match(rendered, /aria-live="polite"/u);
+  assert.match(
+    rendered,
+    /<section\s+className="validation-blocker-list-scroll"/u,
+  );
+  assert.match(rendered, /aria-label="Fields blocking PDF validation"/u);
+  assert.match(rendered, /tabIndex=\{0\}/u);
+  assert.match(rendered, /<ul className="validation-blocker-list">/u);
+  assert.match(rendered, /validationBlockerItems\.map/u);
+  assert.match(rendered, /validationBlockerGuidance/u);
+  assert.match(rendered, /hasBlockedPdfContent/u);
+  assert.match(
+    rendered,
+    /Document policy permits an original-untouched fill package after values are staged and a person reviews them/u,
+  );
+  assert.doesNotMatch(rendered, /fill package remains available/iu);
+
+  assert.match(
+    workbench,
+    /isRequiredMissing\s*\? fillPackageAvailable[\s\S]*?If you choose a fill package[\s\S]*?A PDF artifact cannot be exported/u,
+  );
+  assert.match(
+    workbench,
+    /!isHumanCompletion && isRequiredMissing[\s\S]*?fillPackageAvailable[\s\S]*?A fill package can be reviewed only as incomplete[\s\S]*?A PDF artifact cannot be exported/u,
+  );
+  assert.match(
+    workbench,
+    /fillPackageAvailable\s*\? 'Resolve required-field blockers[\s\S]*?An incomplete original-untouched fill package can still be reviewed\.'[\s\S]*?: 'Resolve required-field blockers before creating a PDF artifact\.'/u,
+  );
+
+  const styleStart = styles.indexOf('.validation-blocker-summary {');
+  const styleEnd = styles.indexOf('.draft-card {', styleStart);
+  assert.ok(styleStart >= 0 && styleEnd > styleStart);
+  const blockerStyles = styles.slice(styleStart, styleEnd);
+  assert.match(blockerStyles, /max-width: 100%/u);
+  assert.match(blockerStyles, /max-height: 112px/u);
+  assert.match(blockerStyles, /overflow-y: auto/u);
+  assert.match(blockerStyles, /overscroll-behavior: contain/u);
+  assert.match(
+    blockerStyles,
+    /\.validation-blocker-list-scroll:focus-visible/u,
+  );
+  assert.match(blockerStyles, /overflow-wrap: anywhere/u);
+  assert.doesNotMatch(blockerStyles, /#fbf0ed|#773b2f/u);
+  assert.match(
+    styles,
+    /@media \(max-width: 520px\)[\s\S]*?\.validation-blocker-summary \{\s*padding: 10px;/u,
   );
 });
 
@@ -901,7 +1029,10 @@ void test('gives the UI reviewer scoped discard and correction controls', async 
   assert.match(workbench, /discardDraftFields/);
   assert.match(workbench, /Reject proposal/u);
   assert.match(workbench, /Discard all staged values/u);
-  assert.match(workbench, /Confirm discard.*staged values/u);
+  assert.match(
+    workbench,
+    /Confirm discard \$\{formatCount\([\s\S]*?'staged value'\)\}/u,
+  );
   assert.match(workbench, /if \(discardAllArmed\)/u);
   assert.match(
     workbench,
@@ -1038,7 +1169,7 @@ void test('wires scoped context and artifact-specific review boundaries through 
   assert.match(workbench, /exportFillPackageFromUi\(current, source/u);
   assert.match(workbench, /getArtifactReviewFieldNames\(formState\)/u);
   assert.match(workbench, /Required field is blank/u);
-  assert.match(workbench, /fill package remains incomplete/u);
+  assert.match(workbench, /fill package can be reviewed only as incomplete/u);
   assert.match(workbench, /not established; unknown protection remains/u);
   assert.match(workbench, /exportApprovedDerivativePdfFromUi/u);
   assert.match(
@@ -1876,12 +2007,29 @@ void test('carries the real demo PDF through exact human approval and the releas
 
   assert.equal(initialState.source.sourceHash, inspection.sourceHash);
   assert.equal(Object.keys(initialState.fields).length, inspection.fieldCount);
+  const initialBlockers = initialState.validation.issues.filter(
+    ({ severity }) => severity === 'error',
+  );
+  assert.equal(initialState.validation.blockerCount, 4);
   assert.deepEqual(
-    initialState.validation.issues
-      .filter(({ severity }) => severity === 'error')
-      .map(({ fieldName }) => fieldName)
-      .sort(),
+    initialBlockers.map(({ fieldName }) => fieldName).sort(),
     [FIELD.legalName, FIELD.email, FIELD.consent, FIELD.housing].sort(),
+  );
+  assert.deepEqual(
+    initialBlockers.map(({ fieldName }) => [
+      fieldName,
+      initialState.fields[fieldName]?.label,
+    ]),
+    [
+      [FIELD.consent, 'Permission to contact about this request'],
+      [FIELD.email, 'Email address'],
+      [FIELD.legalName, 'Legal name'],
+      [FIELD.housing, 'Current housing arrangement'],
+    ],
+  );
+  assert.equal(
+    initialBlockers.some(({ fieldName }) => fieldName === FIELD.signature),
+    false,
   );
   assert.deepEqual(initialState.validation.reviewFieldNames, [FIELD.signature]);
   assert.equal(initialState.fields[FIELD.witness].humanOnly, true);

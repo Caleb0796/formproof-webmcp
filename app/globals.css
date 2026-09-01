@@ -927,6 +927,73 @@ a {
     padding-right: 3px;
   }
 
+  .validation-blocker-summary {
+    display: grid;
+    min-width: 0;
+    max-width: 100%;
+    gap: 7px;
+    margin-top: 8px;
+    overflow: hidden;
+    border: 1px solid #d5ded8;
+    border-radius: 12px;
+    padding: 11px 12px;
+    color: #43564b;
+    background: #f6f8f5;
+    text-align: left;
+  }
+
+  .validation-blocker-summary h3,
+  .validation-blocker-summary p {
+    margin: 0;
+  }
+
+  .validation-blocker-summary output {
+    display: block;
+  }
+
+  .validation-blocker-summary h3 {
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+
+  .validation-blocker-summary p {
+    color: #68766e;
+    font-size: 9px;
+    line-height: 1.5;
+  }
+
+  .validation-blocker-list-scroll {
+    min-width: 0;
+    max-width: 100%;
+    max-height: 112px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .validation-blocker-list-scroll:focus-visible {
+    border-radius: 5px;
+    outline: 2px solid #6f9a81;
+    outline-offset: 2px;
+  }
+
+  .validation-blocker-list {
+    display: grid;
+    min-width: 0;
+    max-width: 100%;
+    gap: 4px;
+    margin: 0;
+    padding: 1px 4px 1px 18px;
+  }
+
+  .validation-blocker-list li {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: #53645b;
+    font-size: 9px;
+    line-height: 1.45;
+  }
+
   .draft-card {
     border: 1px solid #d7ded9;
     border-radius: 12px;
@@ -1369,6 +1436,10 @@ a {
 
   .pdf-empty {
     padding: 18px 14px;
+  }
+
+  .validation-blocker-summary {
+    padding: 10px;
   }
 
   .full-diff {

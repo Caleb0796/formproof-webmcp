@@ -167,7 +167,7 @@ void test('attaches bounded XFA semantics by exact SOM name without changing the
     inspection.warnings.find(
       ({ code }) => code === 'XFA_PRESENT_INSPECTION_ONLY',
     )?.message ?? '',
-    /1 of 1 AcroForm fallback fields/u,
+    /1 of 1 AcroForm fallback field only/u,
   );
 
   await assert.rejects(
@@ -639,7 +639,7 @@ void test('uses static XFA captions only for an exact radio SOM and complete exp
     inspection.warnings.find(
       ({ code }) => code === 'XFA_PRESENT_INSPECTION_ONLY',
     )?.message ?? '',
-    /bounded static captions were recovered for 1 radio groups/u,
+    /bounded static captions were recovered for 1 radio group only/u,
   );
 });
 

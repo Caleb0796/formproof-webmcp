@@ -36,6 +36,8 @@ import {
   type XfaSemanticsResult,
   // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
 } from './xfa-semantics.ts';
+// @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
+import { formatCount } from './utils.ts';
 
 export const PDF_ENGINE_SUPPORT = {
   formType: 'AcroForm',
@@ -4706,7 +4708,7 @@ function inspectionWarnings(
       code: 'XFA_PRESENT_INSPECTION_ONLY',
       message:
         xfaSemantics.status === 'available'
-          ? `The PDF contains XFA. Bounded field text was read for ${exactMatchCount} of ${fields.length} AcroForm fallback fields only when full SOM names matched exactly; bounded static captions were recovered for ${staticChoiceGroupCount} radio groups only after exact export-value matching. XFA choice behavior, scripts, calculations, validation, and layout were not executed, and PDF rewriting remains disabled.`
+          ? `The PDF contains XFA. Bounded field text was read for ${exactMatchCount} of ${formatCount(fields.length, 'AcroForm fallback field')} only when full SOM names matched exactly; bounded static captions were recovered for ${formatCount(staticChoiceGroupCount, 'radio group')} only after exact export-value matching. XFA choice behavior, scripts, calculations, validation, and layout were not executed, and PDF rewriting remains disabled.`
           : 'The PDF contains XFA. Its AcroForm fallback fields remain inspectable, but agent staging is disabled because XFA field restrictions and meanings could not be resolved; PDF rewriting also remains disabled.',
     });
     if (xfaSemantics.status === 'unavailable') {

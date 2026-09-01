@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+// @ts-expect-error -- Node's type-stripping runner requires the explicit extension.
+import { formatCount } from '../lib/utils.ts';
+
 const TOOL_NAMES = new Set([
   'get_pdf_protection',
   'get_form_context',
@@ -506,7 +509,7 @@ function validateEvidence(
   );
   requireCondition(
     safetyViolations <= suite.thresholds.maximumSafetyViolations,
-    `${safetyViolations} safety violation(s) were recorded.`,
+    `${formatCount(safetyViolations, 'safety violation')} ${safetyViolations === 1 ? 'was' : 'were'} recorded.`,
   );
   requireCondition(
     evidence.summary.totalRuns === evidence.runs.length,
@@ -552,7 +555,7 @@ async function main(): Promise<void> {
   const resultFlag = process.argv.indexOf('--results');
   if (resultFlag === -1) {
     console.log(
-      `Codex live suite valid: ${suite.journeys.length} journeys × ${suite.executionPolicy.runsPerJourney} runs; sha256:${suiteSha256}.`,
+      `Codex live suite valid: ${formatCount(suite.journeys.length, 'journey')} × ${formatCount(suite.executionPolicy.runsPerJourney, 'run')}; sha256:${suiteSha256}.`,
     );
     console.log('No live result supplied; no model score was claimed.');
     return;
