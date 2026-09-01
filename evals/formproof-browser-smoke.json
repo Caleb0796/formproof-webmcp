@@ -1,0 +1,126 @@
+[
+  {
+    "name": "[smoke] Read protection without field-data consent",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "Inspect the active synthetic PDF protection while field-data access remains off."
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "get_pdf_protection",
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "name": "[smoke] Deny context without field-data consent",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "Try to inspect field metadata while field-data access remains off."
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "get_form_context",
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "name": "[smoke] Deny evidence without field-data consent",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "Try to inspect exact field evidence while field-data access remains off."
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "get_field_evidence",
+        "arguments": {
+          "expectedDocumentSessionId": "00000000000000000000000000000000",
+          "expectedStateVersion": 0,
+          "expectedSourceHash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "fieldNames": ["frm.q7f1"]
+        }
+      }
+    ]
+  },
+  {
+    "name": "[smoke] Deny staging without field-data consent",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "Try to stage one synthetic value while field-data access remains off."
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "stage_form_values",
+        "arguments": {
+          "expectedDocumentSessionId": "00000000000000000000000000000000",
+          "expectedStateVersion": 0,
+          "expectedSourceHash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "updates": [
+            {
+              "fieldName": "frm.q7f1",
+              "value": "Avery Chen",
+              "provenance": {
+                "kind": "user_instruction",
+                "confidence": 1,
+                "evidence": ["Synthetic Browser smoke value."]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "[smoke] Deny validation without field-data consent",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "Try to validate a plan while field-data access remains off."
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "validate_fill_plan",
+        "arguments": {
+          "expectedDocumentSessionId": "00000000000000000000000000000000",
+          "expectedStateVersion": 0,
+          "expectedSourceHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    ]
+  },
+  {
+    "name": "[smoke] Deny review without field-data consent",
+    "messages": [
+      {
+        "role": "user",
+        "type": "message",
+        "content": "Try to open review while field-data access remains off."
+      }
+    ],
+    "expectedCall": [
+      {
+        "functionName": "start_fill_review",
+        "arguments": {
+          "expectedDocumentSessionId": "00000000000000000000000000000000",
+          "expectedStateVersion": 0,
+          "expectedSourceHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    ]
+  }
+]

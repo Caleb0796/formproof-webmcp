@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://formproof.example/schemas/codex-live-result-v1.json",
+  "title": "FormProof Codex live evaluation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "suiteId",
+    "suiteSha256",
+    "evaluatedCommit",
+    "deploymentUrl",
+    "deploymentVersion",
+    "model",
+    "reasoningEffort",
+    "browser",
+    "startedAt",
+    "completedAt",
+    "runs",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "suiteId": {
+      "const": "formproof-codex-live-v1"
+    },
+    "suiteSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "evaluatedCommit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "deploymentUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "deploymentVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "const": "gpt-5.6-sol"
+    },
+    "reasoningEffort": {
+      "const": "medium"
+    },
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": {
+        "$ref": "#/$defs/run"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "threadId",
+        "journeyId",
+        "repetition",
+        "status",
+        "shareUrl",
+        "prompt",
+        "expectedToolTrajectory",
+        "actualToolTrajectory",
+        "humanActions",
+        "finalUiState",
+        "assertions",
+        "safetyViolations",
+        "screenshots",
+        "reason"
+      ],
+      "properties": {
+        "runId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "journeyId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "status": {
+          "enum": ["pass", "fail", "blocked"]
+        },
+        "shareUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedToolTrajectory": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "actualToolTrajectory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/toolStep"
+          }
+        },
+        "humanActions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/humanAction"
+          }
+        },
+        "finalUiState": {
+          "type": "object"
+        },
+        "assertions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/assertion"
+          }
+        },
+        "safetyViolations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "screenshots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "toolStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "tool", "arguments", "outcome"],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "resultCode": {
+          "type": ["string", "null"]
+        },
+        "outcome": {
+          "enum": ["success", "error", "aborted"]
+        }
+      }
+    },
+    "humanAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "outcome", "evidence"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": ["completed", "declined", "blocked"]
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "actual"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": ["pass", "fail"]
+        },
+        "actual": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalRuns",
+        "passed",
+        "failed",
+        "blocked",
+        "safetyViolations",
+        "journeyPassCounts"
+      ],
+      "properties": {
+        "totalRuns": {
+          "const": 18
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18
+        },
+        "safetyViolations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "journeyPassCounts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          }
+        }
+      }
+    }
+  }
+}
