@@ -69,6 +69,8 @@ import {
 } from '@/lib/form-state';
 import type {
   ApplyResult,
+  PdfContentRiskReason,
+  PdfContentRiskReasonCode,
   PdfExportStrategy,
   PdfInspection,
 } from '@/lib/pdf-engine';
@@ -86,6 +88,49 @@ import {
 
 const DEMO_URL = '/demo-form.pdf';
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
+const CONTENT_RISK_REASON_COPY = {
+  javascript_present: {
+    singular: 'JavaScript action',
+    plural: 'JavaScript actions',
+  },
+  external_link_present: {
+    singular: 'external link',
+    plural: 'external links',
+  },
+  dangerous_or_unknown_action_present: {
+    singular: 'dangerous or unrecognized action',
+    plural: 'dangerous or unrecognized actions',
+  },
+  embedded_file_present: {
+    singular: 'embedded file',
+    plural: 'embedded files',
+  },
+  associated_file_present: {
+    singular: 'associated file',
+    plural: 'associated files',
+  },
+  file_attachment_present: {
+    singular: 'file attachment annotation',
+    plural: 'file attachment annotations',
+  },
+  rich_media_present: {
+    singular: 'rich-media item',
+    plural: 'rich-media items',
+  },
+  multimedia_present: {
+    singular: 'multimedia item',
+    plural: 'multimedia items',
+  },
+  unclassified_payload_entry: {
+    singular: 'unclassified payload entry',
+    plural: 'unclassified payload entries',
+  },
+} as const satisfies Record<
+  PdfContentRiskReasonCode,
+  { readonly singular: string; readonly plural: string }
+>;
+
+const GENERIC_CONTENT_RISK_COPY = 'unvalidated active or embedded content';
 
 type ToolState =
   | { status: 'registering'; count: 0; message: string }
@@ -256,6 +301,20 @@ function pdfOutputFileName(
 function fillPackageFileName(sourceName: string): string {
   const stem = sourceName.replace(/\.pdf$/iu, '') || 'form';
   return `${stem}-formproof-fill-package.json`;
+}
+
+function describeContentRiskReason(reason: PdfContentRiskReason): string {
+  const copy = CONTENT_RISK_REASON_COPY[reason.code];
+  return `${reason.count} ${reason.count === 1 ? copy.singular : copy.plural}`;
+}
+
+function describeContentRiskReasons(
+  reasons: readonly PdfContentRiskReason[],
+): string {
+  const descriptions = reasons.map(describeContentRiskReason);
+  return descriptions.length > 0
+    ? descriptions.join(', ')
+    : GENERIC_CONTENT_RISK_COPY;
 }
 
 function protectionOutcome(inspection: PdfInspection): {
@@ -1610,6 +1669,16 @@ export function FormProofWorkbench() {
   const activeContentDescription = activeContent
     ? describeActiveContent(activeContent)
     : '';
+  const contentRiskReasons =
+    documentState?.inspection.contentRisk.reasons ?? [];
+  const contentRiskReasonDescriptions = contentRiskReasons.map(
+    describeContentRiskReason,
+  );
+  const contentRiskDescription = describeContentRiskReasons(contentRiskReasons);
+  const fillPackageAvailable =
+    documentState?.inspection.protection.exportStrategies.includes(
+      'fill_package',
+    ) ?? false;
   const selectedCreatesPdf =
     selectedExportStrategy === 'filled_pdf' ||
     selectedExportStrategy === 'confirmed_plain_derivative_pdf';
@@ -2232,6 +2301,15 @@ export function FormProofWorkbench() {
               <div>
                 <strong>{protectionPresentation.title}</strong>
                 <p>{protectionPresentation.detail}</p>
+                {hasBlockedPdfContent && (
+                  <p>
+                    <b>Content restrictions:</b> PDF protection and content risk
+                    are evaluated separately. Interactive preview and PDF
+                    rewriting are blocked because FormProof detected{' '}
+                    {contentRiskDescription}. Counts are detector findings;
+                    categories can overlap.
+                  </p>
+                )}
                 <p>
                   Protection type:{' '}
                   <b>{documentState.inspection.protection.protectionType}</b>
@@ -2442,7 +2520,7 @@ export function FormProofWorkbench() {
                 </p>
               </object>
             ) : (
-              <div className="pdf-empty">
+              <div className="pdf-empty" aria-live="polite">
                 <FileText aria-hidden="true" />
                 <strong>
                   {loading
@@ -2454,11 +2532,33 @@ export function FormProofWorkbench() {
                 </strong>
                 {documentState?.inspection.contentRisk
                   .blocksInteractivePreview && (
-                  <span>
-                    The original remains untouched. FormProof found unvalidated
-                    active content, an external link, or an embedded payload and
-                    will not mount it in the browser PDF viewer.
-                  </span>
+                  <div className="content-risk-explanation">
+                    <p>
+                      Interactive preview and PDF rewriting are blocked because
+                      FormProof detected:
+                    </p>
+                    {contentRiskReasonDescriptions.length > 0 ? (
+                      <ul
+                        className="content-risk-list"
+                        aria-label="Reasons PDF preview and rewriting are blocked"
+                      >
+                        {contentRiskReasons.map((reason) => (
+                          <li key={reason.code}>
+                            {describeContentRiskReason(reason)}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>{GENERIC_CONTENT_RISK_COPY}.</p>
+                    )}
+                    <p>
+                      Counts are detector findings; categories can overlap. The
+                      original remains untouched.
+                      {fillPackageAvailable
+                        ? ' An original-untouched fill package remains available.'
+                        : ' No artifact export is available under the current document policy.'}
+                    </p>
+                  </div>
                 )}
               </div>
             )}
@@ -2620,7 +2720,7 @@ export function FormProofWorkbench() {
                 ? 'Unknown protection remains inspection-only; no artifact export is offered.'
                 : 'No artifact export is available because this PDF has no agent-writable addressable fields.'
               : hasBlockedPdfContent
-                ? 'PDF rewriting is not offered because unvalidated active or embedded content is present; an original-untouched fill package remains available.'
+                ? `PDF rewriting is blocked because FormProof detected ${contentRiskDescription}.${fillPackageAvailable ? ' An original-untouched fill package remains available.' : ''}`
                 : validation && validation.blockerCount > 0
                   ? `${validation.blockerCount} PDF validation blocker(s) remain; an original-untouched fill package can still be reviewed.`
                   : 'A person chooses the artifact here; WebMCP cannot select or export it.'}

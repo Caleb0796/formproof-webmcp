@@ -471,6 +471,142 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.equal(workbench.match(/\{choiceLabelReviewNotice &&/gu)?.length, 2);
 });
 
+void test('explains PDF content-risk blocks with exhaustive human-readable counts', async () => {
+  const [workbench, styles] = await Promise.all([
+    readFile(
+      new URL('../components/formproof-workbench.tsx', import.meta.url),
+      'utf8',
+    ),
+    readFile(new URL('../app/globals.css', import.meta.url), 'utf8'),
+  ]);
+
+  const copyStart = workbench.indexOf('const CONTENT_RISK_REASON_COPY = {');
+  const copyEnd = workbench.indexOf(
+    'const GENERIC_CONTENT_RISK_COPY',
+    copyStart,
+  );
+  assert.ok(copyStart >= 0 && copyEnd > copyStart);
+  const reasonCopy = workbench.slice(copyStart, copyEnd);
+  assert.match(reasonCopy, /satisfies Record<\s*PdfContentRiskReasonCode,/u);
+  for (const [code, singular, plural] of [
+    ['javascript_present', 'JavaScript action', 'JavaScript actions'],
+    ['external_link_present', 'external link', 'external links'],
+    [
+      'dangerous_or_unknown_action_present',
+      'dangerous or unrecognized action',
+      'dangerous or unrecognized actions',
+    ],
+    ['embedded_file_present', 'embedded file', 'embedded files'],
+    ['associated_file_present', 'associated file', 'associated files'],
+    [
+      'file_attachment_present',
+      'file attachment annotation',
+      'file attachment annotations',
+    ],
+    ['rich_media_present', 'rich-media item', 'rich-media items'],
+    ['multimedia_present', 'multimedia item', 'multimedia items'],
+    [
+      'unclassified_payload_entry',
+      'unclassified payload entry',
+      'unclassified payload entries',
+    ],
+  ]) {
+    assert.equal(reasonCopy.includes(`${code}: {`), true, code);
+    assert.equal(reasonCopy.includes(`singular: '${singular}'`), true, code);
+    assert.equal(reasonCopy.includes(`plural: '${plural}'`), true, code);
+  }
+
+  const formatterStart = workbench.indexOf(
+    'function describeContentRiskReason(',
+  );
+  const formatterEnd = workbench.indexOf(
+    '\nfunction protectionOutcome(',
+    formatterStart,
+  );
+  assert.ok(formatterStart >= 0 && formatterEnd > formatterStart);
+  const formatter = workbench.slice(formatterStart, formatterEnd);
+  assert.match(
+    formatter,
+    /reason\.count === 1 \? copy\.singular : copy\.plural/u,
+  );
+  assert.match(formatter, /reasons\.map\(describeContentRiskReason\)/u);
+  assert.match(formatter, /descriptions\.join\(', '\)/u);
+  assert.match(formatter, /GENERIC_CONTENT_RISK_COPY/u);
+
+  const restrictionsStart = workbench.indexOf('<b>Content restrictions:</b>');
+  const restrictionsEnd = workbench.indexOf('</p>', restrictionsStart);
+  assert.ok(restrictionsStart >= 0 && restrictionsEnd > restrictionsStart);
+  const restrictions = workbench.slice(restrictionsStart, restrictionsEnd);
+  assert.match(restrictions, /PDF protection and content/u);
+  assert.match(restrictions, /risk\s+are evaluated separately\./u);
+  assert.match(
+    workbench,
+    /Interactive preview and PDF\s+rewriting are blocked because FormProof detected/u,
+  );
+
+  const previewStart = workbench.indexOf(
+    '<div className="paper-frame pdf-frame">',
+  );
+  const previewEnd = workbench.indexOf('</article>', previewStart);
+  assert.ok(previewStart >= 0 && previewEnd > previewStart);
+  const preview = workbench.slice(previewStart, previewEnd);
+  assert.match(preview, /blocksInteractivePreview/u);
+  assert.match(preview, /aria-live="polite"/u);
+  assert.match(preview, /className="content-risk-list"/u);
+  assert.match(
+    preview,
+    /aria-label="Reasons PDF preview and rewriting are blocked"/u,
+  );
+  assert.match(preview, /contentRiskReasons\.map\(\(reason\) =>/u);
+  assert.match(preview, /describeContentRiskReason\(reason\)/u);
+  assert.match(
+    preview,
+    /Counts are detector findings; categories can overlap/u,
+  );
+  assert.match(preview, /fillPackageAvailable/u);
+  assert.doesNotMatch(preview, />\s*\{reason\.code\}\s*</u);
+
+  const sourceLoadStart = workbench.indexOf('const loadSource = useCallback(');
+  const sourceLoadEnd = workbench.indexOf(
+    'const loadDemo = useCallback(',
+    sourceLoadStart,
+  );
+  assert.ok(sourceLoadStart >= 0 && sourceLoadEnd > sourceLoadStart);
+  const sourceLoad = workbench.slice(sourceLoadStart, sourceLoadEnd);
+  assert.match(
+    sourceLoad,
+    /const sourceUrl = inspection\.contentRisk\.blocksInteractivePreview\s*\? null\s*: URL\.createObjectURL/u,
+  );
+
+  const buttonNoteStart = workbench.indexOf(
+    '<p className="button-note">',
+    previewEnd,
+  );
+  const buttonNoteEnd = workbench.indexOf('</p>', buttonNoteStart);
+  assert.ok(buttonNoteStart >= 0 && buttonNoteEnd > buttonNoteStart);
+  const buttonNote = workbench.slice(buttonNoteStart, buttonNoteEnd);
+  assert.match(buttonNote, /contentRiskDescription/u);
+  assert.match(buttonNote, /fillPackageAvailable/u);
+  assert.doesNotMatch(
+    workbench,
+    />\s*(?:Ignore content risk|Rewrite anyway)\s*</u,
+  );
+
+  const explanationStart = styles.indexOf('.content-risk-explanation {');
+  const explanationEnd = styles.indexOf('.preview-switch {', explanationStart);
+  assert.ok(explanationStart >= 0 && explanationEnd > explanationStart);
+  const explanationStyles = styles.slice(explanationStart, explanationEnd);
+  assert.match(explanationStyles, /width: min\(100%, 38rem\)/u);
+  assert.match(explanationStyles, /max-width: 100%/u);
+  assert.match(explanationStyles, /overflow-wrap: anywhere/u);
+  assert.match(explanationStyles, /text-align: left/u);
+  assert.match(explanationStyles, /\.content-risk-list \{/u);
+  assert.match(
+    styles,
+    /@media \(max-width: 520px\)[\s\S]*?\.pdf-empty \{\s*padding: 18px 14px;/u,
+  );
+});
+
 void test('binds data consent and every mutable workflow to one load session', async () => {
   const workbench = await readFile(
     new URL('../components/formproof-workbench.tsx', import.meta.url),

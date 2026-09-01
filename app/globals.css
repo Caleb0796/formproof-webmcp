@@ -667,6 +667,7 @@ a {
 
   .button-note {
     margin-top: 8px;
+    overflow-wrap: anywhere;
     text-align: center;
   }
 }
@@ -848,12 +849,14 @@ a {
 
   .pdf-empty {
     display: grid;
+    min-width: 0;
     min-height: 574px;
     place-content: center;
     justify-items: center;
     gap: 14px;
     border: 1px dashed #c9d0ca;
     border-radius: 12px;
+    padding: 24px;
     color: #68736c;
     background: rgb(255 255 255 / 48%);
     font-size: 12px;
@@ -863,6 +866,32 @@ a {
     width: 32px;
     height: 32px;
     color: #55715f;
+  }
+
+  .content-risk-explanation {
+    width: min(100%, 38rem);
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+
+  .content-risk-explanation p {
+    margin: 0;
+    line-height: 1.55;
+  }
+
+  .content-risk-list {
+    display: grid;
+    gap: 6px;
+    margin: 10px 0;
+    padding-left: 18px;
+  }
+
+  .content-risk-list li {
+    padding-left: 2px;
+    color: #44584c;
+    font-size: 11px;
+    line-height: 1.45;
   }
 
   .preview-switch {
@@ -1336,6 +1365,10 @@ a {
 
   .pdf-frame {
     padding: 8px;
+  }
+
+  .pdf-empty {
+    padding: 18px 14px;
   }
 
   .full-diff {
