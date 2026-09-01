@@ -349,6 +349,8 @@ void test('runs the complete quality gate and preserves Browser reports on CI fa
     previousIndex = index;
   }
   assert.match(workflow, /npm run eval:browser:smoke/u);
-  assert.match(workflow, /actions\/upload-artifact@v4/u);
+  assert.equal(workflow.match(/actions\/checkout@v7/gu)?.length, 2);
+  assert.equal(workflow.match(/actions\/setup-node@v7/gu)?.length, 2);
+  assert.match(workflow, /actions\/upload-artifact@v7/u);
   assert.match(workflow, /if: always\(\)/u);
 });
