@@ -1,5 +1,5 @@
 {
-  "name": "sites-project",
+  "name": "formproof-webmcp",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -12,10 +12,13 @@
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "eval:catalog": "node --experimental-strip-types scripts/export-webmcp-eval-catalog.ts",
     "eval:fixtures": "node --experimental-strip-types scripts/sync-formproof-eval-contexts.ts",
+    "eval:fixtures:live": "node --experimental-strip-types scripts/create-live-eval-fixture.ts",
+    "eval:browser:smoke": "node --experimental-strip-types scripts/run-browser-smoke.ts",
+    "eval:codex:verify": "node --experimental-strip-types scripts/verify-codex-evidence.ts",
     "eval:verify": "node --test --experimental-strip-types tests/evals.test.ts",
     "typecheck": "tsc --noEmit --incremental false",
     "lint:project": "oxlint app/page.tsx components/formproof-workbench.tsx lib/*.ts scripts/*.ts tests/*.test.ts vite.config.ts",
-    "format:check": "oxfmt --check app/page.tsx components/formproof-workbench.tsx app/globals.css evals/formproof-evals.json evals/formproof-local-evals.json evals/formproof-local-transitions.json lib/*.ts scripts/*.ts tests/*.test.ts package.json vite.config.ts",
+    "format:check": "oxfmt --check app/page.tsx components/formproof-workbench.tsx app/globals.css evals/*.json lib/*.ts scripts/*.ts tests/*.test.ts package.json vite.config.ts",
     "lint": "oxlint",
     "format": "oxfmt"
   },
@@ -58,6 +61,7 @@
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "vite": "8.2.2",
+    "webmcp-evals": "0.0.4",
     "wrangler": "4.127.1"
   },
   "type": "module"

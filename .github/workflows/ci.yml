@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify synthetic live fixture is reproducible
+        run: |
+          npm run eval:fixtures:live
+          git diff --exit-code -- public/eval-fixtures/adversarial-intake.pdf
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run type checking
+        run: npm run typecheck
+
+      - name: Run project lint
+        run: npm run lint:project
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Verify deterministic evals
+        run: npm run eval:verify
+
+      - name: Verify Codex live suite contract
+        run: npm run eval:codex:verify
+
+      - name: Build production bundle
+        run: npm run build
+
+  browser-smoke:
+    name: Chrome WebMCP smoke
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Show Chrome version
+        run: google-chrome --version
+
+      - name: Start FormProof
+        shell: bash
+        run: |
+          mkdir -p .evals/browser-smoke
+          npm run dev -- -H 127.0.0.1 -p 3000 > .evals/browser-smoke/dev.log 2>&1 &
+          echo $! > .evals/browser-smoke/dev.pid
+
+      - name: Wait for FormProof
+        shell: bash
+        run: |
+          for attempt in {1..60}; do
+            if curl --fail --silent --show-error http://127.0.0.1:3000/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          tail -n 200 .evals/browser-smoke/dev.log
+          exit 1
+
+      - name: Run pinned WebMCP Browser smoke
+        run: >-
+          npm run eval:browser:smoke --
+          --url http://127.0.0.1:3000
+          --chrome-channel chrome
+          --output-dir .evals/browser-smoke
+
+      - name: Upload Browser smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-${{ github.sha }}
+          path: .evals/browser-smoke
+          if-no-files-found: warn
+          retention-days: 30
