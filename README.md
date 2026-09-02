@@ -53,6 +53,32 @@ PDF field names are often opaque, values can be constrained by the document, and
 
 Every field-related request is bound to a fresh `documentSessionId`, the source SHA-256, and the current state version. A human correction creates a session-only lock that agent staging cannot overwrite. Approval and receipts bind the exact source, plan, revision, and chosen artifact; any material change invalidates them. Imported Fill package proposals remain untrusted and require a fresh review.
 
+## How WebMCP is wired
+
+The production registration loop is at [`lib/webmcp.ts:1944`](lib/webmcp.ts#L1944):
+
+```ts
+      const registration = Promise.resolve(
+        options.modelContext === undefined &&
+          typeof document !== 'undefined' &&
+          document.modelContext === modelContext
+          ? document.modelContext.registerTool(
+              {
+                name: tool.name,
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+                execute: tool.execute,
+                title: tool.title,
+                annotations: tool.annotations,
+              },
+              { signal: lifecycle.signal },
+            )
+          : modelContext.registerTool(tool, { signal: lifecycle.signal }),
+      );
+```
+
+The six tools are registered once per workbench effect generation; ordinary form-state changes are read through refs rather than re-registering the catalog, and effect cleanup aborts that generation.
+
 ## Local development
 
 Requirements:

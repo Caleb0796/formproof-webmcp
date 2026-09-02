@@ -185,6 +185,7 @@ export interface WebMcpToolDefinition {
     untrustedContentHint: boolean;
   };
   execute(
+    this: void,
     input: unknown,
     options?: WebMcpToolExecutionOptions,
   ): Promise<FormProofToolResponse>;
@@ -195,6 +196,12 @@ export interface WebMcpModelContext {
     tool: WebMcpToolDefinition,
     options?: { signal?: AbortSignal },
   ): void | Promise<void>;
+}
+
+declare global {
+  interface Document {
+    readonly modelContext?: WebMcpModelContext;
+  }
 }
 
 export interface FormProofToolSuccess {
@@ -1935,7 +1942,21 @@ export async function registerFormProofWebMcpTools(
   try {
     for (const tool of tools) {
       const registration = Promise.resolve(
-        modelContext.registerTool(tool, { signal: lifecycle.signal }),
+        options.modelContext === undefined &&
+          typeof document !== 'undefined' &&
+          document.modelContext === modelContext
+          ? document.modelContext.registerTool(
+              {
+                name: tool.name,
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+                execute: tool.execute,
+                title: tool.title,
+                annotations: tool.annotations,
+              },
+              { signal: lifecycle.signal },
+            )
+          : modelContext.registerTool(tool, { signal: lifecycle.signal }),
       );
       const aborted = new Promise<never>((_resolve, reject) => {
         if (lifecycle.signal.aborted) {
@@ -3590,11 +3611,7 @@ function isAbortError(error: unknown): boolean {
 
 function getDocumentModelContext(): WebMcpModelContext | undefined {
   if (typeof document === 'undefined') return undefined;
-  return (
-    document as Document & {
-      modelContext?: WebMcpModelContext;
-    }
-  ).modelContext;
+  return document.modelContext;
 }
 
 function toError(error: unknown): Error {
