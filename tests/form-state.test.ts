@@ -1958,7 +1958,20 @@ void test('restores a source-bound fill package as untrusted proposals without r
     imported.state.draft['formproof.applicant_name'].provenance.kind,
     'human_entry',
   );
+  assert.equal(
+    imported.state.validation.issues.some(
+      ({ code, fieldName }) =>
+        code === 'agent_assertion_requires_review' &&
+        fieldName === 'formproof.applicant_name',
+    ),
+    true,
+  );
   assert.equal(imported.state.draft['opaque.f1_02'].actor, 'agent');
+  const importedHumanContext = getFormContext(imported.state).fields.find(
+    ({ definition }) => definition.name === 'formproof.applicant_name',
+  );
+  assert.equal(importedHumanContext?.importedProposal, true);
+  assert.equal(Object.hasOwn(importedHumanContext ?? {}, 'humanPinned'), false);
   assert.deepEqual(
     getFormContext(imported.state)
       .fields.filter(({ importedProposal }) => importedProposal)

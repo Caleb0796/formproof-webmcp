@@ -925,6 +925,7 @@ function buildValidationReport(
   stateVersion: number,
   fields: Readonly<Record<string, Readonly<FormFieldDefinition>>>,
   draft: Readonly<Record<string, Readonly<StagedFieldValue>>>,
+  importedProposalFieldNames: readonly string[] = [],
 ): ValidationReport {
   const issues: ValidationIssue[] = [];
 
@@ -953,7 +954,10 @@ function buildValidationReport(
       );
     }
 
-    if (staged?.actor === 'agent') {
+    if (
+      staged?.actor === 'agent' ||
+      importedProposalFieldNames.includes(fieldName)
+    ) {
       issues.push({
         code: 'agent_assertion_requires_review',
         severity: 'review',
@@ -1219,7 +1223,12 @@ export function getEffectiveFieldValue(
 }
 
 export function validateDraft(state: FormState): ValidationReport {
-  return buildValidationReport(state.stateVersion, state.fields, state.draft);
+  return buildValidationReport(
+    state.stateVersion,
+    state.fields,
+    state.draft,
+    importedProposalNames(state),
+  );
 }
 
 export async function stageFieldUpdates(
@@ -1394,6 +1403,7 @@ export async function stageFieldUpdates(
     stateVersion,
     state.fields,
     nextDraft,
+    [...nextImportedProposalFieldNames],
   );
   const nextState = freezeState({
     documentSessionId: state.documentSessionId,
@@ -1600,7 +1610,12 @@ export async function discardDraftFields(
       ),
       stateVersion,
       planHash,
-      validation: buildValidationReport(stateVersion, state.fields, draft),
+      validation: buildValidationReport(
+        stateVersion,
+        state.fields,
+        draft,
+        remainingImportedProposalFieldNames,
+      ),
       approval: null,
       output: null,
       verification: null,
@@ -2392,6 +2407,7 @@ export async function importFillPackageFromUi(
       stateVersion,
       state.fields,
       restoredDraft,
+      importedFieldNames,
     ),
     approval: null,
     output: null,
