@@ -765,6 +765,7 @@ void test('binds data consent and every mutable workflow to one load session', a
   const beginLoad = workbench.slice(beginLoadStart, beginLoadEnd);
   assert.match(beginLoad, /stateRef\.current = null/u);
   assert.match(beginLoad, /agentDataConsentSessionRef\.current = null/u);
+  assert.match(beginLoad, /agentDataConsentGenerationRef\.current \+= 1/u);
   assert.match(beginLoad, /setAgentDataAccessGranted\(false\)/u);
   assert.match(beginLoad, /pdfInspectionAbortRef\.current\?\.abort\(\)/u);
   assert.match(beginLoad, /pdfInspectionWorkerRef\.current\?\.terminate\(\)/u);
@@ -773,11 +774,138 @@ void test('binds data consent and every mutable workflow to one load session', a
     workbench.match(
       /agentDataConsentSessionRef\.current !== current\.documentSessionId/gu,
     )?.length,
-    5,
+    6,
   );
   assert.match(workbench, /Off by default and reset on every load/u);
   assert.match(workbench, /new Worker\(/u);
   assert.doesNotMatch(workbench, /\binspectPdf\s*\(/u);
+});
+
+void test('rejects staged values when consent changes before commit', async () => {
+  const workbench = await readFile(
+    new URL('../components/formproof-workbench.tsx', import.meta.url),
+    'utf8',
+  );
+  const stageStart = workbench.indexOf('stageFormValues(input, context) {');
+  const stageEnd = workbench.indexOf(
+    '\n\n      validateFillPlan(input) {',
+    stageStart,
+  );
+  assert.ok(stageStart >= 0 && stageEnd > stageStart);
+  const stageAdapter = workbench.slice(stageStart, stageEnd);
+  const awaitIndex = stageAdapter.indexOf('await stageFieldUpdates(');
+  const captureIndex = stageAdapter.indexOf(
+    'const consentGeneration = agentDataConsentGenerationRef.current;',
+  );
+  const recheckIndex = stageAdapter.indexOf(
+    'agentDataConsentGenerationRef.current !== consentGeneration',
+  );
+  const commitIndex = stageAdapter.indexOf('commitState(result.state)');
+  assert.ok(
+    captureIndex >= 0 &&
+      awaitIndex > captureIndex &&
+      recheckIndex > awaitIndex &&
+      commitIndex > recheckIndex,
+  );
+
+  const { initialState } = await loadStagedDemo();
+  const runRace = async (regrant: boolean) => {
+    let current = initialState;
+    let consentSessionId: string | null = initialState.documentSessionId;
+    let consentGeneration = 1;
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const adapter: FormProofWebMcpAdapter = {
+      getFormContext: async () => {
+        throw new Error('not used');
+      },
+      getFieldEvidence: async () => {
+        throw new Error('not used');
+      },
+      async stageFormValues(input) {
+        const snapshot = current;
+        const capturedSessionId = consentSessionId;
+        const capturedGeneration = consentGeneration;
+        markStarted();
+        await gate;
+        const staged = await stageFieldUpdates(snapshot, {
+          expectedStateVersion: input.expectedStateVersion,
+          expectedSourceHash: input.expectedSourceHash,
+          actor: 'agent',
+          updates: input.updates,
+        });
+        if (
+          consentSessionId !== snapshot.documentSessionId ||
+          consentSessionId !== capturedSessionId ||
+          consentGeneration !== capturedGeneration
+        ) {
+          return {
+            ok: false,
+            stateVersion: current.stateVersion,
+            sourceHash: current.source.sourceHash,
+            documentSessionId: current.documentSessionId,
+            error: { code: 'consent_required' },
+          };
+        }
+        if (!staged.ok) throw new Error('consent race fixture failed to stage');
+        current = staged.state;
+        return {
+          ok: true,
+          stateVersion: current.stateVersion,
+          sourceHash: current.source.sourceHash,
+          documentSessionId: current.documentSessionId,
+          data: { changedFields: staged.changedFields },
+        };
+      },
+      validateFillPlan: async () => {
+        throw new Error('not used');
+      },
+      startFillReview: async () => {
+        throw new Error('not used');
+      },
+    };
+    const stageTool = createFormProofToolDefinitions(
+      adapter,
+      () => undefined,
+      new AbortController().signal,
+    ).find(({ name }) => name === 'stage_form_values');
+    assert.ok(stageTool);
+    const call = stageTool.execute({
+      expectedDocumentSessionId: initialState.documentSessionId,
+      expectedStateVersion: initialState.stateVersion,
+      expectedSourceHash: initialState.source.sourceHash,
+      updates: [
+        {
+          fieldName: FIELD.legalName,
+          value: 'Ada Lovelace',
+          provenance: { kind: 'user_instruction', confidence: 1 },
+        },
+      ],
+    });
+    await started;
+    consentSessionId = null;
+    consentGeneration += 1;
+    if (regrant) {
+      consentSessionId = initialState.documentSessionId;
+      consentGeneration += 1;
+    }
+    release();
+    const response = await call;
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'CONSENT_REQUIRED');
+    assert.equal(response.stateVersion, initialState.stateVersion);
+    assert.equal(current.stateVersion, initialState.stateVersion);
+    assert.deepEqual(current.draft, initialState.draft);
+  };
+
+  await runRace(false);
+  await runRace(true);
 });
 
 void test('delegates upload identity to PDF inspection and renders multiline review values exactly', async () => {

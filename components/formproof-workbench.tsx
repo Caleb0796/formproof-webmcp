@@ -580,6 +580,7 @@ export function FormProofWorkbench() {
   const pdfInspectionWorkerRef = useRef<Worker | null>(null);
   const pdfInspectionAbortRef = useRef<AbortController | null>(null);
   const agentDataConsentSessionRef = useRef<string | null>(null);
+  const agentDataConsentGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   const uiRevisionRef = useRef(0);
   const visibleUiRevisionRef = useRef(0);
@@ -796,6 +797,7 @@ export function FormProofWorkbench() {
     inspectionRef.current = null;
     sourceBytesRef.current = null;
     agentDataConsentSessionRef.current = null;
+    agentDataConsentGenerationRef.current += 1;
     if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
     sourceUrlRef.current = null;
     setFormState(null);
@@ -1073,6 +1075,7 @@ export function FormProofWorkbench() {
                 : cursor.code === 'stale_state'
                   ? 'The field cursor expired because the form state changed. Refresh context from the first page.'
                   : 'The field cursor is invalid.',
+              [{ code: cursor.code, path: 'input.cursor' }],
             );
           }
           offset = cursor.offset;
@@ -1090,6 +1093,7 @@ export function FormProofWorkbench() {
             current,
             'invalid_input',
             'The field cursor is out of range.',
+            [{ code: 'invalid_input', path: 'input.cursor' }],
           );
         }
 
@@ -1145,6 +1149,7 @@ export function FormProofWorkbench() {
               cursor.code === 'source_mismatch'
                 ? 'The choice cursor belongs to a different PDF.'
                 : 'The choice cursor does not match the requested field.',
+              [{ code: cursor.code, path: 'input.choiceCursor' }],
             );
           }
           const descriptor = inspection.fields.find(
@@ -1155,6 +1160,7 @@ export function FormProofWorkbench() {
               current,
               'invalid_input',
               'The choice cursor is outside this field.',
+              [{ code: 'invalid_input', path: 'input.choiceCursor' }],
             );
           }
           choiceOffset = cursor.offset;
@@ -1192,6 +1198,8 @@ export function FormProofWorkbench() {
               'Field data sharing is off for this PDF load.',
             );
           }
+          const consentSessionId = agentDataConsentSessionRef.current;
+          const consentGeneration = agentDataConsentGenerationRef.current;
           const mismatch = bindingFailure(current, input);
           if (mismatch) return mismatch;
           if (reviewLockRef.current) {
@@ -1236,6 +1244,17 @@ export function FormProofWorkbench() {
               latest ?? current,
               'stale_state',
               'The active form changed before this update could commit.',
+            );
+          }
+          if (
+            agentDataConsentSessionRef.current !== current.documentSessionId ||
+            agentDataConsentSessionRef.current !== consentSessionId ||
+            agentDataConsentGenerationRef.current !== consentGeneration
+          ) {
+            return adapterFailure(
+              latest ?? current,
+              'consent_required',
+              'Field data sharing was turned off before this update could commit.',
             );
           }
           if (!result.ok) return stateErrorFailure(current, result.errors);
@@ -1369,15 +1388,6 @@ export function FormProofWorkbench() {
     void registerFormProofWebMcpTools(adapter, {
       signal: registrationController.signal,
       awaitVisibleCommit: waitForVisibleCommit,
-      onRegistrationError: () => {
-        if (!cancelled) {
-          setToolState({
-            status: 'error',
-            count: 0,
-            message: 'WebMCP registration failed; agent tools are unavailable',
-          });
-        }
-      },
     }).then((registered) => {
       registration = registered;
       if (cancelled) {
@@ -2248,6 +2258,7 @@ export function FormProofWorkbench() {
               agentDataConsentSessionRef.current = granted
                 ? current.documentSessionId
                 : null;
+              agentDataConsentGenerationRef.current += 1;
               setAgentDataAccessGranted(granted);
             }}
           />
