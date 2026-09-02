@@ -69,6 +69,7 @@ void test('publishes challenge metadata without making the npm package public', 
   const packageJson = await readJson<{
     name: string;
     private: boolean;
+    license: string;
     engines: { node: string };
     devDependencies: Record<string, string>;
     scripts: Record<string, string>;
@@ -86,6 +87,7 @@ void test('publishes challenge metadata without making the npm package public', 
 
   assert.equal(packageJson.name, 'formproof-webmcp');
   assert.equal(packageJson.private, true);
+  assert.equal(packageJson.license, 'MIT');
   assert.equal(packageJson.engines.node, '>=22.13.0');
   assert.equal(packageJson.devDependencies['webmcp-evals'], '0.0.4');
   assert.ok(packageJson.scripts['eval:browser:smoke']);
@@ -102,7 +104,11 @@ void test('publishes challenge metadata without making the npm package public', 
   assert.match(readme, /Deterministic catalog and replay/u);
   assert.match(readme, /Chrome Browser smoke/u);
   assert.match(readme, /Codex live model eval/u);
-  assert.match(readme, /Public demo video:\*\* pending/u);
+  assert.match(
+    readme,
+    /\[`FormProof-WebMCP-Live-Demo\.mp4`\]\(FormProof-WebMCP-Live-Demo\.mp4\)/u,
+  );
+  assert.doesNotMatch(readme, /\b(?:pending|TBD)\b|at submission time/iu);
   assert.doesNotMatch(readme, /264\/264/u);
   assert.match(gitignore, /^\/tmp\/$/mu);
   assert.match(gitignore, /^\/\.evals\/$/mu);

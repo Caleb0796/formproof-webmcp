@@ -7,9 +7,15 @@ FormProof is a local-first PDF form workbench where an agent can inspect and sta
 
 **Live app:** [formproof-webmcp.skywalker1226.chatgpt.site](https://formproof-webmcp.skywalker1226.chatgpt.site)
 
-> Release gates: the live app and this repository are the evaluated artifacts at the deployed commit. The public demo video link and the evidence release are added at submission time; their current state is recorded in the sections below.
+> Evaluation scope: judges evaluate the live app and this repository at the deployed commit. The demo video is committed as [`FormProof-WebMCP-Live-Demo.mp4`](FormProof-WebMCP-Live-Demo.mp4) and is also available on the Devpost page. The state of each evidence layer is described under [Evaluation layers](#evaluation-layers).
 
 ## Try it in 30 seconds
+
+**ChatGPT built-in browser judge path:**
+
+- Enable site tools for `formproof-webmcp.skywalker1226.chatgpt.site`.
+- Open the full live URL: [https://formproof-webmcp.skywalker1226.chatgpt.site](https://formproof-webmcp.skywalker1226.chatgpt.site).
+- Follow the steps below and paste the suggested prompt.
 
 1. Open the live app. The two-page synthetic demo loads automatically.
 2. Turn on **Allow agent field access for this PDF**. Consent is off by default and applies only to the current load session.
@@ -104,7 +110,7 @@ Validate a captured result before publishing it:
 npm run eval:codex:verify -- --results /path/to/codex-live-results.json
 ```
 
-Evidence will be published as an immutable GitHub Release tagged `eval-evidence-<short-sha>` once the 18-run suite completes on the deployed commit; no release exists yet. The release will be attached to the evaluated commit rather than committed back into that commit.
+The deterministic catalog/replay layer and the Chrome Browser smoke layer are the evidence that ship with this repository and run in CI. The Codex live suite is defined, and its result contract is verified in CI; this repository does not claim a completed full 18-run release.
 
 ## Release evidence
 
@@ -118,7 +124,7 @@ Every evidence release is expected to contain:
 
 Selective reruns are not accepted. If a product issue is fixed, retain the old failed release and run the complete 18-run suite again from the new commit.
 
-**Public demo video:** pending final recording and YouTube upload. The release storyboard is 2:15–2:45: problem and WebMCP value; staging and exact review; human lock plus dangerous-PDF Fill package; architecture and execution evidence. A public video under three minutes is a required submission gate.
+**Public demo video:** [`FormProof-WebMCP-Live-Demo.mp4`](FormProof-WebMCP-Live-Demo.mp4) is committed in this repository, runs approximately 2:30, and shows the problem and WebMCP value, staging and exact review, a human lock plus the dangerous-PDF Fill package, and the architecture and execution evidence.
 
 ## Current limitations
 
