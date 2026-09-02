@@ -135,7 +135,7 @@ export function createFormFieldDefinitionFromPdf(
   const identityReviewReasons = [
     ...new Set(field.discoveryAliases?.map(({ source }) => source) ?? []),
   ];
-  return {
+  const definition: FormFieldDefinition = {
     name: field.name,
     label,
     type:
@@ -157,6 +157,34 @@ export function createFormFieldDefinitionFromPdf(
       ? [...field.current]
       : field.current,
   };
+  const choiceWithoutOptions =
+    (definition.type === 'radio' ||
+      definition.type === 'dropdown' ||
+      definition.type === 'option-list') &&
+    definition.options === undefined;
+  if (
+    !unsupported &&
+    (choiceWithoutOptions ||
+      validateValue(definition, definition.sourceValue) !== null)
+  ) {
+    return {
+      name: definition.name,
+      label: definition.label,
+      type: 'text',
+      required: definition.required,
+      readOnly: true,
+      humanOnly: true,
+      ...(definition.identityReviewReasons === undefined
+        ? {}
+        : { identityReviewReasons: definition.identityReviewReasons }),
+      sourceValue: Array.isArray(definition.sourceValue)
+        ? definition.sourceValue.join(', ')
+        : definition.sourceValue === null
+          ? ''
+          : String(definition.sourceValue),
+    };
+  }
+  return definition;
 }
 
 export interface FieldProvenance {
@@ -645,7 +673,7 @@ function canonicalize(value: unknown): string {
   if (typeof value === 'object' && value !== null) {
     const entries = Object.entries(value)
       .filter(([, child]) => child !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
     return `{${entries
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalize(child)}`)
       .join(',')}}`;
@@ -709,10 +737,29 @@ async function calculatePlanHash(
 function missingValue(value: FormFieldValue): boolean {
   return (
     value === null ||
-    value === '' ||
+    (typeof value === 'string' && value.trim().length === 0) ||
     (Array.isArray(value) && value.length === 0) ||
     value === false
   );
+}
+
+function containsUnsupportedControlCharacters(value: string): boolean {
+  if (!value.isWellFormed()) return true;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (
+      (codePoint <= 0x1f &&
+        codePoint !== 0x09 &&
+        codePoint !== 0x0a &&
+        codePoint !== 0x0d) ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function allowsMultiple(field: FormFieldDefinition): boolean {
@@ -789,6 +836,14 @@ function validateValue(
       };
     }
 
+    if (value.some(containsUnsupportedControlCharacters)) {
+      return {
+        code: 'invalid_type',
+        fieldName: field.name,
+        message: `${field.name} contains unsupported control characters.`,
+      };
+    }
+
     const options = new Set(field.options ?? []);
     const invalid = value.find((item) => !options.has(item));
     return invalid === undefined
@@ -812,7 +867,16 @@ function validateValue(
     };
   }
 
-  if (field.maxLength !== undefined && value.length > field.maxLength) {
+  if (containsUnsupportedControlCharacters(value)) {
+    return {
+      code: 'invalid_type',
+      fieldName: field.name,
+      message: `${field.name} contains unsupported control characters.`,
+    };
+  }
+
+  // eslint-disable-next-line typescript/no-misused-spread -- PDF maxLength counts Unicode code points.
+  if (field.maxLength !== undefined && [...value].length > field.maxLength) {
     return {
       code: 'invalid_type',
       fieldName: field.name,
@@ -829,6 +893,8 @@ function validateProvenance(
   fieldName: string,
 ): StateError | null {
   if (
+    provenance === null ||
+    typeof provenance !== 'object' ||
     !PROVENANCE_KINDS.has(provenance.kind) ||
     !Number.isFinite(provenance.confidence) ||
     provenance.confidence < 0 ||
@@ -1327,6 +1393,10 @@ export async function stageFieldUpdates(
     if (provenanceError !== null) errors.push(provenanceError);
   }
 
+  if (errors.length > 0) {
+    return deepFreeze({ ok: false, state, errors: stateErrors(...errors) });
+  }
+
   const nextProvenanceByField = new Map(
     Object.entries(state.draft).map(([fieldName, staged]) => [
       fieldName,
@@ -1339,10 +1409,12 @@ export async function stageFieldUpdates(
   const provenanceBudgetError = validatePlanProvenanceBudget([
     ...nextProvenanceByField.values(),
   ]);
-  if (provenanceBudgetError !== null) errors.push(provenanceBudgetError);
-
-  if (errors.length > 0) {
-    return deepFreeze({ ok: false, state, errors: stateErrors(...errors) });
+  if (provenanceBudgetError !== null) {
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors(provenanceBudgetError),
+    });
   }
 
   const nextDraft = createRecord<Readonly<StagedFieldValue>>();
@@ -1842,11 +1914,25 @@ export async function exportFillPackageFromUi(
     });
   }
 
-  const { inspectPdf } = await import(
+  const { inspectPdf, PdfEngineError } = await import(
     // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
     './pdf-engine.ts'
   );
-  const inspection = await inspectPdf(source);
+  let inspection: PdfInspection;
+  try {
+    inspection = await inspectPdf(source);
+  } catch (error) {
+    if (!(error instanceof PdfEngineError)) throw error;
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'verification_failed',
+        fieldName: error.fieldName,
+        message: error.message,
+      }),
+    });
+  }
   const inspectedFields = createRecord<Readonly<FormFieldDefinition>>();
   for (const descriptor of inspection.fields) {
     inspectedFields[descriptor.name] =
@@ -2451,16 +2537,34 @@ async function exportApprovedPdfWithStrategy(
   }
 
   const values = approvedDraftValues(state);
-  const { applyApprovedValues, applyConfirmedDerivativeValues } = await import(
+  const {
+    applyApprovedValues,
+    applyConfirmedDerivativeValues,
+    PdfEngineError,
+  } = await import(
     // @ts-expect-error -- Node's type-stripping test runner requires the explicit extension.
     './pdf-engine.ts'
   );
-  const applyResult =
-    strategy === 'filled_pdf'
-      ? await applyApprovedValues(source, values)
-      : await applyConfirmedDerivativeValues(source, values, {
-          humanConfirmedProtectionLoss,
-        });
+  let applyResult: ApplyResult;
+  try {
+    applyResult =
+      strategy === 'filled_pdf'
+        ? await applyApprovedValues(source, values)
+        : await applyConfirmedDerivativeValues(source, values, {
+            humanConfirmedProtectionLoss,
+          });
+  } catch (error) {
+    if (!(error instanceof PdfEngineError)) throw error;
+    return deepFreeze({
+      ok: false,
+      state,
+      errors: stateErrors({
+        code: 'verification_failed',
+        fieldName: error.fieldName,
+        message: error.message,
+      }),
+    });
+  }
   const errors: StateError[] = [];
 
   if (applyResult.sourceHash !== sourceHash) {
