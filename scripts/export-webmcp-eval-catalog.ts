@@ -1,4 +1,7 @@
 import { writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+import { format } from 'oxfmt';
 
 import type {
   FormProofAdapterResult,
@@ -39,4 +42,12 @@ const tools = createFormProofToolDefinitions(
 }));
 
 const outputPath = new URL('../evals/tools.json', import.meta.url);
-await writeFile(outputPath, `${JSON.stringify({ tools }, null, 2)}\n`, 'utf8');
+const formatted = await format(
+  fileURLToPath(outputPath),
+  JSON.stringify({ tools }),
+  { printWidth: 80 },
+);
+if (formatted.errors.length > 0) {
+  throw new TypeError('The WebMCP eval catalog could not be formatted.');
+}
+await writeFile(outputPath, formatted.code, 'utf8');

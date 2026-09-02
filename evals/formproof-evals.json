@@ -2509,6 +2509,7 @@
           "ok": false,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "refresh_form_context",
           "error": {
             "code": "STATE_VERSION_CONFLICT",
@@ -3116,6 +3117,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "6b30860f0b54cba9df1a54d4eb007dc93a6c785b5253516604530b1c1898e2f6",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "get_field_evidence",
           "data": {
             "contextProjection": "identity_only",
@@ -3218,6 +3220,7 @@
           "ok": true,
           "stateVersion": 0,
           "sourceHash": "6b30860f0b54cba9df1a54d4eb007dc93a6c785b5253516604530b1c1898e2f6",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "retry_with_different_query",
           "data": {
             "document": {
@@ -3402,10 +3405,11 @@
           "ok": false,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "fix_tool_input",
           "error": {
             "code": "INVALID_INPUT",
-            "message": "The context cursor does not match this lexical query scope."
+            "message": "The tool input did not match the required contract."
           },
           "outputTruncated": false
         }
@@ -3497,10 +3501,11 @@
           "ok": false,
           "stateVersion": 0,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "refresh_form_context",
           "error": {
             "code": "SOURCE_HASH_MISMATCH",
-            "message": "The field cursor belongs to a different PDF."
+            "message": "The active PDF does not match the referenced source hash."
           },
           "outputTruncated": false
         }

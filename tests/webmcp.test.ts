@@ -442,7 +442,7 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   );
   assert.match(
     byName(tools, 'get_form_context').description,
-    /not semantic inference/u,
+    /Search is lexical, not semantic\./u,
   );
   assert.match(
     byName(tools, 'get_form_context').description,
@@ -455,7 +455,11 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   const contextSchema = byName(tools, 'get_form_context').inputSchema as {
     properties: {
       cursor: { description: string; maxLength: number };
-      queries: { description: string; maxItems: number };
+      queries: {
+        description: string;
+        maxItems: number;
+        items: { description: string };
+      };
     };
   };
   assert.match(
@@ -471,20 +475,29 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   assert.ok(contextSchema.properties.queries.description.length <= 150);
   assert.match(
     contextSchema.properties.queries.description,
-    /bounded untrusted XFA text/u,
+    /Up to 3 lexical queries/u,
   );
   assert.match(
     contextSchema.properties.queries.description,
-    /exact-SOM and tooltip gating/u,
+    /field names, labels, and tooltips/u,
   );
+  assert.match(contextSchema.properties.queries.description, /not semantic/u);
   assert.match(
-    contextSchema.properties.queries.description,
-    /not semantic search/u,
+    contextSchema.properties.queries.items.description,
+    /words from a field name, label, or tooltip/u,
   );
   assert.equal(contextSchema.properties.queries.maxItems, 3);
   assert.match(
     byName(tools, 'validate_fill_plan').description,
     /does not prove whole-form completion, execute or validate PDF JavaScript/u,
+  );
+  assert.match(
+    byName(tools, 'validate_fill_plan').description,
+    /readyForReview can be true for an incomplete Fill package/u,
+  );
+  assert.match(
+    byName(tools, 'start_fill_review').description,
+    /only the person can confirm fields/u,
   );
 });
 
@@ -669,6 +682,50 @@ void test('keeps context and evidence requests within semantic page limits', asy
   });
   assert.equal(ambiguousChoicePage.ok, false);
   assert.equal(ambiguousChoicePage.error.code, 'INVALID_INPUT');
+});
+
+void test('accepts missing input for the zero-argument protection tool', async () => {
+  const received: unknown[] = [];
+  const { tools } = await captureTools(
+    createAdapter({
+      getPdfProtection: async (input) => {
+        received.push(input);
+        return success(USAGE_RIGHTS_TOOL_DATA);
+      },
+    }),
+  );
+
+  assert.equal(
+    (await byName(tools, 'get_pdf_protection').execute(undefined)).ok,
+    true,
+  );
+  assert.equal(
+    (await byName(tools, 'get_pdf_protection').execute(null)).ok,
+    true,
+  );
+  assert.deepEqual(received, [{}, {}]);
+});
+
+void test('accepts missing input for default form context discovery', async () => {
+  const received: unknown[] = [];
+  const { tools } = await captureTools(
+    createAdapter({
+      getFormContext: async (input) => {
+        received.push(input);
+        return success({ fields: [] });
+      },
+    }),
+  );
+
+  assert.equal(
+    (await byName(tools, 'get_form_context').execute(undefined)).ok,
+    true,
+  );
+  assert.equal(
+    (await byName(tools, 'get_form_context').execute(null)).ok,
+    true,
+  );
+  assert.deepEqual(received, [{ limit: 6 }, { limit: 6 }]);
 });
 
 void test('rejects ambiguous or unusable context search inputs', async () => {
@@ -1437,6 +1494,7 @@ void test('marks imported proposals as untrusted without treating imported human
     'imported_human',
   ]);
   assert.equal(evidence.fields[0].importedProposal, true);
+  assert.equal(evidence.fields[0].provenanceTrust, 'unverified_import');
   assert.equal(Object.hasOwn(evidence.fields[0], 'humanPinned'), false);
   assert.deepEqual(evidence.fields[0].provenance, {
     kind: 'human_entry',
@@ -2970,6 +3028,87 @@ void test('maps state and PDF errors without exposing adapter details', async ()
     );
     assert.equal('details' in response.error, false, internalCode);
   }
+});
+
+void test('directs consent failures to the human consent boundary', async () => {
+  const { tools } = await captureTools(
+    createAdapter({
+      getFormContext: async () => ({
+        ok: false,
+        stateVersion: 4,
+        sourceHash: SOURCE_HASH,
+        documentSessionId: DOCUMENT_SESSION_ID,
+        error: { code: 'consent_required' },
+      }),
+    }),
+  );
+
+  const response = await byName(tools, 'get_form_context').execute({});
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'CONSENT_REQUIRED');
+  assert.equal(response.nextAction, 'human_consent_required');
+});
+
+void test('returns cursor issue paths from adapter failures', async () => {
+  const { tools } = await captureTools(
+    createAdapter({
+      getFormContext: async () => ({
+        ok: false,
+        stateVersion: 4,
+        sourceHash: SOURCE_HASH,
+        documentSessionId: DOCUMENT_SESSION_ID,
+        error: {
+          code: 'invalid_input',
+          details: [{ code: 'invalid_input', path: 'input.cursor' }],
+        },
+      }),
+    }),
+  );
+
+  const response = await byName(tools, 'get_form_context').execute({});
+  assert.equal(response.ok, false);
+  assert.deepEqual(response.error.issues, [
+    { code: 'INVALID_INPUT', path: 'input.cursor' },
+  ]);
+});
+
+void test('explains and identifies a human-corrected field lock', async () => {
+  const { tools } = await captureTools(
+    createAdapter({
+      stageFormValues: async () => ({
+        ok: false,
+        stateVersion: 4,
+        sourceHash: SOURCE_HASH,
+        documentSessionId: DOCUMENT_SESSION_ID,
+        error: {
+          code: 'human_pinned',
+          details: [{ code: 'human_pinned', fieldName: 'name' }],
+        },
+      }),
+    }),
+  );
+  const response = await byName(tools, 'stage_form_values').execute({
+    expectedDocumentSessionId: DOCUMENT_SESSION_ID,
+    expectedStateVersion: 4,
+    expectedSourceHash: SOURCE_HASH,
+    updates: [
+      {
+        fieldName: 'name',
+        value: 'Ari',
+        provenance: { kind: 'user_instruction', confidence: 1 },
+      },
+    ],
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'HUMAN_ACTION_REQUIRED');
+  assert.equal(
+    response.error.message,
+    'A person corrected this field in the review UI; it is locked against agent changes for this loaded session.',
+  );
+  assert.deepEqual(response.error.issues, [
+    { code: 'HUMAN_ACTION_REQUIRED', fieldName: 'name' },
+  ]);
 });
 
 void test('returns bounded public issues without leaking adapter details', async () => {

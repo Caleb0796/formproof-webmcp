@@ -69,6 +69,7 @@
           "ok": true,
           "stateVersion": 1,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "validate_fill_plan",
           "data": {
             "changedFields": ["frm.c8v3", "frm.p0x4", "frm.q7f1", "frm.r4d6"],
@@ -145,6 +146,7 @@
           "ok": false,
           "stateVersion": 2,
           "sourceHash": "a051e79abfc64995de8b64e2e65497113f07223fb241909d4042d91077993474",
+          "documentSessionId": "be0fe9800d687a851cd0167433179f03",
           "nextAction": "refresh_form_context",
           "error": {
             "code": "STATE_VERSION_CONFLICT",
