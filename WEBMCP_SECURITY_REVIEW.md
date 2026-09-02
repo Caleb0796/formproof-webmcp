@@ -1,3 +1,5 @@
+> **Status note (English, 2026-09-01).** This audit is pinned to baseline `32257f8` and is retained as the original review record. Current tree: SEC-01 addressed in `23d80f0` (content-risk gating with tests); SEC-02, SEC-04, SEC-05, SEC-06, SEC-07, SEC-08, ROB-01, PRIV-01 fixed; SEC-03 mitigated by a bounded preflight inside a terminable worker (export paths still re-parse on the main thread); TM-01 addressed by scoping the claim to the WebMCP tool surface; DEPLOY-01 verified on the live origin (`Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY`); HARD-01 remains open (no cumulative value budget beyond per-call and per-value limits).
+
 # FormProof WebMCP 安全问题报表与修复计划
 
 > 审计结论：当前没有确认的 Critical 漏洞；确认 1 项 High、3 项 Medium、4 项 Low 安全问题，另有 1 项 Low 正确性缺陷、1 项尚未证明造成实际伤害的 hardening 候选，以及 3 项必须由产品威胁模型或真实部署证据裁决的条件性风险。最高优先级问题不是签名分级，而是未受信任 PDF 中可达的 JavaScript 和嵌入附件等未验证载荷会被保留到写入新 PII 的输出 PDF。

@@ -7,7 +7,7 @@ FormProof is a local-first PDF form workbench where an agent can inspect and sta
 
 **Live app:** [formproof-webmcp.skywalker1226.chatgpt.site](https://formproof-webmcp.skywalker1226.chatgpt.site)
 
-> Submission gate: the app, source repository, evidence release, and demo video must all be publicly accessible without signing in. Until those external release gates are verified, this project must not be represented as Challenge-ready.
+> Release gates: the live app and this repository are the evaluated artifacts at the deployed commit. The public demo video link and the evidence release are added at submission time; their current state is recorded in the sections below.
 
 ## Try it in 30 seconds
 
