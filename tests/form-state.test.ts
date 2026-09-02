@@ -263,6 +263,94 @@ void test('degrades only malformed inspected PDF fields to read-only text', asyn
   });
 });
 
+void test('degrades inspected PDF values with bidi controls to inert read-only text', async () => {
+  const document = await PDFDocument.create();
+  const page = document.addPage([320, 180]);
+  const pdfField = document.getForm().createTextField('unsafe_source');
+  pdfField.addToPage(page, { x: 40, y: 80, width: 240, height: 28 });
+  pdfField.acroField.dict.set(
+    PDFName.of('V'),
+    PDFHexString.fromText('abc\u202edef'),
+  );
+  const source = Uint8Array.from(
+    await document.save({
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      useObjectStreams: false,
+    }),
+  );
+
+  const inspection = await inspectPdf(source);
+  assert.equal(inspection.fields[0].current, 'abc\u202edef');
+  const state = await createFormState(
+    {
+      fileName: 'unsafe-source.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const field = state.fields.unsafe_source;
+  assert.equal(field.type, 'text');
+  assert.equal(field.readOnly, true);
+  assert.equal(field.humanOnly, true);
+  assert.equal(field.sourceValue, 'abcdef');
+  assert.doesNotMatch(
+    String(field.sourceValue),
+    /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u,
+  );
+
+  const staged = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: field.name,
+        value: 'replacement',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, false);
+  if (staged.ok) throw new Error('degraded PDF field was staged');
+  assert.equal(
+    staged.errors.some(({ code }) => code === 'read_only'),
+    true,
+  );
+});
+
+void test('degrades PDF choices containing bidi controls instead of rejecting the form', async () => {
+  const definition = createFormFieldDefinitionFromPdf({
+    name: 'unsafe_options',
+    type: 'dropdown',
+    current: 'Safe',
+    options: ['Safe', 'Unsafe\u202e'],
+    choices: [],
+    multiSelect: false,
+    required: false,
+    readOnly: false,
+    humanOnly: false,
+    page: 1,
+    rect: null,
+    maxLength: null,
+    tooltip: null,
+    widgetCount: 1,
+    widgets: [],
+  });
+  const state = await createFormState(SOURCE, [definition]);
+  assert.deepEqual(state.fields.unsafe_options, {
+    name: 'unsafe_options',
+    label: 'unsafe_options',
+    type: 'text',
+    required: false,
+    readOnly: true,
+    humanOnly: true,
+    sourceValue: 'Safe',
+  });
+});
+
 async function createTextFormPdf(fieldName: string): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([320, 180]);
@@ -1293,9 +1381,13 @@ void test('rejects duplicate, unknown, read-only, human-only, signature, type, a
   assert.equal(result.state, state);
 });
 
-void test('rejects unsupported text and option-list control characters', async () => {
+void test('rejects unsupported text and choice control characters', async () => {
   const state = await initialState();
-  for (const value of ['Ada\u0000Lovelace', 'Ada\u202eLovelace']) {
+  for (const value of [
+    'Ada\u0000Lovelace',
+    'Ada\u202eLovelace',
+    'Ada\u200fLovelace',
+  ]) {
     const result = await stageFieldUpdates(state, {
       expectedStateVersion: state.stateVersion,
       expectedSourceHash: state.source.sourceHash,
@@ -1330,6 +1422,40 @@ void test('rejects unsupported text and option-list control characters', async (
     throw new Error('option-list control character was staged');
   }
   assert.equal(optionListResult.errors[0].code, 'invalid_type');
+
+  const dropdownResult = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'region',
+        value: 'CA\u202e',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(dropdownResult.ok, false);
+  if (dropdownResult.ok) throw new Error('dropdown bidi control was staged');
+  assert.equal(dropdownResult.errors[0].code, 'invalid_type');
+
+  const multiSelectResult = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'programs',
+        value: ['Health\u061c'],
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(multiSelectResult.ok, false);
+  if (multiSelectResult.ok) {
+    throw new Error('multi-select bidi control was staged');
+  }
+  assert.equal(multiSelectResult.errors[0].code, 'invalid_type');
 });
 
 void test('accepts multiline text and counts maxLength in code points', async () => {
@@ -1430,6 +1556,49 @@ void test('returns invalid_provenance for malformed runtime provenance', async (
     if (result.ok) throw new Error('malformed provenance was staged');
     assert.equal(result.errors[0].code, 'invalid_provenance');
     assert.equal(result.state, state);
+  }
+});
+
+void test('rejects control characters in provenance with exact paths', async () => {
+  const state = await initialState();
+  for (const [provenance, path] of [
+    [
+      {
+        kind: 'user_instruction',
+        confidence: 0.9,
+        evidence: ['safe', 'unsafe\u202e'],
+      },
+      'updates[0].provenance.evidence[1]',
+    ],
+    [
+      {
+        kind: 'user_instruction',
+        confidence: 0.9,
+        rationale: 'unsafe\u200f',
+      },
+      'updates[0].provenance.rationale',
+    ],
+  ] as const) {
+    const result = await stageFieldUpdates(state, {
+      expectedStateVersion: state.stateVersion,
+      expectedSourceHash: state.source.sourceHash,
+      actor: 'agent',
+      updates: [
+        {
+          fieldName: 'full_name',
+          value: 'Ada Lovelace',
+          provenance,
+        },
+      ],
+    });
+    assert.equal(result.ok, false, path);
+    if (result.ok) throw new Error(`${path} was staged`);
+    assert.deepEqual(result.errors[0], {
+      code: 'invalid_provenance',
+      fieldName: 'full_name',
+      path,
+      message: `${path} contains unsupported control characters.`,
+    });
   }
 });
 

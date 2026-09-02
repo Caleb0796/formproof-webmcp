@@ -294,9 +294,10 @@ function stateErrorFailure(
     state,
     first?.code ?? 'internal_error',
     first?.message ?? 'The operation could not be completed.',
-    errors.map(({ code, fieldName }) => ({
+    errors.map(({ code, fieldName, path }) => ({
       code,
       ...(fieldName === undefined ? {} : { fieldName }),
+      ...(path === undefined ? {} : { path }),
     })),
   );
 }
@@ -647,12 +648,15 @@ export function FormProofWorkbench() {
     null,
   );
   const [notice, setNotice] = useState<string | null>(null);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [error, setErrorState] = useState<string | null>(null);
   const setError = useCallback((message: string | null) => {
     if (message !== null) setNotice(null);
     setErrorState(message);
   }, []);
-  const [promptCopied, setPromptCopied] = useState(false);
+  const [promptCopyStatus, setPromptCopyStatus] = useState<
+    'idle' | 'copied' | 'selected'
+  >('idle');
   const [toolState, setToolState] = useState<ToolState>({
     status: 'registering',
     count: 0,
@@ -677,12 +681,12 @@ export function FormProofWorkbench() {
       selection?.removeAllRanges();
       selection?.addRange(range);
     }
-    setPromptCopied(true);
+    setPromptCopyStatus(copied ? 'copied' : 'selected');
     if (copyPromptTimerRef.current !== null) {
       window.clearTimeout(copyPromptTimerRef.current);
     }
     copyPromptTimerRef.current = window.setTimeout(
-      () => setPromptCopied(false),
+      () => setPromptCopyStatus('idle'),
       2_000,
     );
   }, []);
@@ -749,6 +753,7 @@ export function FormProofWorkbench() {
       reviewLockRef.current = false;
       reviewBindingRef.current = null;
       setReviewOpen(false);
+      setReviewNotice(null);
       setConfirmedFields(new Set());
       setActiveContentAcknowledged(false);
       setProtectionLossAcknowledged(false);
@@ -769,6 +774,7 @@ export function FormProofWorkbench() {
     reviewLockRef.current = false;
     reviewBindingRef.current = null;
     setReviewOpen(false);
+    setReviewNotice(null);
     setConfirmedFields(new Set());
     setActiveContentAcknowledged(false);
     setProtectionLossAcknowledged(false);
@@ -874,6 +880,7 @@ export function FormProofWorkbench() {
     dismissedReviewBindingRef.current = null;
     setLoading(true);
     setReviewOpen(false);
+    setReviewNotice(null);
     setConfirmedFields(new Set());
     setActiveContentAcknowledged(false);
     setProtectionLossAcknowledged(false);
@@ -994,6 +1001,7 @@ export function FormProofWorkbench() {
         reviewLockRef.current = false;
         reviewBindingRef.current = null;
         setReviewOpen(false);
+        setReviewNotice(null);
         setConfirmedFields(new Set());
         setActiveContentAcknowledged(false);
         setNotice(
@@ -1095,7 +1103,7 @@ export function FormProofWorkbench() {
 
     const showReviewMutationRefusal = () => {
       if (!mountedRef.current) return;
-      setNotice(
+      setReviewNotice(
         'The agent tried to change the plan while you were reviewing it. The change was refused; close the review to let it try again.',
       );
     };
@@ -2069,6 +2077,7 @@ export function FormProofWorkbench() {
       reviewLockRef.current = false;
       reviewBindingRef.current = null;
       setReviewOpen(false);
+      setReviewNotice(null);
       setConfirmedFields(new Set());
       setActiveContentAcknowledged(false);
       setProtectionLossAcknowledged(false);
@@ -2196,6 +2205,7 @@ export function FormProofWorkbench() {
       reviewLockRef.current = false;
       reviewBindingRef.current = null;
       setReviewOpen(false);
+      setReviewNotice(null);
       setConfirmedFields(new Set());
       setActiveContentAcknowledged(false);
       setProtectionLossAcknowledged(false);
@@ -2962,7 +2972,11 @@ export function FormProofWorkbench() {
                     size="xs"
                     onClick={() => void copyAgentPrompt()}
                   >
-                    {promptCopied ? 'Copied' : 'Copy prompt'}
+                    {promptCopyStatus === 'copied'
+                      ? 'Copied'
+                      : promptCopyStatus === 'selected'
+                        ? 'Selected — press ⌘/Ctrl+C'
+                        : 'Copy prompt'}
                   </Button>
                 </>
               ) : (
@@ -3083,8 +3097,9 @@ export function FormProofWorkbench() {
                     </small>
                     {entry.provenance.confidence < 0.8 && (
                       <small className="human-only-note">
-                        Low confidence ({confidence}%) — the agent marked this
-                        as an inference; read the rationale.
+                        {entry.provenance.kind === 'agent_inference'
+                          ? `Low confidence (${confidence}%) — the agent marked this as an inference; read the rationale.`
+                          : `Low confidence (${confidence}%) — check the evidence before confirming.`}
                       </small>
                     )}
                     {requiresIdentityReview && (
@@ -3343,6 +3358,12 @@ export function FormProofWorkbench() {
           </div>
 
           <div className="review-dialog-body">
+            {reviewNotice && (
+              <output className="dialog-safety-note">
+                <CheckCircle2 aria-hidden="true" />
+                <span>{reviewNotice}</span>
+              </output>
+            )}
             {importedProposalNames.length > 0 && (
               <div className="dialog-safety-note">
                 <FileJson aria-hidden="true" />
@@ -3551,8 +3572,9 @@ export function FormProofWorkbench() {
                         )}
                         {staged && staged.provenance.confidence < 0.8 && (
                           <span className="human-only-note">
-                            Low confidence ({confidence}%) — the agent marked
-                            this as an inference; read the rationale.
+                            {staged.provenance.kind === 'agent_inference'
+                              ? `Low confidence (${confidence}%) — the agent marked this as an inference; read the rationale.`
+                              : `Low confidence (${confidence}%) — check the evidence before confirming.`}
                           </span>
                         )}
                         {requiresIdentityReview && (

@@ -418,6 +418,7 @@ void test('registers the exact safe tool catalog sequentially', async () => {
   const prohibited = /approve|export|download|sign|submit|complete/i;
   for (const tool of tools) {
     assert.doesNotMatch(tool.name, prohibited);
+    assert.ok(tool.description.length <= 500, tool.name);
     assertEveryObjectSchemaIsClosed(tool.inputSchema, tool.name);
     assert.equal(tool.annotations.untrustedContentHint, true);
     assert.doesNotMatch(
@@ -499,6 +500,16 @@ void test('registers the exact safe tool catalog sequentially', async () => {
     byName(tools, 'start_fill_review').description,
     /only the person can confirm fields/u,
   );
+  for (const toolName of [
+    'get_field_evidence',
+    'validate_fill_plan',
+    'start_fill_review',
+  ] as const) {
+    assert.match(
+      byName(tools, toolName).description,
+      /Requires field-data sharing for this PDF load\./u,
+    );
+  }
 });
 
 void test('reports exact PDF protection without allowing agent strategy selection', async () => {

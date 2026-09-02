@@ -302,8 +302,13 @@ a {
     padding-inline: 16px;
   }
 
-  .intro-button-note {
+  .intro .intro-actions .intro-button-note {
     width: 100%;
+    margin: 8px 0 0;
+    color: #778179;
+    font-size: 12px;
+    line-height: 1.55;
+    text-align: right;
   }
 
   .workspace {
@@ -726,6 +731,10 @@ a {
 
   .intro-actions {
     flex-wrap: wrap;
+  }
+
+  .intro .intro-actions .intro-button-note {
+    text-align: center;
   }
 
   .workspace {
@@ -1188,17 +1197,6 @@ a {
     background: #1f5c44;
   }
 
-  .receipt-download > span,
-  .receipt-download small {
-    display: block;
-  }
-
-  .receipt-download small {
-    margin-top: 2px;
-    font-size: 11px;
-    font-weight: 400;
-  }
-
   .review-dialog {
     width: min(820px, calc(100vw - 32px));
     max-width: none !important;
@@ -1443,6 +1441,31 @@ a {
     margin: 0 -22px -22px;
     padding: 14px 22px;
   }
+}
+
+.receipt-download {
+  display: flex;
+  height: auto;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  text-align: center;
+  white-space: normal;
+}
+
+.receipt-download > span,
+.receipt-download small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.receipt-download small {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
 }
 
 @keyframes formproof-spin {

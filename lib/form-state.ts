@@ -162,9 +162,12 @@ export function createFormFieldDefinitionFromPdf(
       definition.type === 'dropdown' ||
       definition.type === 'option-list') &&
     definition.options === undefined;
+  const choiceWithUnsupportedOptions =
+    definition.options?.some(containsUnsupportedControlCharacters) ?? false;
   if (
     !unsupported &&
     (choiceWithoutOptions ||
+      choiceWithUnsupportedOptions ||
       validateValue(definition, definition.sourceValue) !== null)
   ) {
     return {
@@ -177,11 +180,13 @@ export function createFormFieldDefinitionFromPdf(
       ...(definition.identityReviewReasons === undefined
         ? {}
         : { identityReviewReasons: definition.identityReviewReasons }),
-      sourceValue: Array.isArray(definition.sourceValue)
-        ? definition.sourceValue.join(', ')
-        : definition.sourceValue === null
-          ? ''
-          : String(definition.sourceValue),
+      sourceValue: sanitizeUnsupportedCharacters(
+        Array.isArray(definition.sourceValue)
+          ? definition.sourceValue.join(', ')
+          : definition.sourceValue === null
+            ? ''
+            : String(definition.sourceValue),
+      ),
     };
   }
   return definition;
@@ -304,6 +309,7 @@ export interface StateError {
   readonly code: StateErrorCode;
   readonly message: string;
   readonly fieldName?: string;
+  readonly path?: string;
 }
 
 export interface StageFieldUpdatesRequest {
@@ -743,23 +749,55 @@ function missingValue(value: FormFieldValue): boolean {
   );
 }
 
+function isUnsupportedCodePoint(codePoint: number): boolean {
+  return (
+    (codePoint <= 0x1f &&
+      codePoint !== 0x09 &&
+      codePoint !== 0x0a &&
+      codePoint !== 0x0d) ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    codePoint === 0x061c ||
+    codePoint === 0x200e ||
+    codePoint === 0x200f ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2066 && codePoint <= 0x2069)
+  );
+}
+
 function containsUnsupportedControlCharacters(value: string): boolean {
   if (!value.isWellFormed()) return true;
   for (const character of value) {
-    const codePoint = character.codePointAt(0)!;
-    if (
-      (codePoint <= 0x1f &&
-        codePoint !== 0x09 &&
-        codePoint !== 0x0a &&
-        codePoint !== 0x0d) ||
-      (codePoint >= 0x7f && codePoint <= 0x9f) ||
-      (codePoint >= 0x202a && codePoint <= 0x202e) ||
-      (codePoint >= 0x2066 && codePoint <= 0x2069)
-    ) {
-      return true;
-    }
+    if (isUnsupportedCodePoint(character.codePointAt(0)!)) return true;
   }
   return false;
+}
+
+function sanitizeUnsupportedCharacters(value: string): string {
+  let sanitized = '';
+  for (let index = 0; index < value.length;) {
+    const first = value.charCodeAt(index);
+    if (first >= 0xd800 && first <= 0xdbff) {
+      const second = value.charCodeAt(index + 1);
+      if (second < 0xdc00 || second > 0xdfff) {
+        index += 1;
+        continue;
+      }
+      const character = value.slice(index, index + 2);
+      index += 2;
+      if (!isUnsupportedCodePoint(character.codePointAt(0)!)) {
+        sanitized += character;
+      }
+      continue;
+    }
+    if (first >= 0xdc00 && first <= 0xdfff) {
+      index += 1;
+      continue;
+    }
+    const character = value[index];
+    index += 1;
+    if (!isUnsupportedCodePoint(first)) sanitized += character;
+  }
+  return sanitized;
 }
 
 function allowsMultiple(field: FormFieldDefinition): boolean {
@@ -782,6 +820,23 @@ function validateValue(
   field: FormFieldDefinition,
   value: FormFieldValue,
 ): StateError | null {
+  if (
+    (typeof value === 'string' &&
+      containsUnsupportedControlCharacters(value)) ||
+    (Array.isArray(value) &&
+      value.some(
+        (item) =>
+          typeof item === 'string' &&
+          containsUnsupportedControlCharacters(item),
+      ))
+  ) {
+    return {
+      code: 'invalid_type',
+      fieldName: field.name,
+      message: `${field.name} contains unsupported control characters.`,
+    };
+  }
+
   if (field.type === 'checkbox') {
     return typeof value === 'boolean'
       ? null
@@ -836,14 +891,6 @@ function validateValue(
       };
     }
 
-    if (value.some(containsUnsupportedControlCharacters)) {
-      return {
-        code: 'invalid_type',
-        fieldName: field.name,
-        message: `${field.name} contains unsupported control characters.`,
-      };
-    }
-
     const options = new Set(field.options ?? []);
     const invalid = value.find((item) => !options.has(item));
     return invalid === undefined
@@ -867,14 +914,6 @@ function validateValue(
     };
   }
 
-  if (containsUnsupportedControlCharacters(value)) {
-    return {
-      code: 'invalid_type',
-      fieldName: field.name,
-      message: `${field.name} contains unsupported control characters.`,
-    };
-  }
-
   // eslint-disable-next-line typescript/no-misused-spread -- PDF maxLength counts Unicode code points.
   if (field.maxLength !== undefined && [...value].length > field.maxLength) {
     return {
@@ -891,6 +930,7 @@ function validateProvenance(
   provenance: FieldProvenance,
   actor: UpdateActor,
   fieldName: string,
+  path: string,
 ): StateError | null {
   if (
     provenance === null ||
@@ -916,6 +956,32 @@ function validateProvenance(
       code: 'invalid_provenance',
       fieldName,
       message: `${fieldName} has malformed provenance.`,
+    };
+  }
+
+  const unsupportedEvidenceIndex = provenance.evidence?.findIndex(
+    containsUnsupportedControlCharacters,
+  );
+  if (unsupportedEvidenceIndex !== undefined && unsupportedEvidenceIndex >= 0) {
+    const issuePath = `${path}.evidence[${unsupportedEvidenceIndex}]`;
+    return {
+      code: 'invalid_provenance',
+      fieldName,
+      path: issuePath,
+      message: `${issuePath} contains unsupported control characters.`,
+    };
+  }
+
+  if (
+    provenance.rationale !== undefined &&
+    containsUnsupportedControlCharacters(provenance.rationale)
+  ) {
+    const issuePath = `${path}.rationale`;
+    return {
+      code: 'invalid_provenance',
+      fieldName,
+      path: issuePath,
+      message: `${issuePath} contains unsupported control characters.`,
     };
   }
 
@@ -1339,7 +1405,7 @@ export async function stageFieldUpdates(
   const errors: StateError[] = [];
   const seen = new Set<string>();
 
-  for (const update of request.updates) {
+  for (const [updateIndex, update] of request.updates.entries()) {
     if (seen.has(update.fieldName)) {
       errors.push({
         code: 'duplicate_update',
@@ -1398,6 +1464,7 @@ export async function stageFieldUpdates(
       update.provenance,
       request.actor,
       update.fieldName,
+      `updates[${updateIndex}].provenance`,
     );
     if (provenanceError !== null) errors.push(provenanceError);
   }
@@ -2436,7 +2503,12 @@ export async function importFillPackageFromUi(
     } as unknown as FieldProvenance;
     const actor: UpdateActor =
       provenance.kind === 'human_entry' ? 'human' : 'agent';
-    const provenanceError = validateProvenance(provenance, actor, fieldName);
+    const provenanceError = validateProvenance(
+      provenance,
+      actor,
+      fieldName,
+      `plan.stagedFields[${index}].provenance`,
+    );
     if (provenanceError !== null) {
       errors.push(provenanceError);
       continue;

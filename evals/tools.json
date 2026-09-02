@@ -52,7 +52,7 @@
     },
     {
       "name": "get_field_evidence",
-      "description": "Read source values, staged provenance, imported-proposal markers, human-correction locks, field-identity review requirements, geometry, and byte-paginated value/label choices for up to three fields at one document version. Over-budget batches return only whole fields and require a narrower retry; one irreducible field stays whole under the hard response cap. Discovery hints are never returned as labels or evidence.",
+      "description": "Read source values, staged provenance, imported-proposal markers, human-correction locks, field-identity review requirements, geometry, and byte-paginated value/label choices for up to three fields at one document version. Over-budget batches return only whole fields and require a narrower retry; one irreducible field stays whole under the hard response cap. Discovery hints are never returned as labels or evidence. Requires field-data sharing for this PDF load.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -222,7 +222,7 @@
     },
     {
       "name": "validate_fill_plan",
-      "description": "Validate a staged plan and report which human-reviewed artifacts remain available when the protection report offers them; unknown protection does not. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit. readyForReview can be true for an incomplete Fill package; it never means the whole form is complete or that any artifact was approved.",
+      "description": "Validate a staged plan and report which human-reviewed artifacts remain available when the protection report offers them; unknown protection does not. This does not prove whole-form completion, execute or validate PDF JavaScript, choose an export strategy, approve, export, sign, or submit. readyForReview can be true for an incomplete Fill package; it never means the whole form is complete or that any artifact was approved. Requires field-data sharing for this PDF load.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -256,7 +256,7 @@
     },
     {
       "name": "start_fill_review",
-      "description": "Open the visible review UI for the exact staged version. This WebMCP tool cannot approve or export; those controls exist only in the UI. After success, stop: only the person can confirm fields, choose an artifact, acknowledge risks, approve, and export in the UI.",
+      "description": "Open the visible review UI for the exact staged version. This WebMCP tool cannot approve or export; those controls exist only in the UI. After success, stop: only the person can confirm fields, choose an artifact, acknowledge risks, approve, and export in the UI. Requires field-data sharing for this PDF load.",
       "inputSchema": {
         "type": "object",
         "properties": {
