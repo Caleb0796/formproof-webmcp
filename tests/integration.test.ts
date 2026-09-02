@@ -441,7 +441,7 @@ void test('keeps public safety claims within the WebMCP tool boundary', async ()
   assert.doesNotMatch(workbench, /appearances (?:are )?verified/iu);
   assert.match(workbench, /normal appearance streams are present/iu);
   assert.match(workbench, /visual rendering is not independently checked/iu);
-  assert.match(layout, /Evidence-graded PDF filling/u);
+  assert.match(layout, /Human-approved PDF form filling with WebMCP/u);
   assert.doesNotMatch(publicCopy, /Agent-safe PDF filling|failed safely/u);
   for (const outcome of [
     'Filled PDF permitted by document policy',
