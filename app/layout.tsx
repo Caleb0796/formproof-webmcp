@@ -13,9 +13,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'FormProof — Evidence-graded PDF filling',
+  title: 'FormProof — Human-approved PDF form filling with WebMCP',
   description:
-    'A browser-side AcroForm workbench with evidence, diff review, and UI approval.',
+    'A local-first PDF form workbench: the agent inspects and stages values through six WebMCP tools; the person confirms, chooses the output, and exports.',
+  icons: { icon: '/favicon.svg' },
 };
 
 export default function RootLayout({

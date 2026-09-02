@@ -245,7 +245,7 @@ a {
     justify-content: space-between;
     gap: 48px;
     margin: 0 auto;
-    padding: 48px clamp(20px, 4vw, 64px) 28px;
+    padding: 28px clamp(20px, 4vw, 64px) 28px;
   }
 
   .intro > div:first-child {
@@ -292,6 +292,8 @@ a {
   .intro-actions {
     display: flex;
     flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 9px;
   }
 
@@ -300,8 +302,8 @@ a {
     padding-inline: 16px;
   }
 
-  .intro-actions button:last-child {
-    background: #1f5c44;
+  .intro-button-note {
+    width: 100%;
   }
 
   .workspace {
@@ -416,7 +418,7 @@ a {
   .flow-step small {
     margin-top: 2px;
     color: #859088;
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .safety-card {
@@ -442,7 +444,7 @@ a {
   .safety-card p {
     margin: 4px 0 0;
     color: #66766d;
-    font-size: 10px;
+    font-size: 12px;
     line-height: 1.45;
   }
 
@@ -472,7 +474,7 @@ a {
     padding: 4px 8px;
     color: #687269;
     background: rgb(255 255 255 / 62%);
-    font-size: 9px;
+    font-size: 11px;
   }
 
   .hash {
@@ -644,7 +646,7 @@ a {
   .button-note {
     margin: 0;
     color: #778179;
-    font-size: 10px;
+    font-size: 12px;
     line-height: 1.55;
   }
 
@@ -654,11 +656,27 @@ a {
     padding: 5px 0 5px 13px;
   }
 
-  .prompt-card blockquote {
+  .prompt-card p,
+  .prompt-card pre {
     margin: 7px 0 0;
     color: #47564d;
     font-size: 11px;
     line-height: 1.55;
+  }
+
+  .prompt-card pre {
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+  }
+
+  .prompt-card button {
+    margin-top: 9px;
+  }
+
+  .prompt-card .prompt-hint {
+    color: #66766d;
+    font-size: 12px;
   }
 
   .review-panel > button {
@@ -686,6 +704,12 @@ a {
   .review-panel .empty-review {
     margin-block: 18px;
   }
+
+  .pdf-frame,
+  .pdf-object,
+  .pdf-empty {
+    min-height: 460px;
+  }
 }
 
 @media (max-width: 780px) {
@@ -707,6 +731,14 @@ a {
   .workspace {
     width: calc(100% - 24px);
     grid-template-columns: 1fr;
+  }
+
+  .review-panel {
+    order: 2;
+  }
+
+  .document-panel {
+    order: 3;
   }
 
   .flow-panel,
@@ -739,15 +771,6 @@ a {
 @media (max-width: 520px) {
   .topbar {
     min-height: 58px;
-  }
-
-  .tool-badge {
-    font-size: 0;
-  }
-
-  .tool-badge::after {
-    content: 'Tools ready';
-    font-size: 11px;
   }
 
   .field-grid,
@@ -803,6 +826,17 @@ a {
     background: #fbf0ed;
   }
 
+  .notice-dismiss {
+    margin-left: auto;
+    border: 0;
+    padding: 2px 5px;
+    color: inherit;
+    background: transparent;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
   .tool-registering .status-dot {
     background: #d19b32;
   }
@@ -815,10 +849,6 @@ a {
   .tool-error .status-dot {
     background: #ba5540;
     box-shadow: 0 0 0 3px rgb(186 85 64 / 12%);
-  }
-
-  .spin {
-    animation: formproof-spin 0.8s linear infinite;
   }
 
   .pdf-frame {
@@ -843,6 +873,11 @@ a {
   }
 
   .pdf-object a {
+    color: #1f5c44;
+    text-decoration: underline;
+  }
+
+  .pdf-empty a {
     color: #1f5c44;
     text-decoration: underline;
   }
@@ -920,7 +955,7 @@ a {
 
   .draft-list {
     display: grid;
-    max-height: 330px;
+    max-height: 420px;
     gap: 7px;
     margin: 20px 0 16px;
     overflow: auto;
@@ -959,7 +994,7 @@ a {
 
   .validation-blocker-summary p {
     color: #68766e;
-    font-size: 9px;
+    font-size: 11px;
     line-height: 1.5;
   }
 
@@ -990,7 +1025,7 @@ a {
     min-width: 0;
     overflow-wrap: anywhere;
     color: #53645b;
-    font-size: 9px;
+    font-size: 11px;
     line-height: 1.45;
   }
 
@@ -1020,16 +1055,16 @@ a {
     flex: 0 0 auto;
     border-color: #d3ddd6;
     color: #50705e;
-    font-size: 8px;
+    font-size: 11px;
   }
 
   .draft-card > small {
     display: block;
+    min-width: 0;
     margin-top: 7px;
+    overflow-wrap: anywhere;
     color: #829087;
-    font-size: 8px;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    font-size: 11px;
   }
 
   .evidence-list {
@@ -1045,10 +1080,12 @@ a {
   }
 
   .evidence-list > li {
+    min-width: 0;
+    overflow-wrap: anywhere;
     border-left: 2px solid #bfd0c5;
     padding-left: 7px;
     color: #627168;
-    font-size: 8px;
+    font-size: 11px;
     line-height: 1.45;
   }
 
@@ -1059,7 +1096,7 @@ a {
     gap: 5px;
     margin-top: 9px;
     color: #7c8580;
-    font: 9px/1.35 var(--font-geist-mono);
+    font: 11px/1.35 var(--font-geist-mono);
   }
 
   .mini-diff span,
@@ -1132,7 +1169,7 @@ a {
     gap: 12px;
     border-bottom: 1px solid rgb(31 92 68 / 9%);
     padding-bottom: 5px;
-    font-size: 9px;
+    font-size: 11px;
   }
 
   .receipt-card dt {
@@ -1151,10 +1188,21 @@ a {
     background: #1f5c44;
   }
 
+  .receipt-download > span,
+  .receipt-download small {
+    display: block;
+  }
+
+  .receipt-download small {
+    margin-top: 2px;
+    font-size: 11px;
+    font-weight: 400;
+  }
+
   .review-dialog {
     width: min(820px, calc(100vw - 32px));
     max-width: none !important;
-    max-height: min(850px, calc(100vh - 32px));
+    max-height: min(850px, calc(100dvh - 32px));
     grid-template-rows: auto auto minmax(0, 1fr) auto;
     overflow: hidden;
     border: 1px solid #d9e0db;
@@ -1201,7 +1249,7 @@ a {
     padding: 5px 9px;
     color: #718078;
     background: #f7f9f6;
-    font-size: 9px;
+    font-size: 11px;
   }
 
   .binding-strip b {
@@ -1269,7 +1317,7 @@ a {
   .review-check-heading [data-slot='badge'] {
     flex: 0 0 auto;
     color: #5f7167;
-    font-size: 8px;
+    font-size: 11px;
     text-transform: capitalize;
   }
 
@@ -1290,7 +1338,7 @@ a {
     display: block;
     margin-bottom: 3px;
     color: #9aa39d;
-    font: 8px var(--font-geist-sans);
+    font: 11px var(--font-geist-sans);
     letter-spacing: 0.07em;
     text-transform: uppercase;
   }
@@ -1312,8 +1360,10 @@ a {
 
   .review-check-copy em,
   .human-only-note {
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: #68776e;
-    font-size: 9px;
+    font-size: 11px;
     font-style: normal;
     line-height: 1.5;
   }
@@ -1333,7 +1383,7 @@ a {
 
   .evidence-block > small {
     color: #7b8981;
-    font-size: 8px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.07em;
     text-transform: uppercase;
@@ -1352,7 +1402,7 @@ a {
     padding: 10px;
     color: #586b60;
     background: #f0f5f1;
-    font-size: 9px;
+    font-size: 11px;
     line-height: 1.5;
   }
 
@@ -1360,6 +1410,33 @@ a {
     width: 15px;
     flex: 0 0 auto;
     color: #2e6b4b;
+  }
+
+  .dialog-safety-note.notice-error {
+    border-color: #e2c9c2;
+    color: #773b2f;
+    background: #fbf0ed;
+  }
+
+  .review-progress {
+    margin: 0;
+    color: #53645b;
+    font-size: 12px;
+  }
+
+  .human-only-kicker {
+    margin-top: 6px;
+  }
+
+  .safety-card-details {
+    margin-top: 8px;
+  }
+
+  .safety-card-details summary {
+    color: #476052;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
   }
 
   .review-dialog [data-slot='dialog-footer'] {
@@ -1371,6 +1448,12 @@ a {
 @keyframes formproof-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .spin {
+    animation: formproof-spin 0.8s linear infinite;
   }
 }
 
@@ -1400,7 +1483,7 @@ a {
   .pdf-frame,
   .pdf-object,
   .pdf-empty {
-    min-height: 520px;
+    min-height: 360px;
   }
 
   .draft-list {
@@ -1414,6 +1497,13 @@ a {
   .review-dialog [data-slot='dialog-footer'] {
     margin: 0 -18px -18px;
     padding: 12px 18px;
+  }
+}
+
+@media (pointer: coarse) {
+  .preview-switch button,
+  .review-dialog [data-slot='button'].h-6 {
+    min-height: 32px;
   }
 }
 

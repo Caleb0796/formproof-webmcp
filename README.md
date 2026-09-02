@@ -13,9 +13,15 @@ FormProof is a local-first PDF form workbench where an agent can inspect and sta
 
 1. Open the live app. The two-page synthetic demo loads automatically.
 2. Turn on **Allow agent field access for this PDF**. Consent is off by default and applies only to the current load session.
-3. Ask a WebMCP-capable agent to fill the synthetic request, or select **Stage synthetic demo plan** to inspect the same UI flow without an agent.
-4. Open the exact review. Check each proposed change and any required human-only item.
-5. Choose **Filled PDF** when a safe rewrite is available, or **Fill package** to keep the source PDF untouched.
+3. Ask a WebMCP-capable agent to fill the synthetic request (the app shows a copyable prompt), or select **Stage synthetic demo plan** to inspect the same flow without an agent.
+4. Select **Review exact plan**, then check each proposed change and any required human-only item.
+5. Choose **Filled PDF** when a safe rewrite is available, or **Fill package (original PDF untouched)** to keep the source PDF untouched.
+
+Suggested agent prompt:
+
+```
+Inspect this PDF form. Stage these values and cite the evidence for each: legal name "Avery Chen", email "avery@example.test", preferred contact "Email", permission to contact = yes, current housing "rent", requested support "Rent assistance" and "Utilities", context for reviewer "Temporary rent support requested while a new work schedule begins." Then validate the plan and open review. Stop there: I will confirm each value, choose the output, and export myself.
+```
 
 The bundled demo contains synthetic data only. Do not use real personal information for public demonstrations or shared eval transcripts.
 
@@ -48,6 +54,7 @@ Requirements:
 - Node.js 22.13 or newer
 - npm
 - Google Chrome with experimental WebMCP support for the live Browser smoke suite
+- Verified with Google Chrome 152 (`--enable-features=WebMCP`) via the Browser smoke suite.
 
 ```bash
 npm ci
@@ -97,7 +104,7 @@ Validate a captured result before publishing it:
 npm run eval:codex:verify -- --results /path/to/codex-live-results.json
 ```
 
-Evidence is published as an immutable GitHub Release tagged `eval-evidence-<short-sha>`, attached to the evaluated commit rather than committed back into that commit. See [FormProof releases](https://github.com/Caleb0796/formproof-webmcp/releases) for the latest available evidence.
+Evidence will be published as an immutable GitHub Release tagged `eval-evidence-<short-sha>` once the 18-run suite completes on the deployed commit; no release exists yet. The release will be attached to the evaluated commit rather than committed back into that commit.
 
 ## Release evidence
 

@@ -17,9 +17,11 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  TriangleAlert,
   Upload,
 } from 'lucide-react';
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -90,6 +92,15 @@ import { formatCount } from '@/lib/utils';
 
 const DEMO_URL = '/demo-form.pdf';
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
+const AGENT_PROMPT =
+  'Inspect this PDF form. Stage these values and cite the evidence for each: legal name "Avery Chen", email "avery@example.test", preferred contact "Email", permission to contact = yes, current housing "rent", requested support "Rent assistance" and "Utilities", context for reviewer "Temporary rent support requested while a new work schedule begins." Then validate the plan and open review. Stop there: I will confirm each value, choose the output, and export myself.';
+const ALLOWED_MUTATION_COPY: Readonly<Record<string, string>> = {
+  inspect_fields: 'inspect fields',
+  stage_field_values: 'stage field values',
+  create_filled_pdf: 'create a Filled PDF',
+  create_plain_derivative_pdf: 'create a plain derivative PDF',
+  create_fill_package: 'create a Fill package',
+};
 const CONTENT_RISK_REASON_COPY = {
   javascript_present: {
     singular: 'JavaScript action',
@@ -416,11 +427,30 @@ function exportStrategyCopy(strategy: PdfExportStrategy): {
       };
     case 'fill_package':
       return {
-        title: 'Original-untouched fill package',
+        title: 'Fill package (original PDF untouched)',
         detail:
-          'Export reviewed values, field names, coordinates, provenance, and limitations as JSON. No PDF bytes are rewritten.',
+          'Original-untouched fill package: export reviewed values, field names, coordinates, provenance, and limitations as JSON. No PDF bytes are rewritten.',
       };
   }
+}
+
+function humanizeErrorMessage(
+  message: string,
+  fields: Readonly<Record<string, Pick<FormFieldDefinition, 'label'>>>,
+): string {
+  return message
+    .replace(
+      /Field "([^"]+)" contains characters that cannot be rendered with the built-in PDF font\./gu,
+      (_match, fieldName: string) =>
+        `${fields[fieldName]?.label ?? fieldName} contains characters the built-in PDF font cannot render. Correct the value in this dialog, or choose the fill package, which does not render text.`,
+    )
+    .replace(/\bfrm\.[a-z0-9]+\b/giu, (fieldName) =>
+      fields[fieldName]?.label ? fields[fieldName].label : fieldName,
+    )
+    .replace(/\b([1-9]\d{6,}) bytes\b/gu, (_match, bytes: string) => {
+      const megabytes = Number(bytes) / (1024 * 1024);
+      return `${Number.isInteger(megabytes) ? megabytes : megabytes.toFixed(1)} MB`;
+    });
 }
 
 interface HumanCorrectionEditorProps {
@@ -563,6 +593,9 @@ function HumanCorrectionEditor({
 export function FormProofWorkbench() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fillPackageInputRef = useRef<HTMLInputElement>(null);
+  const agentPromptRef = useRef<HTMLPreElement>(null);
+  const copyPromptTimerRef = useRef<number | null>(null);
+  const receiptRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<FormState | null>(null);
   const inspectionRef = useRef<PdfInspection | null>(null);
   const sourceBytesRef = useRef<Uint8Array | null>(null);
@@ -614,13 +647,45 @@ export function FormProofWorkbench() {
     null,
   );
   const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
+  const setError = useCallback((message: string | null) => {
+    if (message !== null) setNotice(null);
+    setErrorState(message);
+  }, []);
+  const [promptCopied, setPromptCopied] = useState(false);
   const [toolState, setToolState] = useState<ToolState>({
     status: 'registering',
     count: 0,
     message: 'Registering WebMCP tools',
   });
   const [agentDataAccessGranted, setAgentDataAccessGranted] = useState(false);
+
+  const copyAgentPrompt = useCallback(async () => {
+    let copied = false;
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(AGENT_PROMPT);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+    if (!copied && agentPromptRef.current) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(agentPromptRef.current);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+    setPromptCopied(true);
+    if (copyPromptTimerRef.current !== null) {
+      window.clearTimeout(copyPromptTimerRef.current);
+    }
+    copyPromptTimerRef.current = window.setTimeout(
+      () => setPromptCopied(false),
+      2_000,
+    );
+  }, []);
 
   useLayoutEffect(() => {
     visibleUiRevisionRef.current = uiRevisionRef.current;
@@ -732,7 +797,7 @@ export function FormProofWorkbench() {
       const preferredStrategy = initialExportStrategy(inspection);
       if (preferredStrategy === null) {
         setError(
-          'This document is inspection-only because no artifact export strategy is available.',
+          'This PDF can only be inspected: its protection is unknown or it has no fillable fields, so nothing can be exported.',
         );
         return 'blocked';
       }
@@ -753,7 +818,7 @@ export function FormProofWorkbench() {
         reviewBindingsMatch(dismissedReviewBindingRef.current, nextBinding)
       ) {
         setError(
-          'You dismissed review for this exact plan. Only you can reopen it until the plan changes.',
+          'You closed the review for this plan. Select "Review exact plan" to reopen it; the agent cannot reopen it for you.',
         );
         return 'dismissed';
       }
@@ -770,7 +835,7 @@ export function FormProofWorkbench() {
       setReviewOpen(true);
       return 'opened';
     },
-    [],
+    [setError],
   );
 
   const resetOutput = useCallback(() => {
@@ -818,7 +883,7 @@ export function FormProofWorkbench() {
     setError(null);
     setNotice(null);
     return generation;
-  }, [resetOutput]);
+  }, [resetOutput, setError]);
 
   const loadSource = useCallback(
     async (
@@ -872,7 +937,7 @@ export function FormProofWorkbench() {
               () =>
                 finish({
                   error: new Error(
-                    'PDF inspection exceeded the 15-second browser limit.',
+                    'This PDF took longer than 15 seconds to inspect. Try a smaller file.',
                   ),
                 }),
               15_000,
@@ -888,7 +953,11 @@ export function FormProofWorkbench() {
               );
             };
             worker.onerror = () =>
-              finish({ error: new Error('The PDF inspection worker failed.') });
+              finish({
+                error: new Error(
+                  'PDF inspection failed in this browser. Try again or choose another PDF.',
+                ),
+              });
             inspectionController.signal.addEventListener('abort', abort, {
               once: true,
             });
@@ -928,7 +997,7 @@ export function FormProofWorkbench() {
         setConfirmedFields(new Set());
         setActiveContentAcknowledged(false);
         setNotice(
-          `${formatCount(inspection.fieldCount, 'field')} and ${formatCount(inspection.widgetCount, 'widget')} inspected locally.`,
+          `${formatCount(inspection.fieldCount, 'field')} and ${formatCount(inspection.widgetCount, 'widget')} inspected locally. Agent field access is off for this new load.`,
         );
       } catch (caught) {
         if (!mountedRef.current || generation !== loadGenerationRef.current)
@@ -945,7 +1014,7 @@ export function FormProofWorkbench() {
         }
       }
     },
-    [commitState, resetOutput],
+    [commitState, resetOutput, setError],
   );
 
   const loadDemo = useCallback(async () => {
@@ -972,7 +1041,7 @@ export function FormProofWorkbench() {
           : 'The demo PDF could not be loaded.',
       );
     }
-  }, [beginLoad, loadSource]);
+  }, [beginLoad, loadSource, setError]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadDemo(), 0);
@@ -1009,6 +1078,27 @@ export function FormProofWorkbench() {
           ? 'A newly selected PDF is still being inspected.'
           : message,
       );
+
+    const showConsentRefusal = () => {
+      if (!mountedRef.current) return;
+      setNotice(
+        'The agent asked for this PDF\'s field data and was refused: access is off. Turn on "Allow agent field access for this PDF" to let it continue.',
+      );
+    };
+
+    const showBindingRefusal = (failure: FormProofAdapterFailure) => {
+      if (!mountedRef.current || failure.error.code !== 'stale_state') return;
+      setNotice(
+        'The agent used an outdated form version and was told to refresh.',
+      );
+    };
+
+    const showReviewMutationRefusal = () => {
+      if (!mountedRef.current) return;
+      setNotice(
+        'The agent tried to change the plan while you were reviewing it. The change was refused; close the review to let it try again.',
+      );
+    };
 
     const adapter: FormProofWebMcpAdapter = {
       getPdfProtection() {
@@ -1048,6 +1138,7 @@ export function FormProofWorkbench() {
           );
         }
         if (agentDataConsentSessionRef.current !== current.documentSessionId) {
+          showConsentRefusal();
           return adapterFailure(
             current,
             'consent_required',
@@ -1067,6 +1158,11 @@ export function FormProofWorkbench() {
             input,
           );
           if (!cursor.ok) {
+            if (cursor.code === 'stale_state' && mountedRef.current) {
+              setNotice(
+                'The agent used an outdated form version and was told to refresh.',
+              );
+            }
             return adapterFailure(
               current,
               cursor.code,
@@ -1113,6 +1209,7 @@ export function FormProofWorkbench() {
           return inactiveDocumentFailure('Load a PDF before reading evidence.');
         }
         if (agentDataConsentSessionRef.current !== current.documentSessionId) {
+          showConsentRefusal();
           return adapterFailure(
             current,
             'consent_required',
@@ -1120,7 +1217,10 @@ export function FormProofWorkbench() {
           );
         }
         const mismatch = bindingFailure(current, input);
-        if (mismatch) return mismatch;
+        if (mismatch) {
+          showBindingRefusal(mismatch);
+          return mismatch;
+        }
 
         const unknown = input.fieldNames.filter(
           (name) => !Object.hasOwn(current.fields, name),
@@ -1192,6 +1292,7 @@ export function FormProofWorkbench() {
           if (
             agentDataConsentSessionRef.current !== current.documentSessionId
           ) {
+            showConsentRefusal();
             return adapterFailure(
               current,
               'consent_required',
@@ -1201,8 +1302,12 @@ export function FormProofWorkbench() {
           const consentSessionId = agentDataConsentSessionRef.current;
           const consentGeneration = agentDataConsentGenerationRef.current;
           const mismatch = bindingFailure(current, input);
-          if (mismatch) return mismatch;
+          if (mismatch) {
+            showBindingRefusal(mismatch);
+            return mismatch;
+          }
           if (reviewLockRef.current) {
+            showReviewMutationRefusal();
             return adapterFailure(
               current,
               'human_action_required',
@@ -1233,6 +1338,7 @@ export function FormProofWorkbench() {
             throw new DOMException('Aborted', 'AbortError');
           const latest = stateRef.current;
           if (reviewLockRef.current) {
+            showReviewMutationRefusal();
             return adapterFailure(
               latest ?? current,
               'human_action_required',
@@ -1240,6 +1346,11 @@ export function FormProofWorkbench() {
             );
           }
           if (loadingRef.current || latest !== current) {
+            if (mountedRef.current) {
+              setNotice(
+                'The agent used an outdated form version and was told to refresh.',
+              );
+            }
             return adapterFailure(
               latest ?? current,
               'stale_state',
@@ -1294,6 +1405,7 @@ export function FormProofWorkbench() {
           return inactiveDocumentFailure('Load a PDF before validation.');
         }
         if (agentDataConsentSessionRef.current !== current.documentSessionId) {
+          showConsentRefusal();
           return adapterFailure(
             current,
             'consent_required',
@@ -1301,7 +1413,10 @@ export function FormProofWorkbench() {
           );
         }
         const mismatch = bindingFailure(current, input);
-        if (mismatch) return mismatch;
+        if (mismatch) {
+          showBindingRefusal(mismatch);
+          return mismatch;
+        }
         const validation = validateDraft(current);
         const inspection = inspectionRef.current;
         const reviewArtifacts = inspection?.protection.exportStrategies ?? [];
@@ -1328,6 +1443,7 @@ export function FormProofWorkbench() {
           return inactiveDocumentFailure('Load a PDF before review.');
         }
         if (agentDataConsentSessionRef.current !== current.documentSessionId) {
+          showConsentRefusal();
           return adapterFailure(
             current,
             'consent_required',
@@ -1335,7 +1451,10 @@ export function FormProofWorkbench() {
           );
         }
         const mismatch = bindingFailure(current, input);
-        if (mismatch) return mismatch;
+        if (mismatch) {
+          showBindingRefusal(mismatch);
+          return mismatch;
+        }
         const reviewArtifacts =
           inspectionRef.current?.protection.exportStrategies ?? [];
         if (reviewArtifacts.length === 0) {
@@ -1398,13 +1517,14 @@ export function FormProofWorkbench() {
         setToolState({
           status: 'error',
           count: 0,
-          message: registered.error.message,
+          message:
+            'Tool registration failed. Reload the page; the demo plan still works.',
         });
       } else if (!registered.supported) {
         setToolState({
           status: 'unsupported',
           count: 0,
-          message: 'This browser does not expose WebMCP',
+          message: 'WebMCP not available in this browser',
         });
       } else {
         setToolState({
@@ -1420,12 +1540,15 @@ export function FormProofWorkbench() {
       registrationController.abort();
       registration?.cleanup();
     };
-  }, [commitState, openReview, resetOutput, waitForVisibleCommit]);
+  }, [commitState, openReview, resetOutput, setError, waitForVisibleCommit]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (copyPromptTimerRef.current !== null) {
+        window.clearTimeout(copyPromptTimerRef.current);
+      }
       loadGenerationRef.current += 1;
       pdfInspectionAbortRef.current?.abort();
       pdfInspectionWorkerRef.current?.terminate();
@@ -1471,7 +1594,7 @@ export function FormProofWorkbench() {
         );
       }
     },
-    [beginLoad, loadSource],
+    [beginLoad, loadSource, setError],
   );
 
   const onFillPackageChosen = useCallback(
@@ -1539,7 +1662,12 @@ export function FormProofWorkbench() {
           return;
         }
         if (!result.ok) {
-          setError(result.errors.map((item) => item.message).join(' '));
+          setError(
+            humanizeErrorMessage(
+              result.errors.map((item) => item.message).join(' '),
+              current.fields,
+            ),
+          );
           return;
         }
 
@@ -1556,9 +1684,12 @@ export function FormProofWorkbench() {
       } catch (caught) {
         if (!mountedRef.current) return;
         setError(
-          caught instanceof Error
-            ? caught.message
-            : 'The fill package could not be opened.',
+          humanizeErrorMessage(
+            caught instanceof Error
+              ? caught.message
+              : 'The fill package could not be opened.',
+            current.fields,
+          ),
         );
       } finally {
         pendingPlanMutationsRef.current -= 1;
@@ -1566,7 +1697,7 @@ export function FormProofWorkbench() {
         if (mountedRef.current) setReviewMutating(false);
       }
     },
-    [commitState, resetOutput],
+    [commitState, resetOutput, setError],
   );
 
   const stageDemoPlan = async () => {
@@ -1655,14 +1786,19 @@ export function FormProofWorkbench() {
         return;
       }
       if (!result.ok) {
-        setError(result.errors.map((item) => item.message).join(' '));
+        setError(
+          humanizeErrorMessage(
+            result.errors.map((item) => item.message).join(' '),
+            current.fields,
+          ),
+        );
         return;
       }
       commitState(result.state);
       resetOutput();
       setError(null);
       setNotice(
-        'Synthetic agent plan staged. The source PDF is still untouched.',
+        'Synthetic plan staged (no agent involved). The source PDF is untouched.',
       );
     } finally {
       pendingPlanMutationsRef.current -= 1;
@@ -1673,6 +1809,25 @@ export function FormProofWorkbench() {
     if (!formState) return [];
     return getArtifactReviewFieldNames(formState);
   }, [formState]);
+  const orderedReviewNames = useMemo(() => {
+    const documentOrder = new Map(
+      documentState?.inspection.fields.map((field, index) => [
+        field.name,
+        index,
+      ]) ?? [],
+    );
+    return [...reviewNames].sort((left, right) => {
+      const leftHumanOnly = formState?.draft[left] === undefined ? 1 : 0;
+      const rightHumanOnly = formState?.draft[right] === undefined ? 1 : 0;
+      if (leftHumanOnly !== rightHumanOnly) {
+        return leftHumanOnly - rightHumanOnly;
+      }
+      return (
+        (documentOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (documentOrder.get(right) ?? Number.MAX_SAFE_INTEGER)
+      );
+    });
+  }, [documentState, formState, reviewNames]);
 
   const activeContent = documentState?.inspection.activeContent;
   const activeContentDescription = activeContent
@@ -1746,7 +1901,12 @@ export function FormProofWorkbench() {
           return;
         }
         if (!result.ok) {
-          setError(result.errors.map((item) => item.message).join(' '));
+          setError(
+            humanizeErrorMessage(
+              result.errors.map((item) => item.message).join(' '),
+              current.fields,
+            ),
+          );
           return;
         }
 
@@ -1754,14 +1914,24 @@ export function FormProofWorkbench() {
         commitState(result.state);
         resetOutput();
         setNotice(
-          `${fieldLabel} was corrected by you and is locked against agent changes for this loaded document session. The plan changed, review closed, and every confirmation was cleared. The source PDF remains untouched.`,
+          `${fieldLabel} was corrected by you and is locked against agent changes for this loaded document session. The plan changed, review closed, and every confirmation was cleared. The source PDF remains untouched. Select "Review exact plan" to continue with the updated plan.`,
         );
+        if (typeof document !== 'undefined') {
+          window.requestAnimationFrame(() =>
+            document
+              .getElementById('review-cta')
+              ?.scrollIntoView({ block: 'center', behavior: 'smooth' }),
+          );
+        }
       } catch (caught) {
         if (!mountedRef.current) return;
         setError(
-          caught instanceof Error
-            ? caught.message
-            : 'The staged proposal could not be corrected.',
+          humanizeErrorMessage(
+            caught instanceof Error
+              ? caught.message
+              : 'The staged proposal could not be corrected.',
+            current.fields,
+          ),
         );
       } finally {
         pendingPlanMutationsRef.current -= 1;
@@ -1769,7 +1939,7 @@ export function FormProofWorkbench() {
         if (mountedRef.current) setReviewMutating(false);
       }
     },
-    [commitState, resetOutput],
+    [commitState, resetOutput, setError],
   );
 
   const rejectProposals = useCallback(
@@ -1827,7 +1997,12 @@ export function FormProofWorkbench() {
           return;
         }
         if (!result.ok) {
-          setError(result.errors.map((item) => item.message).join(' '));
+          setError(
+            humanizeErrorMessage(
+              result.errors.map((item) => item.message).join(' '),
+              current.fields,
+            ),
+          );
           return;
         }
 
@@ -1838,14 +2013,24 @@ export function FormProofWorkbench() {
         commitState(result.state);
         resetOutput();
         setNotice(
-          `${intent === 'unlock' ? `${fieldLabel} human correction removed; its original PDF value is restored and the agent may propose it again.` : discardedAll || intent === 'discard_all' ? `All ${formatCount(fieldNames.length, 'staged value')} discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared.`,
+          `${intent === 'unlock' ? `${fieldLabel} human correction removed; its original PDF value is restored and the agent may propose it again.` : discardedAll || intent === 'discard_all' ? `All ${formatCount(fieldNames.length, 'staged value')} discarded.` : `${fieldLabel} proposal rejected.`} The plan changed, so review closed and every confirmation was cleared. Select "Review exact plan" to continue with the updated plan.`,
         );
+        if (typeof document !== 'undefined') {
+          window.requestAnimationFrame(() =>
+            document
+              .getElementById('review-cta')
+              ?.scrollIntoView({ block: 'center', behavior: 'smooth' }),
+          );
+        }
       } catch (caught) {
         if (!mountedRef.current) return;
         setError(
-          caught instanceof Error
-            ? caught.message
-            : 'The staged proposal could not be rejected.',
+          humanizeErrorMessage(
+            caught instanceof Error
+              ? caught.message
+              : 'The staged proposal could not be rejected.',
+            current.fields,
+          ),
         );
       } finally {
         pendingPlanMutationsRef.current -= 1;
@@ -1853,7 +2038,7 @@ export function FormProofWorkbench() {
         if (mountedRef.current) setReviewMutating(false);
       }
     },
-    [commitState, resetOutput],
+    [commitState, resetOutput, setError],
   );
 
   const completeReview = useCallback(async () => {
@@ -1901,7 +2086,12 @@ export function FormProofWorkbench() {
           confirmedFieldNames: reviewNames,
         });
         if (!packaged.ok) {
-          setError(packaged.errors.map((item) => item.message).join(' '));
+          setError(
+            humanizeErrorMessage(
+              packaged.errors.map((item) => item.message).join(' '),
+              current.fields,
+            ),
+          );
           return;
         }
         if (
@@ -1948,7 +2138,12 @@ export function FormProofWorkbench() {
           confirmedFieldNames: reviewNames,
         });
         if (!approval.ok) {
-          setError(approval.errors.map((item) => item.message).join(' '));
+          setError(
+            humanizeErrorMessage(
+              approval.errors.map((item) => item.message).join(' '),
+              current.fields,
+            ),
+          );
           return;
         }
         const exported =
@@ -1958,7 +2153,12 @@ export function FormProofWorkbench() {
               })
             : await exportApprovedPdfFromUi(approval.state, source);
         if (!exported.ok) {
-          setError(exported.errors.map((item) => item.message).join(' '));
+          setError(
+            humanizeErrorMessage(
+              exported.errors.map((item) => item.message).join(' '),
+              current.fields,
+            ),
+          );
           return;
         }
         if (
@@ -2001,12 +2201,18 @@ export function FormProofWorkbench() {
       setProtectionLossAcknowledged(false);
       setSelectedExportStrategy(null);
       setCorrectionFieldName(null);
+      window.requestAnimationFrame(() =>
+        receiptRef.current?.scrollIntoView({ block: 'nearest' }),
+      );
     } catch (caught) {
       if (!mountedRef.current) return;
       setError(
-        caught instanceof Error
-          ? caught.message
-          : 'The reviewed artifact could not be exported.',
+        humanizeErrorMessage(
+          caught instanceof Error
+            ? caught.message
+            : 'The reviewed artifact could not be exported.',
+          current.fields,
+        ),
       );
     } finally {
       exportingRef.current = false;
@@ -2020,6 +2226,7 @@ export function FormProofWorkbench() {
     protectionLossAcknowledged,
     reviewNames,
     selectedExportStrategy,
+    setError,
   ]);
 
   const downloadOutput = useCallback(() => {
@@ -2070,6 +2277,8 @@ export function FormProofWorkbench() {
     : null;
   const activePreviewUrl =
     showOutput && outputUrl ? outputUrl : documentState?.sourceUrl;
+  const canPreview =
+    typeof navigator === 'undefined' || navigator.pdfViewerEnabled !== false;
   const validation = formState ? validateDraft(formState) : null;
   const validationErrors =
     validation?.issues.filter(({ severity }) => severity === 'error') ?? [];
@@ -2083,31 +2292,37 @@ export function FormProofWorkbench() {
     }
     return issue.message.replaceAll(issue.fieldName, 'Unnamed PDF field');
   });
-  const validationBlockerTitle = allValidationErrorsAreRequiredMissing
-    ? `${formatCount(validationErrors.length, 'PDF-required field')} ${validationErrors.length === 1 ? 'is' : 'are'} still blank`
-    : `${formatCount(validationErrors.length, 'PDF validation blocker')} ${validationErrors.length === 1 ? 'remains' : 'remain'}`;
+  const validationBlockerTitle =
+    draftEntries.length === 0
+      ? `This form has ${formatCount(validationErrors.length, 'required field')}`
+      : allValidationErrorsAreRequiredMissing
+        ? `${formatCount(validationErrors.length, 'PDF-required field')} ${validationErrors.length === 1 ? 'is' : 'are'} still blank`
+        : `${formatCount(validationErrors.length, 'PDF validation blocker')} ${validationErrors.length === 1 ? 'remains' : 'remain'}`;
   const hasPdfProducingStrategy =
     documentState?.inspection.protection.exportStrategies.some(
       (strategy) =>
         strategy === 'filled_pdf' ||
         strategy === 'confirmed_plain_derivative_pdf',
     ) ?? false;
-  const validationBlockerGuidance = [
-    hasPdfProducingStrategy
-      ? allValidationErrorsAreRequiredMissing
-        ? 'PDF artifacts cannot be exported until these fields are completed.'
-        : 'PDF artifacts cannot be exported until these blockers are resolved.'
-      : '',
-    fillPackageAvailable
-      ? draftEntries.length > 0
-        ? 'An incomplete original-untouched fill package can still be reviewed.'
-        : allValidationErrorsAreRequiredMissing
-          ? 'Stage values before reviewing an original-untouched fill package; it will remain incomplete while these fields are blank.'
-          : 'Stage values before reviewing an original-untouched fill package; it will remain incomplete while these blockers remain.'
-      : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
+  const validationBlockerGuidance =
+    draftEntries.length === 0
+      ? 'The agent (or the synthetic demo plan) fills them; a Filled PDF can be created once they are complete.'
+      : [
+          hasPdfProducingStrategy
+            ? allValidationErrorsAreRequiredMissing
+              ? 'PDF artifacts cannot be exported until these fields are completed.'
+              : 'PDF artifacts cannot be exported until these blockers are resolved.'
+            : '',
+          fillPackageAvailable
+            ? draftEntries.length > 0
+              ? 'An incomplete original-untouched fill package can still be reviewed.'
+              : allValidationErrorsAreRequiredMissing
+                ? 'Stage values before reviewing an original-untouched fill package; it will remain incomplete while these fields are blank.'
+                : 'Stage values before reviewing an original-untouched fill package; it will remain incomplete while these blockers remain.'
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
   const showValidationBlockerSummary =
     (documentState?.inspection.protection.exportStrategies.length ?? 0) > 0 &&
     !hasBlockedPdfContent &&
@@ -2121,6 +2336,22 @@ export function FormProofWorkbench() {
         ),
       ]
     : [];
+  const hasPendingSignatureField = pendingHumanCompletionNames.some(
+    (name) => formState?.fields[name]?.type === 'signature',
+  );
+  const confirmedReviewCount = reviewNames.filter((name) =>
+    confirmedFields.has(name),
+  ).length;
+  const reviewProgressSuffix = [
+    selectedExportStrategy === null ? 'choose an artifact' : '',
+    requiresActiveContentAcknowledgment && !activeContentAcknowledged
+      ? 'acknowledge PDF behaviors'
+      : '',
+    requiresProtectionLossAcknowledgment && !protectionLossAcknowledged
+      ? 'confirm rights removal'
+      : '',
+    correctionFieldName !== null ? 'close the correction editor' : '',
+  ].filter(Boolean);
 
   const steps = [
     {
@@ -2135,16 +2366,18 @@ export function FormProofWorkbench() {
       detail:
         draftEntries.length > 0
           ? `${formatCount(draftEntries.length, 'value')} staged`
-          : 'Waiting for agent',
+          : toolState.status === 'ready' && !agentDataAccessGranted
+            ? 'Access off — the agent will be refused'
+            : 'Ask the agent or stage the demo plan',
       state: draftEntries.length > 0 ? 'done' : formState ? 'active' : 'idle',
     },
     {
       label: 'Review evidence',
       detail: fillPackageResult
-        ? 'Field package reviewed'
+        ? 'Fill package exported'
         : formState?.approval
           ? 'Exact plan approved'
-          : 'UI review gate',
+          : 'Confirm every value',
       state:
         fillPackageResult || formState?.approval
           ? 'done'
@@ -2158,7 +2391,7 @@ export function FormProofWorkbench() {
         ? 'PDF values verified; appearance streams present'
         : fillPackageResult
           ? 'JSON round-trip verified'
-          : 'Locked',
+          : 'After approval',
       state: artifactReady ? 'done' : formState?.approval ? 'active' : 'idle',
     },
   ] as const;
@@ -2180,6 +2413,7 @@ export function FormProofWorkbench() {
             variant="outline"
             className={`tool-badge tool-${toolState.status}`}
             title={toolState.message}
+            aria-live="polite"
           >
             <span className="status-dot" /> {toolState.message}
           </Badge>
@@ -2189,13 +2423,13 @@ export function FormProofWorkbench() {
       <section className="intro" aria-labelledby="page-title">
         <div>
           <p className="eyebrow">
-            <Sparkles aria-hidden="true" /> Evidence-bound PDF form review
+            <Sparkles aria-hidden="true" /> WebMCP · PDF form workbench
           </p>
           <h1 id="page-title">The agent drafts. You decide.</h1>
           <p>
-            PDF protection metadata is available to WebMCP. Field names and
-            values stay private until you enable sharing for the current PDF
-            load. Approval and export stay outside its tool surface.
+            Load a fillable PDF. Your agent reads the fields through WebMCP and
+            stages values with evidence. You confirm every field, pick the
+            output, and export. The original PDF is never modified.
           </p>
         </div>
         <div className="intro-actions">
@@ -2204,6 +2438,8 @@ export function FormProofWorkbench() {
             className="sr-only"
             type="file"
             accept="application/pdf,.pdf"
+            tabIndex={-1}
+            aria-hidden="true"
             onChange={(event) => void onFileChosen(event)}
           />
           <input
@@ -2211,6 +2447,8 @@ export function FormProofWorkbench() {
             className="sr-only"
             type="file"
             accept="application/json,.json"
+            tabIndex={-1}
+            aria-hidden="true"
             onChange={(event) => void onFillPackageChosen(event)}
           />
           <Button
@@ -2223,6 +2461,11 @@ export function FormProofWorkbench() {
           <Button
             variant="outline"
             size="lg"
+            title={
+              draftEntries.length > 0
+                ? 'Discard the staged plan before opening a fill package'
+                : undefined
+            }
             onClick={() => fillPackageInputRef.current?.click()}
             disabled={
               !formState ||
@@ -2234,7 +2477,12 @@ export function FormProofWorkbench() {
           >
             <FileJson aria-hidden="true" /> Open fill package
           </Button>
-          <Button size="lg" onClick={() => void loadDemo()} disabled={loading}>
+          <Button
+            variant="outline"
+            size="lg"
+            onClick={() => void loadDemo()}
+            disabled={loading}
+          >
             {loading ? (
               <LoaderCircle className="spin" aria-hidden="true" />
             ) : (
@@ -2242,6 +2490,11 @@ export function FormProofWorkbench() {
             )}
             Reload demo
           </Button>
+          {draftEntries.length > 0 && (
+            <p className="button-note intro-button-note">
+              Discard staged values before opening a fill package.
+            </p>
+          )}
         </div>
       </section>
 
@@ -2249,7 +2502,10 @@ export function FormProofWorkbench() {
         <LockKeyhole aria-hidden="true" />
         <label className="flex items-start gap-3">
           <input
+            id="agent-field-access"
             type="checkbox"
+            aria-labelledby="agent-field-access-label"
+            aria-describedby="agent-field-access-description"
             checked={agentDataAccessGranted}
             disabled={!formState || loading}
             onChange={(event) => {
@@ -2263,28 +2519,43 @@ export function FormProofWorkbench() {
             }}
           />
           <span>
-            <strong>Share this PDF&apos;s field data with the agent</strong>
+            <strong id="agent-field-access-label">
+              Allow agent field access for this PDF
+            </strong>
             <br />
-            Off by default and reset on every load. When enabled, WebMCP may
-            return field names, existing values, choices, and staged proposals
-            for this document session. Approval and export are not WebMCP tools;
-            browser automation outside that tool boundary could still operate
-            the visible UI.
+            <span id="agent-field-access-description">
+              Off by default and reset on every load. When on, WebMCP may return
+              field names, existing values, choices, and staged proposals for
+              this document session.{' '}
+              {
+                'Approval and export stay outside its tool surface; browser automation outside that tool boundary could still operate the visible UI.'
+              }
+            </span>
           </span>
         </label>
       </section>
 
-      {(notice || error) && (
+      {(notice || error) && !reviewOpen && (
         <div
           className={`notice-bar ${error ? 'notice-error' : ''}`}
           role={error ? 'alert' : 'status'}
         >
           {error ? (
-            <ShieldCheck aria-hidden="true" />
+            <TriangleAlert aria-hidden="true" />
           ) : (
             <CheckCircle2 aria-hidden="true" />
           )}
           <span>{error ?? notice}</span>
+          {error && (
+            <button
+              type="button"
+              className="notice-dismiss"
+              aria-label="Dismiss"
+              onClick={() => setError(null)}
+            >
+              ×
+            </button>
+          )}
         </div>
       )}
 
@@ -2337,7 +2608,7 @@ export function FormProofWorkbench() {
               <strong>Approval is not a WebMCP tool</strong>
               <p>
                 Agent tools can inspect, stage, validate, and open review.
-                Approval and export stay in this interface.
+                Approval and export stay outside its tool surface.
               </p>
               {formState && (
                 <p>
@@ -2365,159 +2636,177 @@ export function FormProofWorkbench() {
                     categories can overlap.
                   </p>
                 )}
-                <p>
-                  Protection type:{' '}
-                  <b>{documentState.inspection.protection.protectionType}</b>
-                  <br />
-                  Allowed mutations:{' '}
-                  {documentState.inspection.protection.allowedMutations.join(
-                    ', ',
-                  ) || 'none'}
-                  <br />
-                  Export strategies:{' '}
-                  {documentState.inspection.protection.exportStrategies.join(
-                    ', ',
-                  ) || 'none'}
-                  <br />
-                  Signature impact:{' '}
-                  {documentState.inspection.protection.signatureImpact}
-                  <br />
-                  Human confirmation:{' '}
-                  {documentState.inspection.protection.requiresHumanConfirmation
-                    ? 'required for the plain derivative'
-                    : 'not required by the protection policy'}
-                </p>
-                <p>
-                  Evidence:{' '}
-                  {documentState.inspection.protection.evidence.usageRightsKeys
-                    .length > 0
-                    ? `${documentState.inspection.protection.evidence.usageRightsKeys.join('/')} usage rights; `
-                    : ''}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .signatureDictionaryCount,
-                    'recognized signature dictionary',
-                    'recognized signature dictionaries',
-                  )}
-                  {' ('}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .usageRightsSignatureCount,
-                    'UR/UR3 signature dictionary',
-                    'UR/UR3 signature dictionaries',
-                  )}
-                  {', '}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .documentSignatureCount,
-                    'signed-field document signature',
-                  )}
-                  {', '}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .unclassifiedSignatureDictionaryCount,
-                    'unclassified signature dictionary',
-                    'unclassified signature dictionaries',
-                  )}
-                  {', '}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .unreachableSignatureDictionaryCount,
-                    'unreachable signature dictionary',
-                    'unreachable signature dictionaries',
-                  )}
-                  {'); '}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .byteRangeEntryCount,
-                    'ByteRange entry',
-                    'ByteRange entries',
-                  )}{' '}
-                  (
-                  {formatCount(
-                    documentState.inspection.protection.evidence.byteRanges
-                      .length,
-                    'parsed entry',
-                    'parsed entries',
-                  )}
-                  {', '}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .malformedByteRangeCount,
-                    'malformed entry',
-                    'malformed entries',
-                  )}
-                  {'; whole-file coverage '}
-                  {documentState.inspection.protection.evidence
-                    .byteRangesCoverWholeFile === null
-                    ? 'not applicable'
-                    : documentState.inspection.protection.evidence
-                          .byteRangesCoverWholeFile
-                      ? 'yes'
-                      : 'no'}
-                  {'); '}DocMDP{' '}
-                  {!documentState.inspection.protection.evidence.docMdpPresent
-                    ? documentState.inspection.protection.evidence
-                        .unknownStructures.length > 0
-                      ? 'not established; unknown protection remains'
-                      : 'absent'
-                    : documentState.inspection.protection.evidence
-                          .docMdpPermission === null
-                      ? 'present; permission unrecognized'
-                      : `present; P=${documentState.inspection.protection.evidence.docMdpPermission}`}
-                  {'; '}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .signatureFieldCount,
-                    'signature field',
-                  )}
-                  {' ('}
-                  {formatCount(
-                    documentState.inspection.protection.evidence
-                      .signedSignatureFieldCount,
-                    'signed signature field',
-                  )}
-                  {'); XFA '}
-                  {documentState.inspection.protection.evidence.xfaPresent
-                    ? 'present'
-                    : 'absent'}
-                  .
-                </p>
-                {documentState.inspection.protection.evidence.unknownStructures
-                  .length > 0 && (
+                <details className="safety-card-details">
+                  <summary>Protection evidence (technical)</summary>
                   <p>
-                    Unrecognized protection evidence:{' '}
-                    {documentState.inspection.protection.evidence.unknownStructures.join(
-                      ', ',
+                    Protection type:{' '}
+                    <b>
+                      {documentState.inspection.protection.protectionType.replaceAll(
+                        '_',
+                        ' ',
+                      )}
+                    </b>
+                    <br />
+                    Allowed mutations:{' '}
+                    {documentState.inspection.protection.allowedMutations
+                      .map(
+                        (mutation) =>
+                          ALLOWED_MUTATION_COPY[mutation] ??
+                          mutation.replaceAll('_', ' '),
+                      )
+                      .join(', ') || 'none'}
+                    <br />
+                    Export strategies:{' '}
+                    {documentState.inspection.protection.exportStrategies
+                      .map((strategy) => exportStrategyCopy(strategy).title)
+                      .join(', ') || 'none'}
+                    <br />
+                    Signature impact:{' '}
+                    {documentState.inspection.protection.signatureImpact.replaceAll(
+                      '_',
+                      ' ',
                     )}
-                    . No export strategy is available.
+                    <br />
+                    Human confirmation:{' '}
+                    {documentState.inspection.protection
+                      .requiresHumanConfirmation
+                      ? 'required for the plain derivative'
+                      : 'not required by the protection policy'}
                   </p>
-                )}
-                {documentState.inspection.protection.evidence.adbeExtension && (
                   <p>
-                    ADBE developer extension declaration:{' '}
-                    {documentState.inspection.protection.evidence.adbeExtension
-                      .baseVersion ?? 'base version unspecified'}
-                    , level{' '}
-                    {documentState.inspection.protection.evidence.adbeExtension
-                      .extensionLevel ?? 'unspecified'}
-                    . This declaration is not itself a usage right or a
-                    signature.
+                    Evidence:{' '}
+                    {documentState.inspection.protection.evidence
+                      .usageRightsKeys.length > 0
+                      ? `${documentState.inspection.protection.evidence.usageRightsKeys.join('/')} usage rights; `
+                      : ''}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .signatureDictionaryCount,
+                      'recognized signature dictionary',
+                      'recognized signature dictionaries',
+                    )}
+                    {' ('}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .usageRightsSignatureCount,
+                      'UR/UR3 signature dictionary',
+                      'UR/UR3 signature dictionaries',
+                    )}
+                    {', '}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .documentSignatureCount,
+                      'signed-field document signature',
+                    )}
+                    {', '}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .unclassifiedSignatureDictionaryCount,
+                      'unclassified signature dictionary',
+                      'unclassified signature dictionaries',
+                    )}
+                    {', '}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .unreachableSignatureDictionaryCount,
+                      'unreachable signature dictionary',
+                      'unreachable signature dictionaries',
+                    )}
+                    {'); '}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .byteRangeEntryCount,
+                      'ByteRange entry',
+                      'ByteRange entries',
+                    )}{' '}
+                    (
+                    {formatCount(
+                      documentState.inspection.protection.evidence.byteRanges
+                        .length,
+                      'parsed entry',
+                      'parsed entries',
+                    )}
+                    {', '}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .malformedByteRangeCount,
+                      'malformed entry',
+                      'malformed entries',
+                    )}
+                    {'; whole-file coverage '}
+                    {documentState.inspection.protection.evidence
+                      .byteRangesCoverWholeFile === null
+                      ? 'not applicable'
+                      : documentState.inspection.protection.evidence
+                            .byteRangesCoverWholeFile
+                        ? 'yes'
+                        : 'no'}
+                    {'); '}DocMDP{' '}
+                    {!documentState.inspection.protection.evidence.docMdpPresent
+                      ? documentState.inspection.protection.evidence
+                          .unknownStructures.length > 0
+                        ? 'not established; unknown protection remains'
+                        : 'absent'
+                      : documentState.inspection.protection.evidence
+                            .docMdpPermission === null
+                        ? 'present; permission unrecognized'
+                        : `present; P=${documentState.inspection.protection.evidence.docMdpPermission}`}
+                    {'; '}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .signatureFieldCount,
+                      'signature field',
+                    )}
+                    {' ('}
+                    {formatCount(
+                      documentState.inspection.protection.evidence
+                        .signedSignatureFieldCount,
+                      'signed signature field',
+                    )}
+                    {'); XFA '}
+                    {documentState.inspection.protection.evidence.xfaPresent
+                      ? 'present'
+                      : 'absent'}
+                    .
                   </p>
-                )}
-                <p>
-                  Browser CMS integrity:{' '}
-                  {documentState.inspection.protection.evidence.cmsIntegrity.replaceAll(
-                    '_',
-                    ' ',
+                  {documentState.inspection.protection.evidence
+                    .unknownStructures.length > 0 && (
+                    <p>
+                      Unrecognized protection evidence:{' '}
+                      {documentState.inspection.protection.evidence.unknownStructures.join(
+                        ', ',
+                      )}
+                      . No export strategy is available.
+                    </p>
                   )}
-                  ; signer trust:{' '}
-                  {documentState.inspection.protection.evidence.signerTrust.replaceAll(
-                    '_',
-                    ' ',
+                  {documentState.inspection.protection.evidence
+                    .adbeExtension && (
+                    <p>
+                      ADBE developer extension declaration:{' '}
+                      {documentState.inspection.protection.evidence
+                        .adbeExtension.baseVersion ??
+                        'base version unspecified'}
+                      , level{' '}
+                      {documentState.inspection.protection.evidence
+                        .adbeExtension.extensionLevel ?? 'unspecified'}
+                      . This declaration is not itself a usage right or a
+                      signature.
+                    </p>
                   )}
-                  .
-                </p>
+                  <p>
+                    Browser CMS integrity:{' '}
+                    {documentState.inspection.protection.evidence.cmsIntegrity.replaceAll(
+                      '_',
+                      ' ',
+                    )}
+                    ; signer trust:{' '}
+                    {documentState.inspection.protection.evidence.signerTrust.replaceAll(
+                      '_',
+                      ' ',
+                    )}
+                    .
+                  </p>
+                </details>
               </div>
             </div>
           )}
@@ -2573,7 +2862,7 @@ export function FormProofWorkbench() {
             </div>
           )}
           <div className="paper-frame pdf-frame">
-            {activePreviewUrl ? (
+            {activePreviewUrl && canPreview ? (
               <object
                 className="pdf-object"
                 data={activePreviewUrl}
@@ -2582,9 +2871,22 @@ export function FormProofWorkbench() {
               >
                 <p>
                   PDF preview unavailable.{' '}
-                  <a href={activePreviewUrl}>Open the document</a>.
+                  <a href={activePreviewUrl} target="_blank" rel="noopener">
+                    Open the document
+                  </a>
+                  .
                 </p>
               </object>
+            ) : activePreviewUrl ? (
+              <div className="pdf-empty" aria-live="polite">
+                <FileText aria-hidden="true" />
+                <strong>
+                  Inline PDF preview is not available in this browser.
+                </strong>
+                <a href={activePreviewUrl} target="_blank" rel="noopener">
+                  Open the PDF in a new tab
+                </a>
+              </div>
             ) : (
               <div className="pdf-empty" aria-live="polite">
                 <FileText aria-hidden="true" />
@@ -2644,6 +2946,75 @@ export function FormProofWorkbench() {
             <span className="queue-count">{draftEntries.length}</span>
           </div>
 
+          {documentState && (
+            <div className="prompt-card">
+              <p className="section-kicker">Try with an agent</p>
+              {toolState.status === 'ready' ? (
+                <>
+                  <p className="prompt-hint">
+                    Turn on agent field access above, then paste this into your
+                    agent.
+                  </p>
+                  <pre ref={agentPromptRef}>{AGENT_PROMPT}</pre>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => void copyAgentPrompt()}
+                  >
+                    {promptCopied ? 'Copied' : 'Copy prompt'}
+                  </Button>
+                </>
+              ) : (
+                <p>
+                  WebMCP was not detected. Open this page in the ChatGPT desktop
+                  browser or in Chrome with the experimental WebMCP flag
+                  enabled, then reload. Without an agent,{' '}
+                  {
+                    '"Stage synthetic demo plan" runs the same review and export flow.'
+                  }
+                </p>
+              )}
+            </div>
+          )}
+
+          {draftEntries.length === 0 ? (
+            documentState?.kind === 'demo' ? (
+              <Button
+                className="w-full"
+                size="lg"
+                onClick={() => void stageDemoPlan()}
+                disabled={!formState || loading}
+              >
+                Stage synthetic demo plan <ArrowRight aria-hidden="true" />
+              </Button>
+            ) : (
+              <Button
+                className="w-full"
+                size="lg"
+                variant="outline"
+                onClick={() => void loadDemo()}
+                disabled={loading}
+              >
+                Load built-in demo <RefreshCw aria-hidden="true" />
+              </Button>
+            )
+          ) : (
+            <Button
+              id="review-cta"
+              className="w-full"
+              size="lg"
+              onClick={() => openReview('human')}
+              disabled={
+                !documentState ||
+                documentState.inspection.protection.exportStrategies.length ===
+                  0
+              }
+            >
+              Review exact plan <ArrowRight aria-hidden="true" />
+            </Button>
+          )}
+
           {draftEntries.length === 0 ? (
             <div className="empty-review">
               <span>
@@ -2669,10 +3040,23 @@ export function FormProofWorkbench() {
                 const choiceLabelReviewNotice = getChoiceLabelReviewNotice(
                   descriptor?.choices ?? [],
                 );
+                const confidence = Math.round(
+                  entry.provenance.confidence * 100,
+                );
+                const beforeValue = formatValue(
+                  field?.sourceValue ?? null,
+                  descriptor?.choices,
+                );
+                const afterValue = formatValue(
+                  entry.value,
+                  descriptor?.choices,
+                );
                 return (
                   <div className="draft-card" key={entry.fieldName}>
                     <div className="draft-card-heading">
-                      <strong>{field?.label ?? entry.fieldName}</strong>
+                      <strong title={field?.label ?? entry.fieldName}>
+                        {field?.label ?? entry.fieldName}
+                      </strong>
                       <Badge variant="outline">
                         {importedProposal
                           ? 'Imported · review required'
@@ -2680,20 +3064,15 @@ export function FormProofWorkbench() {
                             ? 'Human locked'
                             : requiresIdentityReview
                               ? 'Verify field identity'
-                              : `${Math.round(entry.provenance.confidence * 100)}%`}
+                              : `${confidence}% confidence`}
                       </Badge>
                     </div>
                     <div
                       className={`mini-diff${isMultiline ? ' is-multiline' : ''}`}
                     >
-                      <span>
-                        {formatValue(
-                          field?.sourceValue ?? null,
-                          descriptor?.choices,
-                        )}
-                      </span>
+                      <span title={beforeValue}>{beforeValue}</span>
                       <ArrowRight aria-hidden="true" />
-                      <b>{formatValue(entry.value, descriptor?.choices)}</b>
+                      <b title={afterValue}>{afterValue}</b>
                     </div>
                     <small>
                       {importedProposal
@@ -2702,6 +3081,12 @@ export function FormProofWorkbench() {
                           ? 'human correction · agent locked for this session'
                           : claimedBasisLabel(entry.provenance.kind)}
                     </small>
+                    {entry.provenance.confidence < 0.8 && (
+                      <small className="human-only-note">
+                        Low confidence ({confidence}%) — the agent marked this
+                        as an inference; read the rationale.
+                      </small>
+                    )}
                     {requiresIdentityReview && (
                       <small className="human-only-note">
                         A non-authoritative discovery hint can recall this
@@ -2726,58 +3111,6 @@ export function FormProofWorkbench() {
                 );
               })}
             </div>
-          )}
-
-          <div className="prompt-card">
-            <p className="section-kicker">Try with an agent</p>
-            {toolState.status === 'ready' ? (
-              <blockquote>
-                “Inspect this form, stage my support details, and explain every
-                source.”
-              </blockquote>
-            ) : (
-              <p>
-                This browser can inspect PDFs locally, but agent staging needs a
-                WebMCP host. The built-in synthetic demo still shows the review
-                and export path.
-              </p>
-            )}
-          </div>
-
-          {draftEntries.length === 0 ? (
-            documentState?.kind === 'demo' ? (
-              <Button
-                className="w-full"
-                size="lg"
-                onClick={() => void stageDemoPlan()}
-                disabled={!formState || loading}
-              >
-                Stage synthetic demo plan <ArrowRight aria-hidden="true" />
-              </Button>
-            ) : (
-              <Button
-                className="w-full"
-                size="lg"
-                variant="outline"
-                onClick={() => void loadDemo()}
-                disabled={loading}
-              >
-                Load built-in demo <RefreshCw aria-hidden="true" />
-              </Button>
-            )
-          ) : (
-            <Button
-              className="w-full"
-              size="lg"
-              onClick={() => openReview('human')}
-              disabled={
-                !documentState ||
-                documentState.inspection.protection.exportStrategies.length ===
-                  0
-              }
-            >
-              Review exact plan <ArrowRight aria-hidden="true" />
-            </Button>
           )}
           {showValidationBlockerSummary ? (
             <section
@@ -2819,7 +3152,7 @@ export function FormProofWorkbench() {
           )}
 
           {releaseOpen && formState?.approval && outputResult && (
-            <div className="receipt-card">
+            <div ref={receiptRef} className="receipt-card">
               <div className="receipt-heading">
                 <span>
                   <CheckCircle2 aria-hidden="true" />
@@ -2890,19 +3223,29 @@ export function FormProofWorkbench() {
                   </dd>
                 </div>
               </dl>
-              <Button className="w-full" onClick={downloadOutput}>
-                <Download aria-hidden="true" />{' '}
-                {pendingHumanCompletionNames.length > 0
-                  ? 'Download PDF for completion'
-                  : outputResult.exportStrategy === 'filled_pdf'
+              <Button
+                className="receipt-download w-full"
+                onClick={downloadOutput}
+              >
+                <Download aria-hidden="true" />
+                <span>
+                  {outputResult.exportStrategy === 'filled_pdf'
                     ? 'Download filled PDF'
                     : 'Download confirmed derivative'}
+                  {hasPendingSignatureField && (
+                    <small>
+                      {
+                        'Sign "Applicant signature" in your PDF reader after download.'
+                      }
+                    </small>
+                  )}
+                </span>
               </Button>
             </div>
           )}
 
           {fillPackageResult && formState && (
-            <div className="receipt-card">
+            <div ref={receiptRef} className="receipt-card">
               <div className="receipt-heading">
                 <span>
                   <FileJson aria-hidden="true" />
@@ -2980,11 +3323,9 @@ export function FormProofWorkbench() {
             <p className="section-kicker">UI approval and export gate</p>
             <DialogTitle>Review the exact plan</DialogTitle>
             <DialogDescription>
-              Confirm, correct, or reject every proposed change, then confirm
-              any human-only field and verify every field found through a
-              non-authoritative discovery fallback. Approval is bound to this
-              source hash, plan hash, and revision; any later change invalidates
-              it.
+              Confirm, correct, or reject each proposed value, and acknowledge
+              the items only you can complete. Approval is tied to this exact
+              PDF and plan; if anything changes, you review again.
             </DialogDescription>
           </DialogHeader>
 
@@ -3019,13 +3360,17 @@ export function FormProofWorkbench() {
             )}
 
             <div>
-              <p className="section-kicker">Choose the artifact yourself</p>
+              <p className="section-kicker">1 · Choose the artifact yourself</p>
               <p className="button-note">
                 WebMCP reports the permitted strategies but cannot select one or
                 trigger export.
               </p>
             </div>
-            <div className="review-checklist" aria-label="Artifact choice">
+            <div
+              className="review-checklist"
+              role="radiogroup"
+              aria-label="Artifact choice"
+            >
               {documentState?.inspection.protection.exportStrategies.map(
                 (strategy) => {
                   const copy = exportStrategyCopy(strategy);
@@ -3064,7 +3409,9 @@ export function FormProofWorkbench() {
                         <span className="human-only-note">
                           {copy.detail}
                           {unavailable
-                            ? ' This PDF option is unavailable until its validation or native-action blockers are resolved.'
+                            ? hasBlockedPdfContent
+                              ? ' Unavailable: this PDF contains blocked active content.'
+                              : ` Unavailable: ${validationErrors.length} required fields are still blank.`
                             : ''}
                         </span>
                       </div>
@@ -3074,8 +3421,9 @@ export function FormProofWorkbench() {
               )}
             </div>
 
+            <p className="section-kicker">2 · Confirm every item</p>
             <div className="review-checklist">
-              {reviewNames.map((fieldName, index) => {
+              {orderedReviewNames.map((fieldName, index) => {
                 const field = formState?.fields[fieldName];
                 const staged = formState?.draft[fieldName];
                 const descriptor = descriptorByName.get(fieldName);
@@ -3085,6 +3433,11 @@ export function FormProofWorkbench() {
                 );
                 const checkboxId = `review-field-${index}`;
                 const isHumanCompletion = !staged;
+                const isFirstHumanCompletion =
+                  isHumanCompletion &&
+                  (index === 0 ||
+                    formState?.draft[orderedReviewNames[index - 1]] !==
+                      undefined);
                 const importedProposal = importedProposalSet.has(fieldName);
                 const isHumanPinned =
                   staged?.actor === 'human' && !importedProposal;
@@ -3109,196 +3462,210 @@ export function FormProofWorkbench() {
                       issue.fieldName === fieldName &&
                       issue.code === 'required_missing',
                   ) ?? false;
+                const confidence = Math.round(
+                  (staged?.provenance.confidence ?? 0) * 100,
+                );
+                const beforeValue = formatValue(
+                  field?.sourceValue ?? null,
+                  descriptor?.choices,
+                );
+                const afterValue = formatValue(
+                  staged?.value ?? null,
+                  descriptor?.choices,
+                );
                 return (
-                  <div className="review-check" key={fieldName}>
-                    <input
-                      id={checkboxId}
-                      type="checkbox"
-                      checked={confirmedFields.has(fieldName)}
-                      onChange={(event) => {
-                        setConfirmedFields((current) => {
-                          const next = new Set(current);
-                          if (event.target.checked) next.add(fieldName);
-                          else next.delete(fieldName);
-                          return next;
-                        });
-                      }}
-                      disabled={exporting || reviewMutating}
-                    />
-                    <div className="review-check-copy">
-                      <span className="review-check-heading">
-                        <label htmlFor={checkboxId}>
-                          <strong>
-                            {requiresIdentityReview
-                              ? `Verify field identity — ${field?.label ?? fieldName}`
-                              : (field?.label ?? fieldName)}
-                          </strong>
-                        </label>
-                        <Badge variant="outline">
-                          {importedProposal
-                            ? 'Imported · review required'
-                            : isHumanPinned
-                              ? 'Human correction · agent locked'
-                              : requiresIdentityReview
-                                ? 'Identity check required'
-                                : isRequiredMissing
-                                  ? 'Required field is blank'
-                                  : isHumanCompletion
-                                    ? requiresHumanCompletion
-                                      ? 'Complete after export'
-                                      : 'Preserved unchanged'
-                                    : staged
-                                      ? claimedBasisLabel(
-                                          staged.provenance.kind,
-                                        )
-                                      : 'Agent proposal'}
-                        </Badge>
-                      </span>
-                      {isHumanCompletion ? (
-                        <span className="human-only-note">
-                          {isRequiredMissing
-                            ? fillPackageAvailable
-                              ? 'This PDF marks the field as required and it is still blank. If you choose a fill package, confirm that it remains incomplete and complete the field manually.'
-                              : 'This PDF marks the field as required and it is still blank. A PDF artifact cannot be exported until the field is completed.'
-                            : requiresHumanCompletion
-                              ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
-                              : sourceIsBlank
-                                ? 'FormProof will preserve this blank field. Complete it personally in a trusted PDF reader if needed.'
-                                : 'FormProof will preserve the existing value and will not rewrite this field.'}
+                  <Fragment key={fieldName}>
+                    {isFirstHumanCompletion && (
+                      <p className="section-kicker human-only-kicker">
+                        Human-only items — you complete these after export
+                      </p>
+                    )}
+                    <div className="review-check">
+                      <input
+                        id={checkboxId}
+                        type="checkbox"
+                        checked={confirmedFields.has(fieldName)}
+                        onChange={(event) => {
+                          setConfirmedFields((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) next.add(fieldName);
+                            else next.delete(fieldName);
+                            return next;
+                          });
+                        }}
+                        disabled={exporting || reviewMutating}
+                      />
+                      <div className="review-check-copy">
+                        <span className="review-check-heading">
+                          <label htmlFor={checkboxId}>
+                            <strong>
+                              {requiresIdentityReview
+                                ? `Verify field identity — ${field?.label ?? fieldName}`
+                                : (field?.label ?? fieldName)}
+                            </strong>
+                          </label>
+                          <Badge variant="outline">
+                            {importedProposal
+                              ? 'Imported · review required'
+                              : isHumanPinned
+                                ? 'Human correction · agent locked'
+                                : requiresIdentityReview
+                                  ? 'Identity check required'
+                                  : isRequiredMissing
+                                    ? 'Required field is blank'
+                                    : isHumanCompletion
+                                      ? requiresHumanCompletion
+                                        ? 'Complete after export'
+                                        : 'Preserved unchanged'
+                                      : staged
+                                        ? `${confidence}% confidence`
+                                        : 'Agent proposal'}
+                          </Badge>
                         </span>
-                      ) : (
-                        <span
-                          className={`full-diff${isMultiline ? ' is-multiline' : ''}`}
-                        >
-                          <span>
-                            <small>Before</small>
-                            {formatValue(
-                              field?.sourceValue ?? null,
-                              descriptor?.choices,
+                        {isHumanCompletion ? (
+                          <span className="human-only-note">
+                            {isRequiredMissing
+                              ? fillPackageAvailable
+                                ? 'This PDF marks the field as required and it is still blank. If you choose a fill package, confirm that it remains incomplete and complete the field manually.'
+                                : 'This PDF marks the field as required and it is still blank. A PDF artifact cannot be exported until the field is completed.'
+                              : requiresHumanCompletion
+                                ? 'FormProof will not fill this field. Complete it personally in a trusted PDF reader.'
+                                : sourceIsBlank
+                                  ? 'FormProof will preserve this blank field. Complete it personally in a trusted PDF reader if needed.'
+                                  : 'FormProof will preserve the existing value and will not rewrite this field.'}
+                          </span>
+                        ) : (
+                          <span
+                            className={`full-diff${isMultiline ? ' is-multiline' : ''}`}
+                          >
+                            <span>
+                              <small>Before</small>
+                              <span title={beforeValue}>{beforeValue}</span>
+                            </span>
+                            <ArrowRight aria-hidden="true" />
+                            <span>
+                              <small>After</small>
+                              <b title={afterValue}>{afterValue}</b>
+                            </span>
+                          </span>
+                        )}
+                        {staged && staged.provenance.confidence < 0.8 && (
+                          <span className="human-only-note">
+                            Low confidence ({confidence}%) — the agent marked
+                            this as an inference; read the rationale.
+                          </span>
+                        )}
+                        {requiresIdentityReview && (
+                          <span className="human-only-note">
+                            This candidate can be recalled by a
+                            non-authoritative discovery hint. That hint is not
+                            the field label and is not evidence. Open the
+                            untouched original PDF and verify the displayed
+                            field at {formatFieldLocation(descriptor)}
+                            before checking this box.
+                          </span>
+                        )}
+                        {choiceLabelReviewNotice && (
+                          <span className="human-only-note">
+                            {choiceLabelReviewNotice}
+                          </span>
+                        )}
+                        {!isHumanCompletion && isRequiredMissing && (
+                          <span className="human-only-note">
+                            {fillPackageAvailable
+                              ? 'This staged value leaves a PDF-required field blank. A fill package can be reviewed only as incomplete; complete the field manually.'
+                              : 'This staged value leaves a PDF-required field blank. A PDF artifact cannot be exported until the field is completed.'}
+                          </span>
+                        )}
+                        {staged?.provenance.rationale && (
+                          <em>{staged.provenance.rationale}</em>
+                        )}
+                        {staged?.provenance.evidence && (
+                          <div className="evidence-block">
+                            <small>Evidence</small>
+                            <ul className="evidence-list">
+                              {staged.provenance.evidence
+                                .slice(0, 5)
+                                .map((item) => (
+                                  <li key={item}>{item}</li>
+                                ))}
+                            </ul>
+                            {staged.provenance.evidence.length > 5 && (
+                              <small>
+                                {formatCount(
+                                  staged.provenance.evidence.length - 5,
+                                  'additional evidence item',
+                                )}{' '}
+                                {staged.provenance.evidence.length - 5 === 1
+                                  ? 'was'
+                                  : 'were'}{' '}
+                                omitted from this view.
+                              </small>
                             )}
-                          </span>
-                          <ArrowRight aria-hidden="true" />
-                          <span>
-                            <small>After</small>
-                            <b>
-                              {formatValue(
-                                staged?.value ?? null,
-                                descriptor?.choices,
-                              )}
-                            </b>
-                          </span>
-                        </span>
-                      )}
-                      {requiresIdentityReview && (
-                        <span className="human-only-note">
-                          This candidate can be recalled by a non-authoritative
-                          discovery hint. That hint is not the field label and
-                          is not evidence. Open the untouched original PDF and
-                          verify the displayed field at{' '}
-                          {formatFieldLocation(descriptor)}
-                          before checking this box.
-                        </span>
-                      )}
-                      {choiceLabelReviewNotice && (
-                        <span className="human-only-note">
-                          {choiceLabelReviewNotice}
-                        </span>
-                      )}
-                      {!isHumanCompletion && isRequiredMissing && (
-                        <span className="human-only-note">
-                          {fillPackageAvailable
-                            ? 'This staged value leaves a PDF-required field blank. A fill package can be reviewed only as incomplete; complete the field manually.'
-                            : 'This staged value leaves a PDF-required field blank. A PDF artifact cannot be exported until the field is completed.'}
-                        </span>
-                      )}
-                      {staged?.provenance.rationale && (
-                        <em>{staged.provenance.rationale}</em>
-                      )}
-                      {staged?.provenance.evidence && (
-                        <div className="evidence-block">
-                          <small>Evidence</small>
-                          <ul className="evidence-list">
-                            {staged.provenance.evidence
-                              .slice(0, 5)
-                              .map((item) => (
-                                <li key={item}>{item}</li>
-                              ))}
-                          </ul>
-                          {staged.provenance.evidence.length > 5 && (
-                            <small>
-                              {formatCount(
-                                staged.provenance.evidence.length - 5,
-                                'additional evidence item',
-                              )}{' '}
-                              {staged.provenance.evidence.length - 5 === 1
-                                ? 'was'
-                                : 'were'}{' '}
-                              omitted from this view.
-                            </small>
-                          )}
-                        </div>
-                      )}
-                      {correctionFieldName === fieldName &&
-                      canCorrect &&
-                      staged &&
-                      field ? (
-                        <HumanCorrectionEditor
-                          field={field}
-                          choices={descriptor?.choices ?? []}
-                          multiline={isMultiline}
-                          initialValue={staged.value}
-                          disabled={exporting || reviewMutating}
-                          onCancel={() => setCorrectionFieldName(null)}
-                          onSave={(value) =>
-                            void correctProposal(fieldName, value)
-                          }
-                        />
-                      ) : isHumanPinned ? (
-                        <Button
-                          type="button"
-                          className="self-start"
-                          variant="destructive"
-                          size="xs"
-                          onClick={() =>
-                            void rejectProposals([fieldName], 'unlock')
-                          }
-                          disabled={exporting || reviewMutating}
-                        >
-                          Remove correction &amp; let agent suggest
-                        </Button>
-                      ) : staged ? (
-                        <div className="flex flex-wrap gap-2">
-                          {canCorrect && (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="xs"
-                              onClick={() => {
-                                setCorrectionFieldName(fieldName);
-                                setConfirmedFields((current) => {
-                                  const next = new Set(current);
-                                  next.delete(fieldName);
-                                  return next;
-                                });
-                              }}
-                              disabled={exporting || reviewMutating}
-                            >
-                              <Pencil aria-hidden="true" /> Correct value
-                            </Button>
-                          )}
+                          </div>
+                        )}
+                        {correctionFieldName === fieldName &&
+                        canCorrect &&
+                        staged &&
+                        field ? (
+                          <HumanCorrectionEditor
+                            field={field}
+                            choices={descriptor?.choices ?? []}
+                            multiline={isMultiline}
+                            initialValue={staged.value}
+                            disabled={exporting || reviewMutating}
+                            onCancel={() => setCorrectionFieldName(null)}
+                            onSave={(value) =>
+                              void correctProposal(fieldName, value)
+                            }
+                          />
+                        ) : isHumanPinned ? (
                           <Button
                             type="button"
+                            className="self-start"
                             variant="destructive"
                             size="xs"
-                            onClick={() => void rejectProposals([fieldName])}
+                            onClick={() =>
+                              void rejectProposals([fieldName], 'unlock')
+                            }
                             disabled={exporting || reviewMutating}
                           >
-                            Reject proposal
+                            Remove correction &amp; let agent suggest
                           </Button>
-                        </div>
-                      ) : null}
+                        ) : staged ? (
+                          <div className="flex flex-wrap gap-2">
+                            {canCorrect && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="xs"
+                                onClick={() => {
+                                  setCorrectionFieldName(fieldName);
+                                  setConfirmedFields((current) => {
+                                    const next = new Set(current);
+                                    next.delete(fieldName);
+                                    return next;
+                                  });
+                                }}
+                                disabled={exporting || reviewMutating}
+                              >
+                                <Pencil aria-hidden="true" /> Correct value
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              size="xs"
+                              onClick={() => void rejectProposals([fieldName])}
+                              disabled={exporting || reviewMutating}
+                            >
+                              Reject proposal
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
+                  </Fragment>
                 );
               })}
               {requiresActiveContentAcknowledgment && (
@@ -3372,11 +3739,25 @@ export function FormProofWorkbench() {
                   ? 'Filled PDF: the original bytes stay unchanged. A new PDF is reopened, its staged values are verified, and normal appearance streams are confirmed present. Visual rendering is not independently checked. Human-only fields remain untouched.'
                   : selectedExportStrategy === 'confirmed_plain_derivative_pdf'
                     ? 'Confirmed derivative: the original stays unchanged, but the new PDF intentionally loses its recognized Reader Extensions rights. No signature-preservation claim is made.'
-                    : 'Original-untouched fill package: no PDF bytes are written. The JSON package is round-trip checked and bound to this source and plan; it is not a completed PDF form.'}
+                    : selectedExportStrategy === 'fill_package'
+                      ? 'Original-untouched fill package: no PDF bytes are written. The JSON package is round-trip checked and bound to this source and plan; it is not a completed PDF form.'
+                      : 'Pick the artifact above, then confirm every listed item. The approve button unlocks when all are checked.'}
               </span>
             </div>
           </div>
 
+          <p className="review-progress" aria-live="polite">
+            {confirmedReviewCount}/{reviewNames.length} items confirmed
+            {reviewProgressSuffix.length > 0
+              ? ` · ${reviewProgressSuffix.join(' · ')}`
+              : ''}
+          </p>
+          {error && (
+            <div role="alert" className="dialog-safety-note notice-error">
+              <TriangleAlert aria-hidden="true" />
+              <span>{error}</span>
+            </div>
+          )}
           <DialogFooter>
             <Button
               type="button"
@@ -3436,7 +3817,9 @@ export function FormProofWorkbench() {
                     : selectedExportStrategy ===
                         'confirmed_plain_derivative_pdf'
                       ? 'Confirm & create plain derivative'
-                      : 'Create original-untouched fill package'}
+                      : selectedExportStrategy === 'fill_package'
+                        ? 'Create original-untouched fill package'
+                        : 'Choose an artifact and confirm every item'}
                 </>
               )}
             </Button>
