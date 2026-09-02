@@ -4475,7 +4475,13 @@ function fieldAllowsMultiple(field: PDFField): boolean {
 }
 
 function fieldValue(field: PDFField): PdfFieldValue {
-  if (field instanceof PDFTextField) return field.getText() ?? '';
+  if (field instanceof PDFTextField) {
+    try {
+      return field.getText() ?? '';
+    } catch {
+      return '';
+    }
+  }
   if (field instanceof PDFCheckBox) {
     const recoveredOptions = recoveredCheckBoxRadioOptions(field);
     if (recoveredOptions) {

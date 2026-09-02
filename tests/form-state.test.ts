@@ -221,6 +221,48 @@ void test('maps inspected PDF fields through the shared UI and eval contract', (
   );
 });
 
+void test('degrades only malformed inspected PDF fields to read-only text', async () => {
+  const source = await createPdfWithInvalidFieldConfigurations();
+  const inspection = await inspectPdf(source);
+  const state = await createFormState(
+    {
+      fileName: 'invalid-fields.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+
+  const degradedValues = new Map<string, string>([
+    ['invalid_dropdown', 'C'],
+    ['overlong_text', 'toolongvalue'],
+    ['no_options_dropdown', ''],
+    ['empty_radio', ''],
+    ['invalid_radio', 'Maybe'],
+    ['invalid_option_list', 'x, zzz'],
+  ]);
+  for (const [fieldName, sourceValue] of degradedValues) {
+    const field = state.fields[fieldName];
+    assert.ok(field, `${fieldName} was not inspected`);
+    assert.equal(field.type, 'text', fieldName);
+    assert.equal(field.readOnly, true, fieldName);
+    assert.equal(field.humanOnly, true, fieldName);
+    assert.equal(field.sourceValue, sourceValue, fieldName);
+  }
+  assert.equal(state.fields.invalid_dropdown.required, true);
+
+  assert.deepEqual(state.fields.safe, {
+    name: 'safe',
+    label: 'safe',
+    type: 'text',
+    required: false,
+    readOnly: false,
+    humanOnly: false,
+    sourceValue: 'unchanged',
+  });
+});
+
 async function createTextFormPdf(fieldName: string): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([320, 180]);
@@ -228,6 +270,90 @@ async function createTextFormPdf(fieldName: string): Promise<Uint8Array> {
   field.addToPage(page, { x: 40, y: 80, width: 240, height: 28 });
   return Uint8Array.from(
     await document.save({ addDefaultPage: false, useObjectStreams: false }),
+  );
+}
+
+async function createPdfWithInvalidFieldConfigurations(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([520, 720]);
+  const form = document.getForm();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+
+  const safe = form.createTextField('safe');
+  safe.setText('unchanged');
+  safe.addToPage(page, { x: 40, y: 650, width: 200, height: 24, font });
+
+  const invalidDropdown = form.createDropdown('invalid_dropdown');
+  invalidDropdown.addOptions(['A', 'B']);
+  invalidDropdown.enableRequired();
+  invalidDropdown.addToPage(page, {
+    x: 40,
+    y: 600,
+    width: 200,
+    height: 24,
+    font,
+  });
+
+  const overlongText = form.createTextField('overlong_text');
+  overlongText.setMaxLength(5);
+  overlongText.addToPage(page, {
+    x: 40,
+    y: 550,
+    width: 200,
+    height: 24,
+    font,
+  });
+
+  const noOptionsDropdown = form.createDropdown('no_options_dropdown');
+  noOptionsDropdown.addOptions('placeholder');
+  noOptionsDropdown.addToPage(page, {
+    x: 40,
+    y: 500,
+    width: 200,
+    height: 24,
+    font,
+  });
+
+  form.createRadioGroup('empty_radio');
+
+  const invalidRadio = form.createRadioGroup('invalid_radio');
+  invalidRadio.addOptionToPage('Yes', page, {
+    x: 40,
+    y: 450,
+    width: 18,
+    height: 18,
+  });
+
+  const invalidOptionList = form.createOptionList('invalid_option_list');
+  invalidOptionList.addOptions(['x', 'y']);
+  invalidOptionList.enableMultiselect();
+  invalidOptionList.addToPage(page, {
+    x: 40,
+    y: 330,
+    width: 200,
+    height: 80,
+    font,
+  });
+
+  form.updateFieldAppearances(font);
+  invalidDropdown.acroField.dict.set(PDFName.of('V'), PDFString.of('C'));
+  overlongText.acroField.dict.set(
+    PDFName.of('V'),
+    PDFString.of('toolongvalue'),
+  );
+  noOptionsDropdown.acroField.dict.delete(PDFName.of('Opt'));
+  invalidRadio.acroField.dict.set(PDFName.of('V'), PDFName.of('Maybe'));
+  invalidOptionList.acroField.dict.set(
+    PDFName.of('V'),
+    document.context.obj([PDFString.of('x'), PDFString.of('zzz')]),
+  );
+
+  return Uint8Array.from(
+    await document.save({
+      addDefaultPage: false,
+      updateFieldAppearances: false,
+      useObjectStreams: false,
+    }),
   );
 }
 
@@ -1165,6 +1291,146 @@ void test('rejects duplicate, unknown, read-only, human-only, signature, type, a
     assert.equal(codes.has(expected as never), true, `missing ${expected}`);
   }
   assert.equal(result.state, state);
+});
+
+void test('rejects unsupported text and option-list control characters', async () => {
+  const state = await initialState();
+  for (const value of ['Ada\u0000Lovelace', 'Ada\u202eLovelace']) {
+    const result = await stageFieldUpdates(state, {
+      expectedStateVersion: state.stateVersion,
+      expectedSourceHash: state.source.sourceHash,
+      actor: 'agent',
+      updates: [
+        {
+          fieldName: 'full_name',
+          value,
+          provenance: USER_PROVENANCE,
+        },
+      ],
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error('unsupported control character was staged');
+    assert.equal(result.errors[0].code, 'invalid_type');
+  }
+
+  const optionListResult = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'programs',
+        value: ['Health\u202e'],
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(optionListResult.ok, false);
+  if (optionListResult.ok) {
+    throw new Error('option-list control character was staged');
+  }
+  assert.equal(optionListResult.errors[0].code, 'invalid_type');
+});
+
+void test('accepts multiline text and counts maxLength in code points', async () => {
+  const state = await createFormState(SOURCE, [
+    {
+      name: 'bounded_text',
+      label: 'Bounded text',
+      type: 'text',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      maxLength: 2,
+      sourceValue: '',
+    },
+    {
+      name: 'multiline_text',
+      label: 'Multiline text',
+      type: 'text',
+      required: false,
+      readOnly: false,
+      humanOnly: false,
+      sourceValue: '',
+    },
+  ]);
+  const result = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'bounded_text',
+        value: '🙂🙂',
+        provenance: USER_PROVENANCE,
+      },
+      {
+        fieldName: 'multiline_text',
+        value: 'Line one\nLine two',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error('valid Unicode text was rejected');
+  assert.equal(result.state.draft.bounded_text.value, '🙂🙂');
+  assert.equal(result.state.draft.multiline_text.value, 'Line one\nLine two');
+});
+
+void test('treats whitespace-only required text as missing', async () => {
+  const state = await initialState();
+  const result = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'full_name',
+        value: '   ',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error('whitespace staging unexpectedly failed');
+  assert.equal(result.state.validation.canApprove, false);
+  assert.ok(
+    result.state.validation.issues.some(
+      ({ code, fieldName }) =>
+        code === 'required_missing' && fieldName === 'full_name',
+    ),
+  );
+});
+
+void test('returns invalid_provenance for malformed runtime provenance', async () => {
+  const state = await initialState();
+  const malformed = [
+    {
+      kind: 'source_document',
+      confidence: 1,
+      evidence: 42,
+    } as unknown as FieldProvenance,
+    null as unknown as FieldProvenance,
+  ];
+
+  for (const provenance of malformed) {
+    const result = await stageFieldUpdates(state, {
+      expectedStateVersion: state.stateVersion,
+      expectedSourceHash: state.source.sourceHash,
+      actor: 'agent',
+      updates: [
+        {
+          fieldName: 'full_name',
+          value: 'Ada Lovelace',
+          provenance,
+        },
+      ],
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error('malformed provenance was staged');
+    assert.equal(result.errors[0].code, 'invalid_provenance');
+    assert.equal(result.state, state);
+  }
 });
 
 void test('enforces per-field and cumulative provenance budgets atomically', async () => {
@@ -2435,6 +2701,52 @@ void test('refuses a usage-rights derivative without explicit human confirmation
   assert.equal(rejected.state.output, null);
   assert.equal(rejected.state.verification, null);
   assert.deepEqual(source, sourceSnapshot, 'source PDF bytes were modified');
+});
+
+void test('returns verification_failed when the PDF engine rejects an approved value', async () => {
+  const source = await createTextFormPdf('legal_name');
+  const inspection = await inspectPdf(source);
+  const state = await createFormState(
+    {
+      fileName: 'unsupported-glyph.pdf',
+      sourceHash: inspection.sourceHash,
+      byteLength: source.byteLength,
+      pageCount: inspection.pageCount,
+    },
+    inspection.fields.map(createFormFieldDefinitionFromPdf),
+  );
+  const staged = await stageFieldUpdates(state, {
+    expectedStateVersion: state.stateVersion,
+    expectedSourceHash: state.source.sourceHash,
+    actor: 'agent',
+    updates: [
+      {
+        fieldName: 'legal_name',
+        value: '漢字',
+        provenance: USER_PROVENANCE,
+      },
+    ],
+  });
+  assert.equal(staged.ok, true);
+  if (!staged.ok) throw new Error('CJK value failed to stage');
+  const approved = approveDraftFromUi(staged.state, {
+    expectedStateVersion: staged.state.stateVersion,
+    expectedSourceHash: staged.state.source.sourceHash,
+    expectedPlanHash: staged.state.planHash,
+    approvedBy: 'local user',
+    confirmedFieldNames: ['legal_name'],
+  });
+  assert.equal(approved.ok, true);
+  if (!approved.ok) throw new Error('CJK value failed approval');
+
+  const exported = await exportApprovedPdfFromUi(approved.state, source);
+  assert.equal(exported.ok, false);
+  if (exported.ok) throw new Error('unsupported glyph PDF was exported');
+  assert.equal(exported.state, approved.state);
+  assert.deepEqual(
+    exported.errors.map(({ code, fieldName }) => ({ code, fieldName })),
+    [{ code: 'verification_failed', fieldName: 'legal_name' }],
+  );
 });
 
 void test('rejects a forged Grace export and releases only the exact approved Ada PDF', async () => {

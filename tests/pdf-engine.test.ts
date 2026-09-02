@@ -2190,6 +2190,25 @@ void test('rejects encrypted PDFs before inspection', async () => {
   await expectEngineError(inspectPdf(encrypted), 'PDF_ENCRYPTED');
 });
 
+void test('inspects rich-text fields without a plain value', async () => {
+  const document = await PDFDocument.create();
+  const page = document.addPage([320, 180]);
+  const field = document.getForm().createTextField('rich_text');
+  field.addToPage(page, { x: 40, y: 80, width: 240, height: 28 });
+  field.enableRichFormatting();
+  field.acroField.dict.delete(PDFName.of('V'));
+  const source = await document.save({
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+    useObjectStreams: false,
+  });
+
+  const inspection = await inspectPdf(source);
+  const inspected = inspection.fields.find(({ name }) => name === 'rich_text');
+  assert.equal(inspected?.type, 'text');
+  assert.equal(inspected?.current, '');
+});
+
 void test('inspects a blank signature as a human-only field', async () => {
   const inspection = await inspectPdf(await demoBytes());
   const signature = inspection.fields.find(
