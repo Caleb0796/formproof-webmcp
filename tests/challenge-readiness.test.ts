@@ -104,10 +104,7 @@ void test('publishes challenge metadata without making the npm package public', 
   assert.match(readme, /Deterministic catalog and replay/u);
   assert.match(readme, /Chrome Browser smoke/u);
   assert.match(readme, /Codex live model eval/u);
-  assert.match(
-    readme,
-    /\[`FormProof-WebMCP-Live-Demo\.mp4`\]\(FormProof-WebMCP-Live-Demo\.mp4\)/u,
-  );
+  assert.match(readme, /https:\/\/www\.youtube\.com\/watch\?v=2iOTurA7E3E/u);
   assert.doesNotMatch(readme, /\b(?:pending|TBD)\b|at submission time/iu);
   assert.doesNotMatch(readme, /264\/264/u);
   assert.match(gitignore, /^\/tmp\/$/mu);

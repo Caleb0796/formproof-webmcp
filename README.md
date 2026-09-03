@@ -7,7 +7,7 @@ FormProof is a local-first PDF form workbench where an agent can inspect and sta
 
 **Live app:** [formproof-webmcp.skywalker1226.chatgpt.site](https://formproof-webmcp.skywalker1226.chatgpt.site)
 
-> Evaluation scope: judges evaluate the live app and this repository at the deployed commit. The demo video is committed as [`FormProof-WebMCP-Live-Demo.mp4`](FormProof-WebMCP-Live-Demo.mp4) and is also available on the Devpost page. The state of each evidence layer is described under [Evaluation layers](#evaluation-layers).
+> Evaluation scope: judges evaluate the live app and this repository at the deployed commit. The [public demo video](https://www.youtube.com/watch?v=2iOTurA7E3E) is available on YouTube and the Devpost page. The state of each evidence layer is described under [Evaluation layers](#evaluation-layers).
 
 ## Try it in 30 seconds
 
@@ -150,7 +150,7 @@ Every evidence release is expected to contain:
 
 Selective reruns are not accepted. If a product issue is fixed, retain the old failed release and run the complete 18-run suite again from the new commit.
 
-**Public demo video:** [`FormProof-WebMCP-Live-Demo.mp4`](FormProof-WebMCP-Live-Demo.mp4) is committed in this repository, runs approximately 2:30, and shows the problem and WebMCP value, staging and exact review, a human lock plus the dangerous-PDF Fill package, and the architecture and execution evidence.
+**Public demo video:** [Watch on YouTube](https://www.youtube.com/watch?v=2iOTurA7E3E) (2:42). It shows the problem and WebMCP value, staging and exact review, a human lock plus the dangerous-PDF Fill package, and the architecture and execution evidence.
 
 ## Current limitations
 
